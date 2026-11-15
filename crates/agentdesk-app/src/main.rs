@@ -11,7 +11,10 @@ use gpui::{
     WindowOptions, point, px, size,
 };
 
-use ui::{NewChat, Quit, Reconnect, RootView, StopTurn, ToggleSidebar};
+use ui::{
+    AttachFiles, CompactChat, FocusComposer, NewChat, OpenPalette, OpenSettings, Quit, Reconnect,
+    ReviewChanges, RootView, StopTurn, ToggleSidebar,
+};
 
 fn main() {
     env_logger::Builder::from_env(
@@ -30,32 +33,57 @@ fn main() {
                 KeyBinding::new("ctrl-n", NewChat, None),
                 KeyBinding::new("cmd-b", ToggleSidebar, None),
                 KeyBinding::new("ctrl-b", ToggleSidebar, None),
+                KeyBinding::new("cmd-k", OpenPalette, None),
+                KeyBinding::new("ctrl-k", OpenPalette, None),
+                KeyBinding::new("cmd-,", OpenSettings, None),
+                KeyBinding::new("ctrl-,", OpenSettings, None),
+                KeyBinding::new("cmd-l", FocusComposer, None),
+                KeyBinding::new("ctrl-l", FocusComposer, None),
+                KeyBinding::new("cmd-shift-a", AttachFiles, None),
                 KeyBinding::new("cmd-.", StopTurn, None),
+                KeyBinding::new("ctrl-.", StopTurn, None),
                 KeyBinding::new("cmd-q", Quit, None),
             ]);
             cx.on_action(|_: &Quit, cx| cx.quit());
+            ui::register_actions(cx);
+            let menu = |name: &str, items| Menu {
+                name: name.to_string().into(),
+                disabled: false,
+                items,
+            };
             cx.set_menus([
-                Menu {
-                    name: "AgentDesk".into(),
-                    disabled: false,
-                    items: vec![MenuItem::action("Quit AgentDesk", Quit)],
-                },
-                Menu {
-                    name: "File".into(),
-                    disabled: false,
-                    items: vec![
+                menu(
+                    "AgentDesk",
+                    vec![
+                        MenuItem::action("Settings…", OpenSettings),
+                        MenuItem::separator(),
+                        MenuItem::action("Quit AgentDesk", Quit),
+                    ],
+                ),
+                menu(
+                    "File",
+                    vec![
                         MenuItem::action("New Chat", NewChat),
+                        MenuItem::action("Attach Files…", AttachFiles),
+                        MenuItem::separator(),
                         MenuItem::action("Restart Codex", Reconnect),
                     ],
-                },
-                Menu {
-                    name: "View".into(),
-                    disabled: false,
-                    items: vec![
-                        MenuItem::action("Toggle Sidebar", ToggleSidebar),
+                ),
+                menu(
+                    "Chat",
+                    vec![
+                        MenuItem::action("Command Palette", OpenPalette),
+                        MenuItem::action("Focus Composer", FocusComposer),
                         MenuItem::action("Stop Answer", StopTurn),
+                        MenuItem::separator(),
+                        MenuItem::action("Review Uncommitted Changes", ReviewChanges),
+                        MenuItem::action("Compact Conversation", CompactChat),
                     ],
-                },
+                ),
+                menu(
+                    "View",
+                    vec![MenuItem::action("Toggle Sidebar", ToggleSidebar)],
+                ),
             ]);
 
             let bounds = Bounds::centered(None, size(px(1180.), px(800.)), cx);

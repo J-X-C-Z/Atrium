@@ -17,5 +17,7 @@ pub mod translate;
 
 mod client;
 
-pub use client::{CodexClient, CodexConfig, ModelInfo, StartThread};
+pub use client::{
+    AccessMode, CodexClient, CodexConfig, ModelInfo, ReviewTarget, StartThread, TurnRequest,
+};
 pub use rpc::{Incoming, RpcError};

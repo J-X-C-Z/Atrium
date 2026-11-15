@@ -45,6 +45,97 @@ pub struct ModelInfo {
     pub display_name: String,
     pub description: String,
     pub is_default: bool,
+    /// Reasoning efforts the model accepts, such as `low`, `medium`, `high`.
+    pub efforts: Vec<String>,
+    pub default_effort: Option<String>,
+}
+
+/// How much Codex may do without asking, as Codex's own UI offers it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AccessMode {
+    /// Reads files; asks before any write or command outside the sandbox.
+    ReadOnly,
+    /// Writes in the workspace and runs commands there; asks for anything beyond.
+    #[default]
+    Auto,
+    /// No sandbox and no questions.
+    FullAccess,
+}
+
+impl AccessMode {
+    pub const ALL: [AccessMode; 3] = [
+        AccessMode::ReadOnly,
+        AccessMode::Auto,
+        AccessMode::FullAccess,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AccessMode::ReadOnly => "Read only",
+            AccessMode::Auto => "Auto",
+            AccessMode::FullAccess => "Full access",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            AccessMode::ReadOnly => "Reads files. Asks before editing or running commands.",
+            AccessMode::Auto => "Edits and runs commands in the workspace. Asks for more.",
+            AccessMode::FullAccess => "Edits anything and runs anything without asking.",
+        }
+    }
+
+    pub fn approval_policy(self) -> &'static str {
+        match self {
+            AccessMode::ReadOnly | AccessMode::Auto => "on-request",
+            AccessMode::FullAccess => "never",
+        }
+    }
+
+    pub fn sandbox_mode(self) -> &'static str {
+        match self {
+            AccessMode::ReadOnly => "read-only",
+            AccessMode::Auto => "workspace-write",
+            AccessMode::FullAccess => "danger-full-access",
+        }
+    }
+
+    /// The per-turn sandbox policy object `turn/start` takes.
+    pub fn sandbox_policy(self) -> Value {
+        match self {
+            AccessMode::ReadOnly => json!({ "type": "readOnly", "networkAccess": false }),
+            AccessMode::Auto => json!({
+                "type": "workspaceWrite",
+                "writableRoots": [],
+                "networkAccess": false,
+                "excludeTmpdirEnvVar": false,
+                "excludeSlashTmp": false,
+            }),
+            AccessMode::FullAccess => json!({ "type": "dangerFullAccess" }),
+        }
+    }
+}
+
+/// One message from the user, with what it carries and how to run it.
+#[derive(Clone, Debug, Default)]
+pub struct TurnRequest {
+    pub text: String,
+    /// Local image files to show the model.
+    pub images: Vec<PathBuf>,
+    /// Files the message mentions with `@`.
+    pub mentions: Vec<PathBuf>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub mode: Option<AccessMode>,
+}
+
+/// What `review/start` looks at.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReviewTarget {
+    UncommittedChanges,
+    BaseBranch(String),
+    Custom(String),
 }
 
 /// Kills the server when the last client handle goes.
@@ -209,21 +300,90 @@ impl CodexClient {
     }
 
     /// Sends the user's message, starting a turn. Returns the turn's id.
-    pub async fn turn_start(
-        &self,
-        thread_id: &str,
-        text: &str,
-        model: Option<&str>,
-    ) -> Result<String> {
-        let mut params = json!({
-            "threadId": thread_id,
-            "input": [{ "type": "text", "text": text, "text_elements": [] }],
-        });
-        if let Some(model) = model {
+    pub async fn turn_start(&self, thread_id: &str, request: TurnRequest) -> Result<String> {
+        let mut input = vec![json!({ "type": "text", "text": request.text, "text_elements": [] })];
+        for image in &request.images {
+            input.push(json!({ "type": "localImage", "path": image.display().to_string() }));
+        }
+        for path in &request.mentions {
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.display().to_string());
+            input.push(
+                json!({ "type": "mention", "name": name, "path": path.display().to_string() }),
+            );
+        }
+        let mut params = json!({ "threadId": thread_id, "input": input });
+        if let Some(model) = request.model {
             params["model"] = json!(model);
+        }
+        if let Some(effort) = request.effort {
+            params["effort"] = json!(effort);
+        }
+        if let Some(mode) = request.mode {
+            params["approvalPolicy"] = json!(mode.approval_policy());
+            params["sandboxPolicy"] = mode.sandbox_policy();
         }
         let result = self.connection.request("turn/start", params).await?;
         Ok(str_of(&result["turn"], "id"))
+    }
+
+    pub async fn thread_set_name(&self, thread_id: &str, name: &str) -> Result<()> {
+        self.connection
+            .request(
+                "thread/name/set",
+                json!({ "threadId": thread_id, "name": name }),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Summarizes the thread's history to free context.
+    pub async fn thread_compact(&self, thread_id: &str) -> Result<()> {
+        self.connection
+            .request("thread/compact/start", json!({ "threadId": thread_id }))
+            .await?;
+        Ok(())
+    }
+
+    /// Starts a code review turn inline in the thread.
+    pub async fn review_start(&self, thread_id: &str, target: ReviewTarget) -> Result<()> {
+        let target = match target {
+            ReviewTarget::UncommittedChanges => json!({ "type": "uncommittedChanges" }),
+            ReviewTarget::BaseBranch(branch) => json!({ "type": "baseBranch", "branch": branch }),
+            ReviewTarget::Custom(instructions) => {
+                json!({ "type": "custom", "instructions": instructions })
+            }
+        };
+        self.connection
+            .request(
+                "review/start",
+                json!({ "threadId": thread_id, "target": target }),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Files under `root` matching `query`, best first, as paths relative to `root`.
+    pub async fn fuzzy_file_search(&self, query: &str, root: &str) -> Result<Vec<String>> {
+        let result = self
+            .connection
+            .request(
+                "fuzzyFileSearch",
+                json!({ "query": query, "roots": [root], "cancellationToken": null }),
+            )
+            .await?;
+        Ok(result["files"]
+            .as_array()
+            .map(|files| {
+                files
+                    .iter()
+                    .filter(|file| file["match_type"] != "directory")
+                    .filter_map(|file| file["path"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default())
     }
 
     pub async fn turn_interrupt(&self, thread_id: &str, turn_id: &str) -> Result<()> {
@@ -252,6 +412,18 @@ impl CodexClient {
                             .unwrap_or_else(|| str_of(m, "model")),
                         description: str_of(m, "description"),
                         is_default: m["isDefault"].as_bool().unwrap_or(false),
+                        efforts: m["supportedReasoningEfforts"]
+                            .as_array()
+                            .map(|efforts| {
+                                efforts
+                                    .iter()
+                                    .filter_map(|e| {
+                                        e["reasoningEffort"].as_str().map(str::to_owned)
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        default_effort: m["defaultReasoningEffort"].as_str().map(str::to_owned),
                     })
                     .collect()
             })

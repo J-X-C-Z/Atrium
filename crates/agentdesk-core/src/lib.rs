@@ -15,4 +15,4 @@ pub use model::{
     ChangeKind, FileChange, Item, ItemStatus, PlanStep, RequestId, ThreadMeta, TokenUsage,
     TurnStatus,
 };
-pub use transcript::{Entry, EntryKind, Transcript};
+pub use transcript::{Entry, EntryKind, Transcript, TurnSummary};

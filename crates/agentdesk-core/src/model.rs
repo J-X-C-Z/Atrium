@@ -90,6 +90,8 @@ pub enum Item {
     User {
         id: String,
         text: String,
+        /// Paths of attached images and mentioned files.
+        attachments: Vec<String>,
     },
     Agent {
         id: String,

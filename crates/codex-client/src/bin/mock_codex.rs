@@ -160,8 +160,10 @@ fn handle(method: &str, id: Value, params: Value, out: &Out, state: &Arc<State>)
             out,
             id,
             json!({"data": [
-                {"id": "mock-1", "model": "mock-1", "displayName": "Mock 1", "description": "Fast scripted answers", "hidden": false, "isDefault": true},
-                {"id": "mock-1-pro", "model": "mock-1-pro", "displayName": "Mock 1 Pro", "description": "Same script, more gravitas", "hidden": false, "isDefault": false}
+                {"id": "mock-1", "model": "mock-1", "displayName": "Mock 1", "description": "Fast scripted answers", "hidden": false, "isDefault": true,
+                 "supportedReasoningEfforts": [{"reasoningEffort": "low", "description": ""}, {"reasoningEffort": "medium", "description": ""}, {"reasoningEffort": "high", "description": ""}], "defaultReasoningEffort": "medium"},
+                {"id": "mock-1-pro", "model": "mock-1-pro", "displayName": "Mock 1 Pro", "description": "Same script, more gravitas", "hidden": false, "isDefault": false,
+                 "supportedReasoningEfforts": [{"reasoningEffort": "medium", "description": ""}, {"reasoningEffort": "high", "description": ""}, {"reasoningEffort": "xhigh", "description": ""}], "defaultReasoningEffort": "high"}
             ], "nextCursor": null}),
         ),
         "thread/list" => {
@@ -221,18 +223,27 @@ fn handle(method: &str, id: Value, params: Value, out: &Out, state: &Arc<State>)
             state.threads.lock().unwrap().retain(|t| t.id != wanted);
             reply(out, id, json!({}));
         }
-        "turn/start" => {
+        "turn/start" | "review/start" => {
             let thread_id = params["threadId"].as_str().unwrap_or_default().to_string();
-            let text = params["input"][0]["text"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string();
+            let input = if method == "review/start" {
+                let what = match params["target"]["type"].as_str() {
+                    Some("custom") => params["target"]["instructions"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string(),
+                    _ => "review the uncommitted changes".to_string(),
+                };
+                json!([{"type": "text", "text": format!("/review {what}"), "text_elements": []}])
+            } else {
+                params["input"].clone()
+            };
             let turn_id = next_id("turn");
-            reply(
-                out,
-                id,
-                json!({"turn": {"id": turn_id, "status": "inProgress", "items": []}}),
-            );
+            let turn = json!({"id": turn_id, "status": "inProgress", "items": []});
+            if method == "review/start" {
+                reply(out, id, json!({"turn": turn, "reviewThreadId": thread_id}));
+            } else {
+                reply(out, id, json!({"turn": turn}));
+            }
             let stop = Arc::new(AtomicBool::new(false));
             state
                 .interrupts
@@ -240,7 +251,65 @@ fn handle(method: &str, id: Value, params: Value, out: &Out, state: &Arc<State>)
                 .unwrap()
                 .insert(turn_id.clone(), stop.clone());
             let (out, state) = (out.clone(), state.clone());
-            thread::spawn(move || run_turn(&out, &state, &thread_id, &turn_id, &text, &stop));
+            thread::spawn(move || run_turn(&out, &state, &thread_id, &turn_id, &input, &stop));
+        }
+        "thread/name/set" => {
+            let wanted = params["threadId"].as_str().unwrap_or_default().to_string();
+            let name = params["name"].as_str().unwrap_or_default().to_string();
+            if let Some(thread) = state
+                .threads
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .find(|t| t.id == wanted)
+            {
+                thread.preview = name.clone();
+            }
+            reply(out, id, json!({}));
+            notify(
+                out,
+                "thread/name/updated",
+                json!({"threadId": wanted, "threadName": name}),
+            );
+        }
+        "thread/compact/start" => {
+            let thread_id = params["threadId"].as_str().unwrap_or_default().to_string();
+            reply(out, id, json!({}));
+            let turn_id = next_id("turn");
+            let ids = json!({"threadId": thread_id, "turnId": turn_id});
+            let mut started = ids.clone();
+            started["turn"] = json!({"id": turn_id, "status": "inProgress", "items": []});
+            notify(out, "turn/started", started);
+            pause(400);
+            let item = json!({"type": "contextCompaction", "id": next_id("item")});
+            let mut done = ids.clone();
+            done["item"] = item.clone();
+            notify(out, "item/completed", done);
+            let mut completed = ids.clone();
+            completed["turn"] = json!({"id": turn_id, "status": "completed", "items": [item], "error": null, "durationMs": 400});
+            notify(out, "turn/completed", completed);
+        }
+        "fuzzyFileSearch" => {
+            let query = params["query"].as_str().unwrap_or_default().to_lowercase();
+            let root = params["roots"][0].as_str().unwrap_or(".").to_string();
+            let mut files = Vec::new();
+            walk(
+                std::path::Path::new(&root),
+                std::path::Path::new(&root),
+                0,
+                &mut files,
+            );
+            let mut found: Vec<Value> = files
+                .into_iter()
+                .filter(|path| path.to_lowercase().contains(&query))
+                .take(30)
+                .map(|path| {
+                    let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+                    json!({"root": root, "path": path, "match_type": "file", "file_name": name, "score": 1, "indices": null})
+                })
+                .collect();
+            found.sort_by_key(|f| f["path"].as_str().map(str::len).unwrap_or(0));
+            reply(out, id, json!({"files": found}));
         }
         "turn/interrupt" => {
             if let Some(flag) = state
@@ -257,6 +326,28 @@ fn handle(method: &str, id: Value, params: Value, out: &Out, state: &Arc<State>)
             out,
             json!({"id": id, "error": {"code": -32601, "message": format!("mock-codex does not implement {other}")}}),
         ),
+    }
+}
+
+/// Files under `dir`, relative to `root`, skipping hidden and build folders.
+fn walk(root: &std::path::Path, dir: &std::path::Path, depth: usize, files: &mut Vec<String>) {
+    if depth > 5 || files.len() > 2000 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') || name == "target" || name == "node_modules" {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            walk(root, &path, depth + 1, files);
+        } else if let Ok(relative) = path.strip_prefix(root) {
+            files.push(relative.display().to_string());
+        }
     }
 }
 
@@ -306,9 +397,21 @@ fn run_turn(
     state: &State,
     thread_id: &str,
     turn_id: &str,
-    text: &str,
+    input: &Value,
     stop: &AtomicBool,
 ) {
+    let started_at = std::time::Instant::now();
+    let text = input
+        .as_array()
+        .and_then(|parts| parts.iter().find(|p| p["type"] == "text"))
+        .and_then(|p| p["text"].as_str())
+        .unwrap_or_default()
+        .to_string();
+    let text = text.as_str();
+    let attached = input
+        .as_array()
+        .map(|parts| parts.iter().filter(|p| p["type"] != "text").count())
+        .unwrap_or(0);
     let ids = json!({"threadId": thread_id, "turnId": turn_id});
     let mut items: Vec<Value> = Vec::new();
     let with = |extra: Value| {
@@ -323,7 +426,8 @@ fn run_turn(
         "turn/started",
         with(json!({"turn": {"id": turn_id, "status": "inProgress", "items": []}})),
     );
-    let user = json!({"type": "userMessage", "id": next_id("item"), "clientId": null, "content": [{"type": "text", "text": text, "text_elements": []}]});
+    let user =
+        json!({"type": "userMessage", "id": next_id("item"), "clientId": null, "content": input});
     notify(
         out,
         "item/started",
@@ -346,7 +450,7 @@ fn run_turn(
         ),
     );
     let thought = format!(
-        "**Reading the request** The user wrote {} characters. I'll answer plainly and show what I did.",
+        "**Reading the request** The user wrote {} characters and attached {attached} file(s). I'll answer plainly and show what I did.",
         text.chars().count()
     );
     let mut interrupted = !stream(
@@ -367,6 +471,41 @@ fn run_turn(
     items.push(reasoning);
 
     let lower = text.to_lowercase();
+    if !interrupted && lower.contains("plan") {
+        let steps = ["Read the code", "Make the change", "Run the tests"];
+        for done in 0..=steps.len() {
+            if stop.load(Ordering::Relaxed) {
+                interrupted = true;
+                break;
+            }
+            let plan: Vec<Value> = steps
+                .iter()
+                .enumerate()
+                .map(|(ix, step)| {
+                    let status = if ix < done {
+                        "completed"
+                    } else if ix == done {
+                        "inProgress"
+                    } else {
+                        "pending"
+                    };
+                    json!({"step": step, "status": status})
+                })
+                .collect();
+            notify(
+                out,
+                "turn/plan/updated",
+                with(json!({"explanation": null, "plan": plan})),
+            );
+            pause(450);
+        }
+    }
+    if !interrupted && lower.contains("fail") {
+        let turn = json!({"id": turn_id, "status": "failed", "items": items, "durationMs": started_at.elapsed().as_millis() as u64,
+            "error": {"message": "The model is overloaded. Try again in a moment.", "codexErrorInfo": null, "additionalDetails": null}});
+        notify(out, "turn/completed", with(json!({"turn": turn})));
+        return;
+    }
     if !interrupted && lower.contains("run") {
         let cmd_id = next_id("item");
         let command = "cargo test --workspace";
@@ -442,6 +581,15 @@ fn run_turn(
         "Here is what I found about **{}**.\n\n1. The request reached the mock agent.\n2. It streamed this answer word by word.\n\n```rust\nfn main() {{\n    println!(\"hello from mock-codex\");\n}}\n```\n\nAsk me to *run* or *edit* something to see approvals and file changes.",
         text.lines().next().unwrap_or("your message")
     );
+    let answer = if lower.contains("long") {
+        let mut long = String::from("## A longer answer\n\n");
+        for ix in 1..=12 {
+            long.push_str(&format!("{ix}. Paragraph {ix} keeps going so there is time to press stop and watch the stream end cleanly.\n"));
+        }
+        long
+    } else {
+        answer
+    };
     if !interrupted {
         notify(
             out,
@@ -480,7 +628,8 @@ fn run_turn(
     } else {
         "completed"
     };
-    let turn = json!({"id": turn_id, "status": status, "items": items, "error": null});
+    let turn = json!({"id": turn_id, "status": status, "items": items, "error": null,
+        "durationMs": started_at.elapsed().as_millis() as u64});
     notify(out, "turn/completed", with(json!({"turn": turn})));
 
     let mut threads = state.threads.lock().unwrap();

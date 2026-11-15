@@ -46,6 +46,17 @@ pub struct Transcript {
     local_seq: u64,
     /// A transient notice, such as a retry in progress.
     notice: Option<String>,
+    /// Rows that came from stored history rather than live events.
+    seeded: usize,
+    /// How each finished turn ended.
+    turns: HashMap<String, TurnSummary>,
+}
+
+/// How a turn ended, for the footer under its answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TurnSummary {
+    pub status: TurnStatus,
+    pub duration_ms: Option<u64>,
 }
 
 const LOCAL_PREFIX: &str = "local:";
@@ -64,9 +75,64 @@ impl Transcript {
             }
             if status == TurnStatus::InProgress {
                 transcript.active_turn = Some(turn_id);
+            } else {
+                transcript.turns.insert(
+                    turn_id,
+                    TurnSummary {
+                        status,
+                        duration_ms: None,
+                    },
+                );
             }
         }
+        transcript.seeded = transcript.entries.len();
         transcript
+    }
+
+    /// How many leading rows came from stored history. Views animate only the rest.
+    pub fn seeded(&self) -> usize {
+        self.seeded
+    }
+
+    /// How `turn_id` ended, once it has.
+    pub fn turn_summary(&self, turn_id: &str) -> Option<TurnSummary> {
+        self.turns.get(turn_id).copied()
+    }
+
+    /// Whether row `ix` is the last row of its turn and that turn is over.
+    pub fn ends_turn(&self, ix: usize) -> bool {
+        let Some(entry) = self.entries.get(ix) else {
+            return false;
+        };
+        if entry.turn_id.is_empty() || !self.turns.contains_key(&entry.turn_id) {
+            return false;
+        }
+        self.entries
+            .get(ix + 1)
+            .is_none_or(|next| next.turn_id != entry.turn_id)
+    }
+
+    /// The user's message (text and attachments) that started `turn_id`.
+    pub fn turn_prompt(&self, turn_id: &str) -> Option<(String, Vec<String>)> {
+        self.entries.iter().find_map(|entry| match &entry.kind {
+            EntryKind::Item(Item::User {
+                text, attachments, ..
+            }) if entry.turn_id == turn_id => Some((text.clone(), attachments.clone())),
+            _ => None,
+        })
+    }
+
+    /// Everything the agent said in `turn_id`, for copying.
+    pub fn turn_answer(&self, turn_id: &str) -> String {
+        self.entries
+            .iter()
+            .filter(|entry| entry.turn_id == turn_id)
+            .filter_map(|entry| match &entry.kind {
+                EntryKind::Item(Item::Agent { text, .. }) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
     }
 
     pub fn entries(&self) -> &[Entry] {
@@ -116,7 +182,7 @@ impl Transcript {
 
     /// Shows the user's message at once, before the backend echoes it.
     /// The echo replaces this row instead of adding a second one.
-    pub fn push_local_user(&mut self, text: impl Into<String>) {
+    pub fn push_local_user(&mut self, text: impl Into<String>, attachments: Vec<String>) {
         self.local_seq += 1;
         let id = format!("{LOCAL_PREFIX}{}", self.local_seq);
         self.push(
@@ -125,6 +191,7 @@ impl Transcript {
             EntryKind::Item(Item::User {
                 id,
                 text: text.into(),
+                attachments,
             }),
             false,
         );
@@ -183,8 +250,16 @@ impl Transcript {
                 turn_id,
                 status,
                 error,
+                duration_ms,
                 ..
             } => {
+                self.turns.insert(
+                    turn_id.clone(),
+                    TurnSummary {
+                        status: *status,
+                        duration_ms: *duration_ms,
+                    },
+                );
                 if self
                     .active_turn
                     .as_deref()
@@ -404,7 +479,7 @@ impl Transcript {
     /// The oldest optimistic user row, preferring one with the same text.
     fn local_user_row(&self, text: &str) -> Option<usize> {
         let local = |entry: &Entry| match &entry.kind {
-            EntryKind::Item(Item::User { id, text }) if id.starts_with(LOCAL_PREFIX) => {
+            EntryKind::Item(Item::User { id, text, .. }) if id.starts_with(LOCAL_PREFIX) => {
                 Some(text.clone())
             }
             _ => None,
@@ -484,7 +559,7 @@ mod tests {
     #[test]
     fn a_streamed_answer_builds_up_then_settles() {
         let mut t = Transcript::new();
-        t.push_local_user("hi");
+        t.push_local_user("hi", vec![]);
         t.begin_pending_turn();
         assert!(t.is_running());
         t.apply(&AgentEvent::TurnStarted {
@@ -496,6 +571,7 @@ mod tests {
             Item::User {
                 id: "m1".into(),
                 text: "hi".into(),
+                attachments: vec![],
             },
         ));
         assert_eq!(t.len(), 1, "the echo replaces the optimistic row");
@@ -519,6 +595,7 @@ mod tests {
             turn_id: "u1".into(),
             status: TurnStatus::Completed,
             error: None,
+            duration_ms: None,
         });
         assert!(!t.is_running());
         assert_eq!(t.len(), 2);
@@ -591,6 +668,7 @@ mod tests {
             turn_id: "u1".into(),
             status: TurnStatus::Failed,
             error: Some("quota exceeded".into()),
+            duration_ms: None,
         });
         assert!(!t.is_running());
         assert!(t.entries().iter().all(|e| !e.live));
@@ -621,6 +699,7 @@ mod tests {
                 Item::User {
                     id: "m1".into(),
                     text: "q".into(),
+                    attachments: vec![],
                 },
                 Item::Agent {
                     id: "a1".into(),

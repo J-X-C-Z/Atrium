@@ -1,42 +1,45 @@
-//! Main column: title bar with model and folder, the conversation, the composer.
+//! Main column: title bar (model, chat title, status, chat menu), the
+//! conversation or the welcome screen, and the composer.
 
 use ely_gpui_component::{
-    buttons::{Button, ButtonVariant, IconButton},
-    chat::{ChatContainer, ErrorMessage, MessageList, PromptInput, SuggestionChips, WelcomeScreen},
-    forms::TextInput,
-    menus::{DropdownMenu, Menu, MenuItem},
+    buttons::{ButtonVariant, IconButton},
+    chat::{ChatContainer, ErrorMessage, MessageList, SuggestionChips, WelcomeScreen},
+    menus::{DropdownMenu, Menu, MenuItem, OverflowMenu},
+    motion::{Skeleton, SkeletonText, Spinner, SpinnerStyle},
     primitives::IconName,
     shell::drag_region,
-    theme::{ActiveTheme, ControlSize, TextSize},
+    theme::{ActiveTheme, ControlSize, IconSize, Radius, TextSize},
 };
 use gpui::{
-    AnyElement, App, Entity, Focusable, IntoElement, ParentElement, PathPromptOptions, Styled,
-    Window, div, prelude::*, px,
+    AnyElement, App, Entity, IntoElement, ParentElement, Styled, Window, div, prelude::*, px,
 };
 use jiff::{Timestamp, tz::TimeZone};
 
 use super::{
-    NewChat, RootView, TITLE_BAR_HEIGHT, ToggleSidebar, rows, sidebar::traffic_light_room,
+    NewChat, RootView, TITLE_BAR_HEIGHT,
+    composer::{Composer, short_path},
+    rows::{self, COLUMN},
 };
 use crate::workspace::{Status, View, Workspace};
 
-const STARTERS: [(&str, IconName); 3] = [
-    ("Explain how this project is organized", IconName::FileText),
-    ("Find and fix a failing test", IconName::Terminal),
-    ("Review my latest changes", IconName::GitBranch),
+const STARTERS: [(&str, IconName); 4] = [
+    ("Explain this project", IconName::FileText),
+    ("Fix a failing test", IconName::Terminal),
+    ("Review my changes", IconName::GitBranch),
+    ("Plan a feature", IconName::ListChecks),
 ];
 
 pub fn render(
     workspace: &Entity<Workspace>,
-    draft: &Entity<TextInput>,
+    composer: &Entity<Composer>,
     root: Entity<RootView>,
     sidebar_collapsed: bool,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     let colors = cx.theme().colors.clone();
-    let header = header(workspace, sidebar_collapsed, window, cx);
-    let body = body(workspace, draft, root, window, cx);
+    let header = header(workspace, root, sidebar_collapsed, window, cx);
+    let body = body(workspace, composer, window, cx);
     div()
         .flex_1()
         .min_w_0()
@@ -51,6 +54,7 @@ pub fn render(
 
 fn header(
     workspace: &Entity<Workspace>,
+    root: Entity<RootView>,
     sidebar_collapsed: bool,
     window: &mut Window,
     cx: &mut App,
@@ -59,195 +63,188 @@ fn header(
     let theme = cx.theme();
     let colors = theme.colors.clone();
     let ws = workspace.read(cx);
-    let title = ws
-        .active_thread()
-        .map(|thread| thread.title())
-        .unwrap_or_else(|| "New chat".into());
-    let thread_id = ws.active_thread().map(|thread| thread.id.clone());
-    let (folder, folder_fixed) = match ws.active_thread() {
-        Some(thread) => (thread.cwd.clone(), true),
-        None => (ws.settings.working_dir().display().to_string(), false),
-    };
-    let folder_name = folder
-        .rsplit('/')
-        .find(|part| !part.is_empty())
-        .unwrap_or("/")
-        .to_string();
+    let title = ws.active_thread().map(|thread| thread.title());
+    let thread_id = ws.active_thread_id().map(str::to_owned);
     let usage = ws.transcript().and_then(|t| t.usage()).map(|usage| {
         let tokens = format_tokens(usage.total_tokens);
         match usage.context_window {
             Some(window) if window > 0 => {
                 let share = usage.last_turn_tokens as f64 * 100. / window as f64;
                 if share < 1. {
-                    format!("{tokens} tokens · <1% of context")
+                    format!("{tokens} tokens · <1% context")
                 } else {
-                    format!("{tokens} tokens · {share:.0}% of context")
+                    format!("{tokens} tokens · {share:.0}% context")
                 }
             }
             _ => format!("{tokens} tokens"),
         }
     });
+    let running = ws.running_for();
 
-    let mut menu = Menu::new().item(
+    let mut models = Menu::new().item(
         MenuItem::radio("Codex default", ws.settings.model.is_none()).on_click({
             let workspace = workspace.clone();
             move |_, cx| workspace.update(cx, |ws, cx| ws.set_model(None, cx))
         }),
     );
+    if !ws.models.is_empty() {
+        models = models.separator();
+    }
     for model in &ws.models {
         let id = model.id.clone();
         let workspace = workspace.clone();
-        menu = menu.item(
-            MenuItem::radio(
-                model.display_name.clone(),
-                ws.settings.model.as_deref() == Some(&model.id),
-            )
-            .on_click(move |_, cx| {
-                workspace.update(cx, |ws, cx| ws.set_model(Some(id.clone()), cx))
-            }),
-        );
+        let mut item = MenuItem::radio(
+            model.display_name.clone(),
+            ws.settings.model.as_deref() == Some(&model.id),
+        )
+        .on_click(move |_, cx| workspace.update(cx, |ws, cx| ws.set_model(Some(id.clone()), cx)));
+        if !model.description.is_empty() {
+            item = item.keys(truncate(&model.description, 36));
+        }
+        models = models.item(item);
     }
-    let model_label = ws.model_label();
 
-    let pick_folder = workspace.clone();
-    let archive = workspace.clone();
+    // Chat menu: rename, pin, compact, review, archive.
+    let chat_menu =
+        thread_id.as_ref().map(|id| {
+            let pinned = ws.settings.is_pinned(id);
+            let (rename, pin, compact, review, archive) = (
+                (root.clone(), id.clone()),
+                (workspace.clone(), id.clone()),
+                workspace.clone(),
+                workspace.clone(),
+                (workspace.clone(), id.clone()),
+            );
+            let menu =
+                Menu::new()
+                    .item(MenuItem::new("Rename…").icon(IconName::Pencil).on_click(
+                        move |window, cx| {
+                            let (root, id) = rename.clone();
+                            root.update(cx, |root, cx| root.start_rename(id, window, cx));
+                        },
+                    ))
+                    .item(
+                        MenuItem::new(if pinned { "Unpin" } else { "Pin to top" })
+                            .icon(if pinned {
+                                IconName::PinOff
+                            } else {
+                                IconName::Pin
+                            })
+                            .on_click(move |_, cx| {
+                                let (ws, id) = pin.clone();
+                                ws.update(cx, |ws, cx| ws.toggle_pin(&id, cx));
+                            }),
+                    )
+                    .separator()
+                    .item(
+                        MenuItem::new("Review uncommitted changes")
+                            .icon(IconName::Eye)
+                            .on_click(move |_, cx| review.update(cx, |ws, cx| ws.review(None, cx))),
+                    )
+                    .item(
+                        MenuItem::new("Compact conversation")
+                            .icon(IconName::Minimize2)
+                            .on_click(move |_, cx| compact.update(cx, |ws, cx| ws.compact(cx))),
+                    )
+                    .separator()
+                    .item(MenuItem::new("Archive").icon(IconName::Archive).on_click(
+                        move |_, cx| {
+                            let (ws, id) = archive.clone();
+                            ws.update(cx, |ws, cx| ws.archive(id, cx));
+                        },
+                    ));
+            OverflowMenu::new("chat-menu", menu)
+        });
+
+    let left_room = if sidebar_collapsed && cfg!(target_os = "macos") {
+        px(28.)
+    } else {
+        px(12.)
+    };
     bar.flex_none()
         .h(px(TITLE_BAR_HEIGHT))
-        .px_3()
+        .pl(left_room)
+        .pr_2()
         .flex()
         .items_center()
         .gap_2()
-        .border_b_1()
-        .border_color(colors.border)
-        .when(sidebar_collapsed, |bar| {
-            bar.pl(traffic_light_room())
-                .child(
-                    IconButton::new("show-sidebar", IconName::PanelLeft)
-                        .variant(ButtonVariant::Ghost)
-                        .size(ControlSize::Sm)
-                        .tooltip("Show sidebar (⌘B)")
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(ToggleSidebar), cx)
-                        }),
-                )
-                .child(
-                    IconButton::new("new-chat-collapsed", IconName::SquarePen)
-                        .variant(ButtonVariant::Ghost)
-                        .size(ControlSize::Sm)
-                        .tooltip("New chat (⌘N)")
-                        .on_click(|_, window, cx| window.dispatch_action(Box::new(NewChat), cx)),
-                )
-        })
+        .child(
+            DropdownMenu::new("model", ws.model_label(), models)
+                .icon(IconName::Sparkles)
+                .variant(ButtonVariant::Ghost),
+        )
         .child(
             div()
                 .flex_1()
                 .min_w_0()
-                .truncate()
+                .flex()
+                .justify_center()
                 .text_size(theme.text_size(TextSize::Sm))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .child(title),
+                .text_color(colors.fg_muted)
+                .children(title.map(|title| div().truncate().child(title))),
         )
-        .children(usage.map(|usage| {
+        .children(running.map(|took| {
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .px_2()
+                .py_0p5()
+                .rounded_full()
+                .bg(colors.sunken)
+                .text_size(theme.text_size(TextSize::Xs))
+                .text_color(colors.fg_muted)
+                .child(
+                    Spinner::new("working")
+                        .style(SpinnerStyle::Ring)
+                        .size(IconSize::Xs)
+                        .color(colors.accent),
+                )
+                .child(format!("Working · {}s", took.as_secs()))
+        }))
+        .children(usage.filter(|_| running.is_none()).map(|usage| {
             div()
                 .flex_none()
                 .text_size(theme.text_size(TextSize::Xs))
-                .text_color(colors.fg_muted)
+                .text_color(colors.fg_subtle)
                 .child(usage)
         }))
-        .child(
-            DropdownMenu::new("model", model_label, menu)
-                .icon(IconName::Cpu)
-                .variant(ButtonVariant::Ghost),
-        )
-        .child(
-            Button::new("cwd", folder_name)
-                .icon(IconName::Folder)
-                .variant(ButtonVariant::Ghost)
-                .size(ControlSize::Sm)
-                .disabled(folder_fixed)
-                .on_click(move |_, _, cx| choose_folder(pick_folder.clone(), cx)),
-        )
-        .children(thread_id.map(|id| {
-            IconButton::new("archive", IconName::Archive)
-                .variant(ButtonVariant::Ghost)
-                .size(ControlSize::Sm)
-                .tooltip("Archive this chat")
-                .on_click(move |_, _, cx| {
-                    let id = id.clone();
-                    archive.update(cx, |ws, cx| ws.archive(id, cx))
-                })
-        }))
+        .children(chat_menu)
+        .when(thread_id.is_some(), |bar| {
+            bar.child(
+                IconButton::new("header-new-chat", IconName::SquarePen)
+                    .variant(ButtonVariant::Ghost)
+                    .size(ControlSize::Sm)
+                    .tooltip("New chat (⌘N)")
+                    .on_click(|_, window, cx| window.dispatch_action(Box::new(NewChat), cx)),
+            )
+        })
         .into_any_element()
 }
 
-fn choose_folder(workspace: Entity<Workspace>, cx: &mut App) {
-    let picked = cx.prompt_for_paths(PathPromptOptions {
-        files: false,
-        directories: true,
-        multiple: false,
-        prompt: Some("Use this folder".into()),
-    });
-    cx.spawn(async move |cx| {
-        if let Ok(Ok(Some(paths))) = picked.await
-            && let Some(dir) = paths.into_iter().next()
-        {
-            workspace.update(cx, |ws, cx| ws.set_working_dir(dir, cx));
-        }
-    })
-    .detach();
+fn truncate(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        text.to_string()
+    } else {
+        format!("{}…", text.chars().take(max).collect::<String>())
+    }
 }
 
-fn composer(
-    workspace: &Entity<Workspace>,
-    draft: &Entity<TextInput>,
-    root: Entity<RootView>,
-    cx: &App,
-) -> AnyElement {
-    let theme = cx.theme();
-    let colors = theme.colors.clone();
-    let ws = workspace.read(cx);
-    let running = ws.is_running();
-    let notice = match &ws.status {
-        Status::Connecting => Some("Starting Codex…".to_string()),
-        Status::Failed(_) => Some("Codex is not running. Restart it from the sidebar.".to_string()),
-        // A retry in progress says more than a standing sign-in hint.
-        Status::Ready => ws
-            .transcript()
-            .and_then(|t| t.notice())
-            .map(str::to_owned)
-            .or_else(|| {
-                (ws.signed_in == Some(false))
-                    .then(|| "Codex is not signed in: run `codex login` in a terminal.".to_string())
-            }),
-    };
-    let mut input = PromptInput::new("composer", draft, move |window, cx| {
-        root.update(cx, |this, cx| this.send(window, cx))
-    });
-    if running {
-        let stop = workspace.clone();
-        input = input.busy(move |_, cx| stop.update(cx, |ws, cx| ws.stop(cx)));
-    }
+/// The composer, at the reading column's width.
+fn composer_column(composer: &Entity<Composer>) -> AnyElement {
     div()
         .w_full()
         .flex()
-        .flex_col()
-        .gap_1()
-        .children(notice.map(|notice| {
-            div()
-                .px_2()
-                .text_size(theme.text_size(TextSize::Xs))
-                .text_color(colors.fg_muted)
-                .child(notice)
-        }))
-        .child(input)
+        .justify_center()
+        .child(div().w_full().max_w(px(COLUMN)).child(composer.clone()))
         .into_any_element()
 }
 
 fn body(
     workspace: &Entity<Workspace>,
-    draft: &Entity<TextInput>,
-    root: Entity<RootView>,
-    _window: &mut Window,
+    composer: &Entity<Composer>,
+    window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     let theme = cx.theme();
@@ -265,7 +262,7 @@ fn body(
             .justify_center()
             .p_8()
             .child(
-                div().max_w(px(520.)).child(
+                div().max_w(px(560.)).child(
                     ErrorMessage::new("codex-failed", "Could not start Codex")
                         .detail(reason.clone())
                         .on_retry(move |_, cx| retry.update(cx, |ws, cx| ws.connect(cx))),
@@ -275,55 +272,81 @@ fn body(
     }
 
     if ws.is_loading() {
-        return div()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_color(colors.fg_muted)
-            .text_size(theme.text_size(TextSize::Sm))
-            .child("Loading chat…")
-            .into_any_element();
+        // The shape of a conversation while its history loads.
+        let skeleton = (0..3).map(|ix| {
+            rows::column(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div().flex().justify_end().child(
+                            Skeleton::new(format!("skeleton-user-{ix}"))
+                                .w(px(220. + 60. * ix as f32))
+                                .h(px(40.))
+                                .rounded(theme.radius(Radius::Xl)),
+                        ),
+                    )
+                    .child(SkeletonText::new(format!("skeleton-agent-{ix}"), 3)),
+                1.,
+                window,
+            )
+        });
+        return ChatContainer::new(
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .justify_end()
+                .pb_4()
+                .children(skeleton.collect::<Vec<_>>()),
+        )
+        .composer(composer_column(composer))
+        .into_any_element();
     }
 
     let Some(transcript) = ws.transcript() else {
         let hour = Timestamp::now()
             .to_zoned(TimeZone::try_system().unwrap_or(TimeZone::UTC))
             .hour() as u8;
-        let fill = draft.clone();
+        let fill = composer.clone();
+        let folder = short_path(&ws.settings.working_dir());
         return WelcomeScreen::new("welcome", hour)
-            .child(composer(workspace, draft, root, cx))
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .mt_neg_4()
+                    .text_size(theme.text_size(TextSize::Sm))
+                    .text_color(colors.fg_muted)
+                    .child(format!("Codex is ready in {folder}")),
+            )
+            .child(composer_column(composer))
             .child(SuggestionChips::new(
                 "starters",
                 STARTERS,
                 move |ix, window, cx| {
-                    fill.update(cx, |input, cx| input.set_text(STARTERS[ix].0, cx));
-                    let focus = fill.focus_handle(cx);
-                    window.focus(&focus, cx);
+                    fill.update(cx, |composer, cx| {
+                        composer.set_text(STARTERS[ix].0, window, cx)
+                    });
                 },
             ))
             .into_any_element();
     };
 
-    let count = transcript.len();
+    let typing = usize::from(ws.awaiting_first_output());
+    let count = transcript.len() + typing;
     let list_id = match &ws.view {
         View::Thread(id) => format!("messages-{id}"),
         View::Draft => "messages-draft".to_string(),
     };
     let rows_from = workspace.clone();
-    let messages = MessageList::new(list_id, count, move |ix, _, cx| {
-        let ws = rows_from.read(cx);
-        let thread = match &ws.view {
-            View::Thread(id) => Some(id.clone()),
-            View::Draft => None,
-        };
-        let Some(entry) = ws.transcript().and_then(|t| t.entries().get(ix)).cloned() else {
-            return div().into_any_element();
-        };
-        rows::entry(&rows_from, thread.as_deref(), ix, &entry, cx)
+    let messages = MessageList::new(list_id, count, move |ix, window, cx| {
+        rows::row(&rows_from, ix, window, cx)
     });
     ChatContainer::new(messages)
-        .composer(composer(workspace, draft, root, cx))
+        .composer(composer_column(composer))
         .into_any_element()
 }
 

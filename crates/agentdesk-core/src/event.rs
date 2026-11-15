@@ -54,6 +54,7 @@ pub enum AgentEvent {
         turn_id: String,
         status: TurnStatus,
         error: Option<String>,
+        duration_ms: Option<u64>,
     },
     /// An item began, or was replaced wholesale with newer state.
     ItemStarted {

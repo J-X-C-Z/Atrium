@@ -74,23 +74,28 @@ fn pretty(value: &Value) -> String {
     }
 }
 
-/// The text a user message carries, with attachments named.
-fn user_text(content: &Value) -> String {
+/// The text a user message carries, and the paths it attached
+/// (images and mentioned files).
+fn user_content(content: &Value) -> (String, Vec<String>) {
     let Some(parts) = content.as_array() else {
-        return String::new();
+        return (String::new(), Vec::new());
     };
-    parts
-        .iter()
-        .map(|part| match part["type"].as_str() {
-            Some("text") => s(part, "text"),
-            Some("image") | Some("localImage") => "[image]".to_string(),
-            Some("mention") | Some("skill") => format!("@{}", s(part, "name")),
-            Some(other) => format!("[{other}]"),
-            None => String::new(),
-        })
-        .filter(|text| !text.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut text = Vec::new();
+    let mut attachments = Vec::new();
+    for part in parts {
+        match part["type"].as_str() {
+            Some("text") => text.push(s(part, "text")),
+            Some("localImage") | Some("localAudio") | Some("mention") | Some("skill") => {
+                attachments.push(s(part, "path"))
+            }
+            Some("image") | Some("audio") => attachments
+                .push(opt_s(part, "url").unwrap_or_else(|| format!("[{}]", s(part, "type")))),
+            Some(other) => text.push(format!("[{other}]")),
+            None => {}
+        }
+    }
+    text.retain(|part| !part.is_empty());
+    (text.join("\n"), attachments)
 }
 
 fn joined(value: &Value) -> String {
@@ -111,10 +116,14 @@ pub fn item(item: &Value) -> Option<Item> {
     let id = item["id"].as_str()?.to_string();
     let kind = item["type"].as_str().unwrap_or_default();
     Some(match kind {
-        "userMessage" => Item::User {
-            id,
-            text: user_text(&item["content"]),
-        },
+        "userMessage" => {
+            let (text, attachments) = user_content(&item["content"]);
+            Item::User {
+                id,
+                text,
+                attachments,
+            }
+        }
         "agentMessage" => Item::Agent {
             id,
             text: s(item, "text"),
@@ -257,6 +266,7 @@ pub fn event(method: &str, params: &Value) -> Option<AgentEvent> {
                 turn_id: s(turn, "id"),
                 status: turn_status(&turn["status"]),
                 error: opt_s(&turn["error"], "message"),
+                duration_ms: turn["durationMs"].as_u64(),
             }
         }
         "item/started" => AgentEvent::ItemStarted {
@@ -432,7 +442,8 @@ mod tests {
             user,
             Item::User {
                 id: "u".into(),
-                text: "hello\n[image]".into()
+                text: "hello".into(),
+                attachments: vec!["/x.png".into()],
             }
         );
 
