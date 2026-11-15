@@ -1,0 +1,32 @@
+[workspace]
+resolver = "3"
+members = ["crates/agentdesk-core", "crates/codex-client", "crates/agentdesk-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+futures = "0.3"
+log = "0.4"
+env_logger = "0.11"
+jiff = "0.2"
+dirs = "6"
+
+agentdesk-core = { path = "crates/agentdesk-core" }
+codex-client = { path = "crates/codex-client" }
+
+# UI stack. GPUI Kit 0.7.1 and Ely both pin the gpui-pre 0.3.8 snapshot:
+# upgrade all three together, never one alone.
+gpui = { package = "gpui-pre", version = "=0.3.8" }
+gpui-kit = { version = "=0.7.1" }
+ely-gpui-component = { git = "https://github.com/ZacharyZhang-NY/Ely-GPUI-Components", rev = "5d6efd46ec0c93b381ec7578561a1273c366025b" }
+
+[profile.dev.package."*"]
+opt-level = 2

@@ -1,0 +1,25 @@
+[package]
+name = "agentdesk-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "agentdesk"
+path = "src/main.rs"
+
+[dependencies]
+agentdesk-core.workspace = true
+codex-client.workspace = true
+anyhow.workspace = true
+futures.workspace = true
+log.workspace = true
+env_logger.workspace = true
+jiff.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dirs.workspace = true
+gpui.workspace = true
+gpui-kit.workspace = true
+ely-gpui-component.workspace = true

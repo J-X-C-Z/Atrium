@@ -1,0 +1,11 @@
+[package]
+name = "agentdesk-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Backend-agnostic model of agent conversations: threads, turns, items, approvals and the events that change them."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
