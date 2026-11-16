@@ -83,6 +83,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "acp-client"
+version = "0.1.0"
+dependencies = [
+ "agent-rpc",
+ "agentdesk-core",
+ "anyhow",
+ "base64 0.22.1",
+ "futures",
+ "jiff",
+ "log",
+ "serde_json",
+]
+
+[[package]]
 name = "addr2line"
 version = "0.27.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -110,9 +124,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-rpc"
+version = "0.1.0"
+dependencies = [
+ "dirs 6.0.0",
+ "futures",
+ "log",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "agentdesk-app"
 version = "0.1.0"
 dependencies = [
+ "acp-client",
+ "agent-rpc",
  "agentdesk-core",
  "anyhow",
  "codex-client",
@@ -1110,6 +1138,7 @@ dependencies = [
 name = "codex-client"
 version = "0.1.0"
 dependencies = [
+ "agent-rpc",
  "agentdesk-core",
  "anyhow",
  "dirs 6.0.0",

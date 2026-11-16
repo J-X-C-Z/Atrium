@@ -1,5 +1,6 @@
 use crate::model::{
-    Goal, Item, PlanStep, Question, RateLimits, RequestId, ThreadMeta, TokenUsage, TurnStatus,
+    AgentCommand, ConfigOption, Goal, Item, PlanStep, Question, RateLimits, RequestId, ThreadMeta,
+    TokenUsage, TurnStatus,
 };
 
 /// What the backend wants approved before it goes on.
@@ -13,6 +14,11 @@ pub enum ApprovalKind {
     FileChange {
         reason: Option<String>,
         grant_root: Option<String>,
+    },
+    /// Any other tool the agent wants to use.
+    Tool {
+        title: String,
+        detail: Option<String>,
     },
 }
 
@@ -121,6 +127,16 @@ pub enum AgentEvent {
         goal: Option<Goal>,
     },
     RateLimitsUpdated(RateLimits),
+    /// The settings the agent offers for this session, and their values.
+    ConfigUpdated {
+        thread_id: String,
+        options: Vec<ConfigOption>,
+    },
+    /// The commands the agent offers for this session.
+    CommandsUpdated {
+        thread_id: String,
+        commands: Vec<AgentCommand>,
+    },
     /// The account or its plan changed; refetch it.
     AccountChanged,
     LoginCompleted {
@@ -163,7 +179,9 @@ impl AgentEvent {
             AgentEvent::ApprovalRequested(request) => Some(&request.thread_id),
             AgentEvent::UserInputRequested(request) => Some(&request.thread_id),
             AgentEvent::PredictionUpdated { thread_id, .. }
-            | AgentEvent::GoalUpdated { thread_id, .. } => Some(thread_id),
+            | AgentEvent::GoalUpdated { thread_id, .. }
+            | AgentEvent::ConfigUpdated { thread_id, .. }
+            | AgentEvent::CommandsUpdated { thread_id, .. } => Some(thread_id),
             AgentEvent::Error { thread_id, .. } => thread_id.as_deref(),
             AgentEvent::Warning(_)
             | AgentEvent::Disconnected { .. }

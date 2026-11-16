@@ -12,6 +12,8 @@ path = "src/main.rs"
 [dependencies]
 agentdesk-core.workspace = true
 codex-client.workspace = true
+acp-client.workspace = true
+agent-rpc.workspace = true
 anyhow.workspace = true
 futures.workspace = true
 log.workspace = true

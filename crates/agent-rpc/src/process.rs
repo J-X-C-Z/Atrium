@@ -91,6 +91,18 @@ fn login_shell_path() -> Option<OsString> {
     Some(OsString::from(&text[start..end]))
 }
 
+/// The first `name` on the effective `PATH`.
+pub fn which(name: &str) -> Option<PathBuf> {
+    let name = if cfg!(windows) && !name.ends_with(".exe") {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    };
+    env::split_paths(&effective_path())
+        .map(|dir| dir.join(&name))
+        .find(|candidate| is_executable(candidate))
+}
+
 /// The `codex` binary to run: `explicit` if given, else `$CODEX_BIN`, else
 /// the first `codex` on the effective `PATH`.
 pub fn find_codex(explicit: Option<&Path>) -> Result<PathBuf, String> {

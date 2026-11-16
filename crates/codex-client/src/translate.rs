@@ -32,6 +32,7 @@ pub fn thread_meta(thread: &Value) -> Option<ThreadMeta> {
     let id = thread["id"].as_str()?.to_string();
     Some(ThreadMeta {
         id,
+        backend: "codex".into(),
         name: opt_s(thread, "name"),
         preview: s(thread, "preview"),
         cwd: s(thread, "cwd"),

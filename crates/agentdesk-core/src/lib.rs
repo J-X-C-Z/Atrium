@@ -12,7 +12,8 @@ mod transcript;
 
 pub use event::{AgentEvent, ApprovalDecision, ApprovalKind, ApprovalRequest, UserInputRequest};
 pub use model::{
-    Account, ChangeKind, Credits, FileChange, Goal, GoalStatus, Item, ItemStatus, PlanStep,
-    Question, RateLimits, RateWindow, RequestId, ThreadMeta, TokenUsage, TurnStatus, plan_label,
+    Account, AgentCommand, ChangeKind, ConfigChoice, ConfigOption, Credits, FileChange, Goal,
+    GoalStatus, Item, ItemStatus, PlanStep, Question, RateLimits, RateWindow, RequestId,
+    ThreadMeta, TokenUsage, TurnStatus, plan_label,
 };
 pub use transcript::{Entry, EntryKind, Transcript, TurnSummary};

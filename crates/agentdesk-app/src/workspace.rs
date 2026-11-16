@@ -9,8 +9,8 @@ use std::{
 };
 
 use agentdesk_core::{
-    Account, AgentEvent, ApprovalDecision, Goal, GoalStatus, Item, RateLimits, RequestId,
-    ThreadMeta, Transcript, TurnStatus,
+    Account, AgentCommand, AgentEvent, ApprovalDecision, ConfigOption, Goal, GoalStatus, Item,
+    RateLimits, RequestId, ThreadMeta, Transcript, TurnStatus,
 };
 use codex_client::{
     AccessMode, Answers, CodexClient, CodexConfig, Incoming, ModelInfo, Prediction, ReviewTarget,
@@ -20,6 +20,10 @@ use futures::StreamExt;
 use gpui::{AppContext, Context, EventEmitter, Task};
 
 use crate::settings::{Settings, ThemePref};
+
+#[path = "workspace_acp.rs"]
+mod acp;
+pub use acp::{AcpAgent, AgentStatus, CODEX};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
@@ -134,6 +138,21 @@ pub struct Workspace {
     /// Full-text search: the query and what it found.
     pub search: Option<(String, Vec<(ThreadMeta, String)>)>,
     _search: Option<Task<()>>,
+    /// Claude Code, DeepSeek Harness, Antigravity: the ACP agents.
+    pub agents: Vec<AcpAgent>,
+    /// The agent new chats talk to.
+    pub draft_backend: String,
+    /// Each agent session's settings, as the agent last reported them.
+    session_options: HashMap<String, Vec<ConfigOption>>,
+    /// Each agent's latest settings, offered for its new chats.
+    known_options: HashMap<String, Vec<ConfigOption>>,
+    /// Settings picked for a new chat before its session exists, by agent.
+    draft_choices: HashMap<String, HashMap<String, String>>,
+    /// Slash commands by session, and each agent's latest.
+    commands: HashMap<String, Vec<AgentCommand>>,
+    agent_commands: HashMap<String, Vec<AgentCommand>>,
+    /// A session made ahead for a new chat, by agent: `(session, folder)`.
+    warm: HashMap<String, (String, PathBuf)>,
     _pump: Option<Task<()>>,
 }
 
@@ -173,9 +192,26 @@ impl Workspace {
             editing: None,
             search: None,
             _search: None,
+            agents: Vec::new(),
+            draft_backend: CODEX.into(),
+            session_options: HashMap::new(),
+            known_options: HashMap::new(),
+            draft_choices: HashMap::new(),
+            commands: HashMap::new(),
+            agent_commands: HashMap::new(),
+            warm: HashMap::new(),
             _pump: None,
         };
         workspace.connect(cx);
+        workspace.init_agents(cx);
+        if let Some(agent) = workspace.settings.default_agent.clone()
+            && (agent == CODEX
+                || workspace
+                    .agent(&agent)
+                    .is_some_and(|a| a.status != AgentStatus::NotInstalled))
+        {
+            workspace.draft_backend = agent;
+        }
         workspace
     }
 
@@ -237,7 +273,7 @@ impl Workspace {
             let signed_in = client.signed_in().await;
             let _ = this.update(cx, |ws, cx| {
                 match threads {
-                    Ok(threads) => ws.threads = threads,
+                    Ok(threads) => ws.merge_threads(CODEX, threads),
                     Err(error) => log::warn!("thread/list failed: {error:#}"),
                 }
                 match models {
@@ -381,10 +417,13 @@ impl Workspace {
                 ..
             } => {
                 self.turn_started.remove(thread_id);
-                if *status == TurnStatus::Completed {
+                if *status == TurnStatus::Completed && self.backend_of(thread_id) == CODEX {
                     self.predict(thread_id.clone(), turn_id.clone(), cx);
                 }
-                if let Some(thread) = self.threads.iter_mut().find(|t| t.id == *thread_id) {
+                // A replayed history is not new activity.
+                if !self.loading.contains(thread_id)
+                    && let Some(thread) = self.threads.iter_mut().find(|t| t.id == *thread_id)
+                {
                     thread.updated_at = jiff::Timestamp::now().as_second();
                 }
                 self.threads
@@ -400,9 +439,17 @@ impl Workspace {
             AgentEvent::Disconnected { reason } => {
                 self.status = Status::Failed(reason.clone());
                 self.client = None;
-                self.turn_started.clear();
-                for transcript in self.transcripts.values_mut() {
-                    transcript.apply(&event);
+                let codex: Vec<String> = self
+                    .threads
+                    .iter()
+                    .filter(|t| t.backend == CODEX)
+                    .map(|t| t.id.clone())
+                    .collect();
+                for id in codex {
+                    self.turn_started.remove(&id);
+                    if let Some(transcript) = self.transcripts.get_mut(&id) {
+                        transcript.apply(&event);
+                    }
                 }
                 cx.emit(Notice::Error(format!(
                     "{reason}. Restart it from the sidebar."
@@ -539,8 +586,9 @@ impl Workspace {
         self.transcript().is_some_and(Transcript::is_running)
     }
 
+    /// Whether the shown chat's agent can take a message.
     pub fn is_ready(&self) -> bool {
-        self.status == Status::Ready
+        self.view_agent_ready()
     }
 
     /// Whether the shown chat is waiting on its first sign of life: a turn
@@ -572,6 +620,7 @@ impl Workspace {
             self.born.remove(DRAFT);
         }
         self.view = View::Draft;
+        self.warm_draft(cx);
         cx.notify();
     }
 
@@ -579,6 +628,10 @@ impl Workspace {
         self.view = View::Thread(thread_id.clone());
         cx.notify();
         if self.transcripts.contains_key(&thread_id) || self.loading.contains(&thread_id) {
+            return;
+        }
+        if self.backend_of(&thread_id) != CODEX {
+            self.acp_open(thread_id, cx);
             return;
         }
         let Some(client) = self.client.clone() else {
@@ -1076,6 +1129,10 @@ impl Workspace {
         if composed.text.is_empty() && composed.images.is_empty() {
             return;
         }
+        if !self.is_codex_view() {
+            self.acp_send(composed, cx);
+            return;
+        }
         if self.client.is_none() {
             cx.emit(Notice::Error("Codex is not running.".into()));
             return;
@@ -1210,6 +1267,10 @@ impl Workspace {
         let View::Thread(thread_id) = self.view.clone() else {
             return;
         };
+        if self.backend_of(&thread_id) != CODEX {
+            self.acp_stop(&thread_id);
+            return;
+        }
         let Some(turn_id) = self
             .transcripts
             .get(&thread_id)
@@ -1237,6 +1298,10 @@ impl Workspace {
         decision: ApprovalDecision,
         cx: &mut Context<Self>,
     ) {
+        if self.backend_of(thread_id) != CODEX {
+            self.acp_answer(thread_id, request_id, decision, cx);
+            return;
+        }
         let Some(client) = &self.client else { return };
         if let Err(error) = client.answer_approval(request_id.clone(), decision) {
             log::warn!("answering approval failed: {error:#}");
@@ -1249,6 +1314,19 @@ impl Workspace {
     }
 
     pub fn archive(&mut self, thread_id: String, cx: &mut Context<Self>) {
+        if self.backend_of(&thread_id) != CODEX {
+            self.acp_archive(thread_id.clone(), cx);
+            self.threads.retain(|t| t.id != thread_id);
+            self.transcripts.remove(&thread_id);
+            self.settings.pinned.retain(|id| *id != thread_id);
+            if self.view == View::Thread(thread_id) {
+                self.view = View::Draft;
+                self.draft = Transcript::new();
+            }
+            cx.emit(Notice::Info("Chat archived".into()));
+            cx.notify();
+            return;
+        }
         let Some(client) = self.client.clone() else {
             return;
         };
@@ -1459,6 +1537,7 @@ impl Workspace {
     pub fn set_working_dir(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
         self.settings.use_folder(dir);
         self.settings.save();
+        self.warm_draft(cx);
         cx.notify();
     }
 

@@ -41,6 +41,13 @@ pub struct Settings {
     pub plan_mode: bool,
     /// Do not guess the next message after each answer.
     pub no_predictions: bool,
+    /// The agent new chats use: `codex`, `claude`, `deepseek`, `antigravity`.
+    pub default_agent: Option<String>,
+    /// Commands that start ACP agents, by agent id, overriding detection,
+    /// such as `{"deepseek": "/opt/dsh --profile acp"}`.
+    pub agent_commands: std::collections::HashMap<String, String>,
+    /// Agent sessions the user archived (ACP has no archive of its own).
+    pub hidden_sessions: Vec<String>,
 }
 
 impl Settings {

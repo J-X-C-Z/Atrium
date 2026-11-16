@@ -1,6 +1,6 @@
 # AgentDesk
 
-基于 Rust + [GPUI](https://www.gpui.rs) 的原生 Agent 桌面前端。第一阶段：类 ChatGPT 的对话界面，后端对接 **Codex CLI**（`codex app-server`）。
+基于 Rust + [GPUI](https://www.gpui.rs) 的原生 Agent 桌面前端：类 ChatGPT 的对话界面，后端对接 **Codex CLI**（`codex app-server`），以及通过 Agent Client Protocol（ACP）对接的 **Claude Code**、**DeepSeek Harness**、**Antigravity**。
 
 UI 组件：[Ely GPUI Components](https://github.com/ZacharyZhang-NY/Ely-GPUI-Components)（会话、消息、审批、工具卡片）+ [GPUI Kit](https://gpui-kit.com)（应用与窗口骨架）。
 
@@ -24,6 +24,23 @@ CODEX_BIN=target/debug/mock-codex cargo run -p agentdesk-app
 ```bash
 script/bundle-macos.sh
 ```
+
+## 支持的 Agent
+
+| Agent | 接入方式 | 本机需要 |
+|---|---|---|
+| Codex | `codex app-server`（JSON-RPC） | `codex`（`npm i -g @openai/codex` 或 `brew install codex`） |
+| Claude Code | 官方 ACP 适配器 `claude-agent-acp` | `claude-agent-acp`（`npm i -g @agentclientprotocol/claude-agent-acp`）；只装了 `claude` 时用 `npx` 自动获取适配器 |
+| DeepSeek Harness | `dsh --profile acp` | `dsh`（`npm i -g @deepseek-ai/dsh`） |
+| Antigravity | `agy acp`（agy 1.5+） | Antigravity CLI，首次运行 `agy acp --login` |
+
+启动时自动在 `PATH`（以及登录 shell 的 `PATH`）里查找；找不到的 agent 在选择器里显示为未安装，设置里给出安装命令。可以按 agent 覆盖启动命令：设置文件里的 `agent_commands`（如 `{"deepseek": "/opt/dsh --profile acp"}`），或环境变量 `AGENTDESK_CLAUDE_ACP` / `AGENTDESK_DEEPSEEK_ACP` / `AGENTDESK_ANTIGRAVITY_ACP`。
+
+- **新对话**：顶栏选 agent（记住上次的选择）。选中后会提前建好一个会话，于是输入框立即显示该 agent 自己的设置（模式、模型、推理强度……，其余收在 "Options" 里），第一条消息也更快。
+- **对话中**：流式回答、思考过程、工具调用（命令、文件读写、diff）、计划、权限审批、token 用量、该 agent 的斜杠命令，与 Codex 用同一套界面。
+- **历史**：侧边栏合并显示所有 agent 的会话（标注来源）。能回放历史的 agent（Claude、Antigravity）打开时重放；只能恢复的（DeepSeek）继续会话并注明没有历史。
+- **Codex 专属**：预测下一句、长期目标、记忆、编辑重发、分支、代码审查、压缩、全文搜索、账号与用量。这些在其他 agent 的对话里不显示。
+- AgentDesk 不向 agent 提供文件系统和终端能力：读写文件、运行命令都由 agent 自己完成，需要时通过权限请求来问你。
 
 ## 已实现
 
@@ -95,20 +112,23 @@ mock 后端的触发词：消息里带 `run`（命令 + 审批）、`edit`（文
 
 ```
 crates/
-  agentdesk-core/   与后端无关的模型：ThreadMeta / Item / AgentEvent，以及把事件折叠成扁平行列表的 Transcript
-  codex-client/     codex app-server 客户端：stdio JSON-RPC 传输、进程管理、协议 → AgentEvent 翻译；含 mock-codex
+  agentdesk-core/   与后端无关的模型：ThreadMeta / Item / AgentEvent / ConfigOption，以及把事件折叠成扁平行列表的 Transcript
+  agent-rpc/        共享传输层：子进程 stdio 上的行分隔 JSON-RPC（可选 JSON-RPC 2.0），查找可执行文件
+  codex-client/     codex app-server 客户端与协议翻译；含 mock-codex
+  acp-client/       ACP 客户端：握手、会话（new/load/resume/list/prompt/cancel/设置）、权限；把 session/update 翻译成 AgentEvent（为没有 id 的 ACP 合成轮次与条目）；含 mock-acp（可模仿 claude / deepseek / antigravity）
   agentdesk-app/    GPUI 应用：Workspace（状态与后端调用）+ ui/（sidebar、chat、composer、rows、调色板与设置）
 ```
 
 数据流只有一个方向：
 
 ```
-codex app-server ──JSON-RPC──▶ codex-client::translate ──AgentEvent──▶ Transcript ──▶ UI
+codex app-server ──JSON-RPC──▶ codex-client::translate ─┐
+ACP agents      ──JSON-RPC 2.0─▶ acp-client::Translator ─┴─AgentEvent──▶ Transcript ──▶ UI
         ▲                                                                              │
         └──────────── turn/start · turn/interrupt · 审批应答 ◀──── Workspace ◀─────────┘
 ```
 
-UI 只认识 `agentdesk-core` 的类型，不认识任何后端协议。接 Claude Code、DeepSeek Harness 或 ACP agent 时，只需要写一个新的 `xxx-client` 把它的协议翻译成 `AgentEvent`。Codex 协议标注为实验性、每个版本都会加字段，所以翻译层用 `serde_json::Value` 宽松读取：未知字段忽略，未知条目类型显示为普通系统行，不会让整条消息失败。
+UI 只认识 `agentdesk-core` 的类型，不认识任何后端协议。任何实现了 ACP 的 agent（如 Gemini CLI）都能以同样方式接入：在 `agents.rs` 里加一条配置即可。Codex 协议标注为实验性、每个版本都会加字段，所以翻译层用 `serde_json::Value` 宽松读取：未知字段忽略，未知条目类型显示为普通系统行，不会让整条消息失败。
 
 ## 测试
 
@@ -117,10 +137,11 @@ cargo test --workspace
 ```
 
 - `agentdesk-core`：Transcript 的归并规则（流式拼接、乐观消息去重、审批、失败与断连）
+- `acp-client`：翻译器单元测试（流式文本与工具交替、历史回放切分轮次、diff 与权限、分组选项与模式），以及四条走真实子进程（mock-acp）的端到端测试：Claude 的完整一轮（计划 + 读文件 + 带审批的命令 + diff）、拒绝命令、Claude 回放历史与 DeepSeek 恢复会话、修改设置与中途取消；另有一条 `--ignored` 测试可对真实 agent 做握手：`AGENTDESK_ACP="dsh --profile acp" cargo test -p acp-client -- --ignored real_agent`
 - `codex-client`：JSON-RPC 请求/响应匹配、协议翻译，以及九条走真实子进程的端到端测试：带审批的完整一轮、中断、附件 + 计划 + 用时、重命名 + 压缩 + 审查 + 文件搜索、预测（fork 回退）、插话、编辑/分支/全文搜索、目标 + 账号 + 用量 + 登录登出 + 记忆、提问 + 图片 + Plan 模式 + Fast
 
 ## 下一步
 
-- 后端抽象成 `AgentBackend` trait，接入 Claude Code（ACP / stream-json）
 - 编排内核独立为 daemon，Hub MCP 实现跨后端派单与回执
+- ACP agent 的插话（Claude 支持 prompt 排队）、agent 内登录（`authenticate`）
 - 场景（Scene）配置与网格面板

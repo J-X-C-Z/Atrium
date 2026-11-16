@@ -1,4 +1,6 @@
-//! Newline-delimited JSON-RPC, as `codex app-server` speaks it on stdio.
+//! Newline-delimited JSON-RPC on stdio, as `codex app-server` and Agent
+//! Client Protocol (ACP) agents speak it. Codex leaves out the `"jsonrpc"`
+//! field; ACP requires `"jsonrpc": "2.0"` on every message.
 //!
 //! Messages carry no `"jsonrpc"` field. Three shapes arrive:
 //! a response (`id` + `result`/`error`), a notification (`method`, no `id`)
@@ -59,6 +61,12 @@ pub struct Connection {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     pending: Pending,
     next_id: Arc<AtomicI64>,
+    /// Tag outgoing messages with `"jsonrpc": "2.0"`.
+    jsonrpc2: bool,
+    /// The event channel, to queue local markers behind what already arrived.
+    events: mpsc::UnboundedSender<Incoming>,
+    /// Who is on the other end, for logs.
+    peer: &'static str,
 }
 
 impl Connection {
@@ -68,15 +76,36 @@ impl Connection {
         reader: impl BufRead + Send + 'static,
         writer: impl Write + Send + 'static,
     ) -> (Self, mpsc::UnboundedReceiver<Incoming>) {
+        Self::with(reader, writer, false, "codex")
+    }
+
+    /// A strict JSON-RPC 2.0 connection, as ACP needs.
+    pub fn jsonrpc2(
+        reader: impl BufRead + Send + 'static,
+        writer: impl Write + Send + 'static,
+        peer: &'static str,
+    ) -> (Self, mpsc::UnboundedReceiver<Incoming>) {
+        Self::with(reader, writer, true, peer)
+    }
+
+    fn with(
+        reader: impl BufRead + Send + 'static,
+        writer: impl Write + Send + 'static,
+        jsonrpc2: bool,
+        peer: &'static str,
+    ) -> (Self, mpsc::UnboundedReceiver<Incoming>) {
         let (tx, rx) = mpsc::unbounded();
         let pending: Pending = Arc::default();
         let connection = Self {
             writer: Arc::new(Mutex::new(Box::new(writer))),
             pending: pending.clone(),
             next_id: Arc::new(AtomicI64::new(1)),
+            jsonrpc2,
+            peer,
+            events: tx.clone(),
         };
         thread::Builder::new()
-            .name("codex-rpc-reader".into())
+            .name(format!("{peer}-rpc-reader"))
             .spawn(move || read_loop(reader, pending, tx))
             .expect("spawn the rpc reader thread");
         (connection, rx)
@@ -88,7 +117,7 @@ impl Connection {
         let (tx, rx) = oneshot::channel();
         self.pending.lock().expect("pending lock").insert(id, tx);
         let params = serde_json::to_value(params).map_err(|e| RpcError::Write(e.to_string()))?;
-        log::debug!("codex >> #{id} {method}");
+        log::debug!("{} >> #{id} {method}", self.peer);
         if let Err(error) = self.send(&json!({ "id": id, "method": method, "params": params })) {
             self.pending.lock().expect("pending lock").remove(&id);
             return Err(error);
@@ -107,11 +136,17 @@ impl Connection {
     }
 
     pub fn notify(&self, method: &str, params: Option<Value>) -> Result<(), RpcError> {
-        log::debug!("codex >> {method}");
+        log::debug!("{} >> {method}", self.peer);
         match params {
             Some(params) => self.send(&json!({ "method": method, "params": params })),
             None => self.send(&json!({ "method": method })),
         }
+    }
+
+    /// Queues `incoming` on the event channel, behind everything the peer
+    /// sent so far: a marker that arrives in order with the peer's messages.
+    pub fn inject(&self, incoming: Incoming) {
+        let _ = self.events.unbounded_send(incoming);
     }
 
     /// Answers a server request.
@@ -124,7 +159,11 @@ impl Connection {
     }
 
     fn send(&self, message: &Value) -> Result<(), RpcError> {
-        let mut line = serde_json::to_vec(message).map_err(|e| RpcError::Write(e.to_string()))?;
+        let mut message = message.clone();
+        if self.jsonrpc2 {
+            message["jsonrpc"] = json!("2.0");
+        }
+        let mut line = serde_json::to_vec(&message).map_err(|e| RpcError::Write(e.to_string()))?;
         line.push(b'\n');
         let mut writer = self.writer.lock().expect("writer lock");
         writer

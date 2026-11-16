@@ -11,9 +11,10 @@
 //! * [`translate`] turns Codex notifications and requests into
 //!   [`agentdesk_core::AgentEvent`]s.
 
-pub mod process;
-pub mod rpc;
 pub mod translate;
+
+/// The shared transport, re-exported where it used to live.
+pub use agent_rpc::{process, rpc};
 
 mod client;
 

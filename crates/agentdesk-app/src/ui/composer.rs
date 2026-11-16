@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use agentdesk_core::ConfigOption;
 use codex_client::AccessMode;
 use ely_gpui_component::{
     buttons::{Button, ButtonVariant, IconButton, ToggleButton, ToggleItem},
@@ -201,12 +202,24 @@ impl Composer {
         let ws = self.workspace.read(cx);
         let wanted: SharedString = if let Some(prediction) = ws.prediction() {
             format!("{prediction}   ⇥ Tab").into()
-        } else if ws.is_running() {
+        } else if ws.is_running() && ws.is_codex_view() {
             "Add to what Codex is doing: it reads this at its next step".into()
+        } else if ws.is_running() {
+            format!(
+                "{} is working. Wait for it, or stop it to change course",
+                crate::agents::backend_name(ws.view_backend())
+            )
+            .into()
         } else if ws.editing.is_some() {
             "Edit your message".into()
         } else if ws.settings.plan_mode {
             "Describe the change: Codex plans first and waits for you".into()
+        } else if !ws.is_codex_view() {
+            format!(
+                "Ask {} anything. @ to add files, / for commands",
+                crate::agents::backend_name(ws.view_backend())
+            )
+            .into()
         } else {
             DEFAULT_PLACEHOLDER.into()
         };
@@ -260,25 +273,19 @@ impl Composer {
             "compact" => self.workspace.update(cx, |ws, cx| ws.compact(cx)),
             "attach" => self.pick_files(cx),
             "settings" => window.dispatch_action(Box::new(OpenSettings), cx),
+            agent if agent.starts_with("agent:") => {
+                // An agent's command is a message that starts with it.
+                let name = &agent["agent:".len()..];
+                self.set_text(&format!("/{name} "), window, cx);
+            }
             "sidebar" => window.dispatch_action(Box::new(ToggleSidebar), cx),
             other => log::warn!("unknown command {other}"),
         }
     }
 
-    fn tools(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    /// Codex's pickers: plan mode, Fast, access and reasoning effort.
+    fn codex_tools(&self, tools: &mut Vec<AnyElement>, cx: &mut Context<Self>) {
         let ws = self.workspace.read(cx);
-        let mut tools = Vec::new();
-        let this = cx.entity();
-
-        tools.push(
-            IconButton::new("attach", IconName::Paperclip)
-                .variant(ButtonVariant::Ghost)
-                .size(ControlSize::Sm)
-                .tooltip("Attach images or files")
-                .on_click(move |_, _, cx| this.update(cx, |this, cx| this.pick_files(cx)))
-                .into_any_element(),
-        );
-
         // Plan mode and Fast.
         let workspace = self.workspace.clone();
         tools.push(
@@ -374,6 +381,122 @@ impl Composer {
                     .into_any_element(),
             );
         }
+    }
+
+    /// An ACP agent's pickers, as the agent offers them: mode, model,
+    /// reasoning level and whatever else it reports.
+    fn agent_tools(&self, tools: &mut Vec<AnyElement>, cx: &mut Context<Self>) {
+        let ws = self.workspace.read(cx);
+        let options: Vec<_> = ws
+            .agent_options()
+            .into_iter()
+            .filter(|o| o.choices.len() > 1)
+            .collect();
+        let primary = |o: &ConfigOption| {
+            matches!(
+                o.category.as_deref(),
+                Some("mode" | "model" | "thought_level")
+            )
+        };
+        // Mode, model and reasoning level get their own pickers.
+        for option in options.iter().filter(|o| primary(o)) {
+            let icon = match option.category.as_deref() {
+                Some("mode") => IconName::Shield,
+                Some("model") => IconName::Sparkles,
+                _ => IconName::Gauge,
+            };
+            tools.push(
+                DropdownMenu::new(
+                    SharedString::from(format!("agent-option-{}", option.id)),
+                    option.current_name(),
+                    self.choices_menu(option),
+                )
+                .icon(icon)
+                .variant(ButtonVariant::Ghost)
+                .into_any_element(),
+            );
+        }
+        // Everything else the agent offers shares one menu, each by name.
+        let rest: Vec<&ConfigOption> = options.iter().filter(|o| !primary(o)).collect();
+        if !rest.is_empty() {
+            let mut menu = Menu::new();
+            for option in rest {
+                menu = menu.item(MenuItem::submenu(
+                    format!("{}: {}", option.name, option.current_name()),
+                    self.choices_menu(option),
+                ));
+            }
+            tools.push(
+                DropdownMenu::new("agent-options", "Options", menu)
+                    .icon(IconName::SlidersHorizontal)
+                    .variant(ButtonVariant::Ghost)
+                    .into_any_element(),
+            );
+        }
+    }
+
+    /// One agent setting's choices, grouped as the agent groups them.
+    fn choices_menu(&self, option: &ConfigOption) -> Menu {
+        let grouped = option
+            .choices
+            .iter()
+            .filter_map(|c| c.group.as_deref())
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            > 1;
+        let mut menu = Menu::new();
+        let mut last_group: Option<String> = None;
+        for choice in &option.choices {
+            if grouped && choice.group != last_group && last_group.is_some() {
+                menu = menu.separator();
+            }
+            last_group = choice.group.clone();
+            let label = match (&choice.group, grouped) {
+                (Some(group), true) => format!("{group} · {}", choice.name),
+                _ => choice.name.clone(),
+            };
+            let label = match &choice.description {
+                Some(description) if option.category.as_deref() == Some("mode") => {
+                    format!("{label} — {description}")
+                }
+                _ => label,
+            };
+            let (workspace, id, value) = (
+                self.workspace.clone(),
+                option.id.clone(),
+                choice.value.clone(),
+            );
+            menu = menu.item(
+                MenuItem::radio(label, choice.value == option.current).on_click(move |_, cx| {
+                    workspace.update(cx, |ws, cx| {
+                        ws.set_agent_option(id.clone(), value.clone(), cx)
+                    })
+                }),
+            );
+        }
+        menu
+    }
+
+    fn tools(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let ws = self.workspace.read(cx);
+        let mut tools = Vec::new();
+        let this = cx.entity();
+
+        tools.push(
+            IconButton::new("attach", IconName::Paperclip)
+                .variant(ButtonVariant::Ghost)
+                .size(ControlSize::Sm)
+                .tooltip("Attach images or files")
+                .on_click(move |_, _, cx| this.update(cx, |this, cx| this.pick_files(cx)))
+                .into_any_element(),
+        );
+
+        if ws.is_codex_view() {
+            self.codex_tools(&mut tools, cx);
+        } else {
+            self.agent_tools(&mut tools, cx);
+        }
+        let ws = self.workspace.read(cx);
 
         // Folder: chosen for a new chat; fixed once the chat exists.
         if ws.active_thread().is_none() {
@@ -551,9 +674,23 @@ impl Render for Composer {
             ));
         }
 
-        let commands = COMMANDS
+        // Review and compact are Codex's; an ACP agent brings its own commands.
+        let codex = self.workspace.read(cx).is_codex_view();
+        let mut commands: Vec<Choice> = COMMANDS
             .iter()
-            .map(|(value, label, icon, note)| Choice::new(*value, *label).icon(*icon).note(*note));
+            .filter(|(value, ..)| codex || !matches!(*value, "review" | "compact"))
+            .map(|(value, label, icon, note)| Choice::new(*value, *label).icon(*icon).note(*note))
+            .collect();
+        for command in self.workspace.read(cx).agent_slash_commands() {
+            commands.push(
+                Choice::new(
+                    format!("agent:{}", command.name),
+                    format!("/{}", command.name),
+                )
+                .icon(IconName::Bot)
+                .note(command.description),
+            );
+        }
         let this = cx.entity();
         input = input.commands(commands, move |value, window, cx| {
             let value = value.to_string();
@@ -607,7 +744,11 @@ impl Render for Composer {
                     .text_size(theme.text_size(TextSize::Xs))
                     .text_color(colors.fg_subtle)
                     .child(notice.unwrap_or_else(|| {
-                        "Codex can make mistakes. Review its changes before you ship them.".into()
+                        format!(
+                            "{} can make mistakes. Review its changes before you ship them.",
+                            crate::agents::backend_name(self.workspace.read(cx).view_backend())
+                        )
+                        .into()
                     })),
             )
     }

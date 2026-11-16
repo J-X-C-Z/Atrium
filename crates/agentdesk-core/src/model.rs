@@ -8,6 +8,8 @@ pub type RequestId = serde_json::Value;
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThreadMeta {
     pub id: String,
+    /// Which agent the thread belongs to, such as `codex` or `claude`.
+    pub backend: String,
     /// User-facing title; falls back to `preview` when the backend has none.
     pub name: Option<String>,
     /// Usually the first user message.
@@ -353,4 +355,44 @@ pub struct Question {
     /// Free text is allowed besides the options.
     pub allow_other: bool,
     pub secret: bool,
+}
+
+/// One choice of a [`ConfigOption`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConfigChoice {
+    pub value: String,
+    pub name: String,
+    pub description: Option<String>,
+    /// The group it is listed under, such as a model provider.
+    pub group: Option<String>,
+}
+
+/// A setting an agent offers per session, such as its mode, model or
+/// reasoning level (ACP `configOptions`, and session modes).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConfigOption {
+    pub id: String,
+    pub name: String,
+    /// `mode`, `model`, `thought_level`, or something the agent made up.
+    pub category: Option<String>,
+    pub current: String,
+    pub choices: Vec<ConfigChoice>,
+}
+
+impl ConfigOption {
+    /// The current choice's display name.
+    pub fn current_name(&self) -> String {
+        self.choices
+            .iter()
+            .find(|c| c.value == self.current)
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| self.current.clone())
+    }
+}
+
+/// A command an agent offers, invoked by sending `/name`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgentCommand {
+    pub name: String,
+    pub description: String,
 }

@@ -23,7 +23,7 @@ use super::{
 };
 use agentdesk_core::GoalStatus;
 
-use crate::workspace::{Status, View, Workspace};
+use crate::workspace::{AgentStatus, CODEX, Status, View, Workspace};
 
 const STARTERS: [(&str, IconName); 4] = [
     ("Explain this project", IconName::FileText),
@@ -143,36 +143,36 @@ fn header(
                 )
         });
 
-    // Chat menu: rename, pin, compact, review, archive.
+    // Chat menu. Rename, review, compact, goals, branches and memory are Codex's.
+    let codex = ws.is_codex_view();
     let chat_menu = thread_id.as_ref().map(|id| {
         let pinned = ws.settings.is_pinned(id);
-        let (rename, pin, compact, review, archive) = (
-            (root.clone(), id.clone()),
-            (workspace.clone(), id.clone()),
-            workspace.clone(),
-            workspace.clone(),
-            (workspace.clone(), id.clone()),
+        let mut menu = Menu::new();
+        if codex {
+            let rename = (root.clone(), id.clone());
+            menu = menu.item(MenuItem::new("Rename…").icon(IconName::Pencil).on_click(
+                move |window, cx| {
+                    let (root, id) = rename.clone();
+                    root.update(cx, |root, cx| root.start_rename(id, window, cx));
+                },
+            ));
+        }
+        let pin = (workspace.clone(), id.clone());
+        menu = menu.item(
+            MenuItem::new(if pinned { "Unpin" } else { "Pin to top" })
+                .icon(if pinned {
+                    IconName::PinOff
+                } else {
+                    IconName::Pin
+                })
+                .on_click(move |_, cx| {
+                    let (ws, id) = pin.clone();
+                    ws.update(cx, |ws, cx| ws.toggle_pin(&id, cx));
+                }),
         );
-        let menu =
-            Menu::new()
-                .item(MenuItem::new("Rename…").icon(IconName::Pencil).on_click(
-                    move |window, cx| {
-                        let (root, id) = rename.clone();
-                        root.update(cx, |root, cx| root.start_rename(id, window, cx));
-                    },
-                ))
-                .item(
-                    MenuItem::new(if pinned { "Unpin" } else { "Pin to top" })
-                        .icon(if pinned {
-                            IconName::PinOff
-                        } else {
-                            IconName::Pin
-                        })
-                        .on_click(move |_, cx| {
-                            let (ws, id) = pin.clone();
-                            ws.update(cx, |ws, cx| ws.toggle_pin(&id, cx));
-                        }),
-                )
+        if codex {
+            let (review, compact) = (workspace.clone(), workspace.clone());
+            menu = menu
                 .separator()
                 .item(
                     MenuItem::new("Review uncommitted changes")
@@ -204,18 +204,71 @@ fn header(
                 .item(MenuItem::check("Use memory", memory).on_click({
                     let workspace = workspace.clone();
                     move |_, cx| workspace.update(cx, |ws, cx| ws.toggle_memory(cx))
-                }))
-                .separator()
-                .item(
-                    MenuItem::new("Archive")
-                        .icon(IconName::Archive)
-                        .on_click(move |_, cx| {
-                            let (ws, id) = archive.clone();
-                            ws.update(cx, |ws, cx| ws.archive(id, cx));
-                        }),
-                );
+                }));
+        }
+        let archive = (workspace.clone(), id.clone());
+        menu = menu
+            .separator()
+            .item(
+                MenuItem::new("Archive")
+                    .icon(IconName::Archive)
+                    .on_click(move |_, cx| {
+                        let (ws, id) = archive.clone();
+                        ws.update(cx, |ws, cx| ws.archive(id, cx));
+                    }),
+            );
         OverflowMenu::new("chat-menu", menu)
     });
+
+    // Which agent: chosen for a new chat, fixed once the chat exists.
+    let agent_picker = {
+        let backend = ws.view_backend().to_string();
+        let label = crate::agents::backend_name(&backend);
+        if thread_id.is_none() {
+            let mut menu = Menu::new().item(
+                MenuItem::radio(agent_label("Codex", codex_status(ws)), backend == CODEX).on_click(
+                    {
+                        let workspace = workspace.clone();
+                        move |_, cx| workspace.update(cx, |ws, cx| ws.set_draft_backend(CODEX, cx))
+                    },
+                ),
+            );
+            for agent in &ws.agents {
+                let id = agent.profile.id;
+                let installed = agent.status != AgentStatus::NotInstalled;
+                let workspace = workspace.clone();
+                menu = menu.item(
+                    MenuItem::radio(
+                        agent_label(agent.profile.name, agent_status_text(&agent.status)),
+                        backend == id,
+                    )
+                    .disabled(!installed)
+                    .on_click(move |_, cx| {
+                        workspace.update(cx, |ws, cx| ws.set_draft_backend(id, cx))
+                    }),
+                );
+            }
+            DropdownMenu::new("agent", label, menu)
+                .icon(IconName::Bot)
+                .variant(ButtonVariant::Ghost)
+                .into_any_element()
+        } else {
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .px_2()
+                .text_size(theme.text_size(TextSize::Sm))
+                .child(
+                    Icon::new(IconName::Bot)
+                        .size(IconSize::Sm)
+                        .color(colors.fg_muted),
+                )
+                .child(label)
+                .into_any_element()
+        }
+    };
 
     let left_room = if sidebar_collapsed && cfg!(target_os = "macos") {
         px(28.)
@@ -229,11 +282,14 @@ fn header(
         .flex()
         .items_center()
         .gap_2()
-        .child(
-            DropdownMenu::new("model", ws.model_label(), models)
-                .icon(IconName::Sparkles)
-                .variant(ButtonVariant::Ghost),
-        )
+        .child(agent_picker)
+        .when(codex, |bar| {
+            bar.child(
+                DropdownMenu::new("model", ws.model_label(), models)
+                    .icon(IconName::Sparkles)
+                    .variant(ButtonVariant::Ghost),
+            )
+        })
         .child(
             div()
                 .flex_1()
@@ -382,7 +438,7 @@ fn body(
                     .mt_neg_4()
                     .text_size(theme.text_size(TextSize::Sm))
                     .text_color(colors.fg_muted)
-                    .child(format!("Codex is ready in {folder}")),
+                    .child(readiness(ws, &folder)),
             )
             .child(composer_column(composer))
             .child(SuggestionChips::new(
@@ -551,6 +607,53 @@ fn goal_banner(
             )
             .into_any_element(),
     )
+}
+
+fn agent_label(name: &str, status: Option<&'static str>) -> String {
+    match status {
+        Some(status) => format!("{name} · {status}"),
+        None => name.to_string(),
+    }
+}
+
+fn codex_status(ws: &Workspace) -> Option<&'static str> {
+    match ws.status {
+        Status::Ready => None,
+        Status::Connecting => Some("starting"),
+        Status::Failed(_) => Some("not running"),
+    }
+}
+
+fn agent_status_text(status: &AgentStatus) -> Option<&'static str> {
+    match status {
+        AgentStatus::Ready => None,
+        AgentStatus::Starting => Some("starting"),
+        AgentStatus::NotInstalled => Some("not installed"),
+        AgentStatus::Failed(_) => Some("not running"),
+    }
+}
+
+/// "Claude Code is ready in ~/app", or why it is not.
+fn readiness(ws: &Workspace, folder: &str) -> String {
+    let backend = ws.view_backend();
+    let name = crate::agents::backend_name(backend);
+    let state = if backend == CODEX {
+        codex_status(ws)
+    } else {
+        ws.agent(backend).and_then(|a| agent_status_text(&a.status))
+    };
+    match state {
+        None => format!("{name} is ready in {folder}"),
+        Some("starting") => format!("Starting {name}…"),
+        Some("not installed") => {
+            let install = ws
+                .agent(backend)
+                .map(|a| a.profile.install)
+                .unwrap_or_default();
+            format!("{name} is not installed. {install}")
+        }
+        Some(_) => format!("{name} is not running. Pick it again to restart it."),
+    }
 }
 
 #[cfg(test)]

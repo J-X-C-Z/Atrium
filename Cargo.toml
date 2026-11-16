@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["crates/agentdesk-core", "crates/codex-client", "crates/agentdesk-app"]
+members = [
+    "crates/agentdesk-core",
+    "crates/agent-rpc",
+    "crates/codex-client",
+    "crates/acp-client",
+    "crates/agentdesk-app",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -18,9 +24,12 @@ log = "0.4"
 env_logger = "0.11"
 jiff = "0.2"
 dirs = "6"
+base64 = "0.22"
 
 agentdesk-core = { path = "crates/agentdesk-core" }
 codex-client = { path = "crates/codex-client" }
+agent-rpc = { path = "crates/agent-rpc" }
+acp-client = { path = "crates/acp-client" }
 
 # UI stack. GPUI Kit 0.7.1 and Ely both pin the gpui-pre 0.3.8 snapshot:
 # upgrade all three together, never one alone.

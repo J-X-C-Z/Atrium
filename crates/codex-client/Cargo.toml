@@ -8,6 +8,7 @@ description = "Drives `codex app-server` over stdio JSON-RPC and translates its 
 
 [dependencies]
 agentdesk-core.workspace = true
+agent-rpc.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true

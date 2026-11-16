@@ -1,6 +1,7 @@
 //! AgentDesk: a native desktop front end for coding agents, built on GPUI.
 //! This first cut drives the Codex CLI (`codex app-server`).
 
+mod agents;
 mod settings;
 mod ui;
 mod workspace;

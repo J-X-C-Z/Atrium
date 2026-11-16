@@ -150,22 +150,24 @@ fn footer(
         actions =
             actions.on_regenerate(move |_, cx| retry.update(cx, |ws, cx| ws.retry(&turn, cx)));
     }
-    let _ = cx;
+    let codex = workspace.read(cx).is_codex_view();
     let branch = workspace.clone();
     let from = turn.clone();
     Some(
         footer
             .child(actions)
-            .child(
-                IconButton::new(key("branch", &turn), IconName::GitBranch)
-                    .variant(ButtonVariant::Ghost)
-                    .size(ControlSize::Sm)
-                    .tooltip("Branch into a new chat from here")
-                    .on_click(move |_, _, cx| {
-                        let from = from.clone();
-                        branch.update(cx, |ws, cx| ws.branch(Some(from), cx))
-                    }),
-            )
+            .when(codex, |footer| {
+                footer.child(
+                    IconButton::new(key("branch", &turn), IconName::GitBranch)
+                        .variant(ButtonVariant::Ghost)
+                        .size(ControlSize::Sm)
+                        .tooltip("Branch into a new chat from here")
+                        .on_click(move |_, _, cx| {
+                            let from = from.clone();
+                            branch.update(cx, |ws, cx| ws.branch(Some(from), cx))
+                        }),
+                )
+            })
             .into_any_element(),
     )
 }
@@ -199,6 +201,7 @@ fn entry_body(
                 }) == Some(ix)
             });
             let editable = thread_id.is_some()
+                && ws.is_codex_view()
                 && starts_turn
                 && !ws.is_running()
                 && ws
@@ -263,6 +266,9 @@ fn entry_body(
             answer,
             resolved,
         } => {
+            let agent = crate::agents::backend_name(
+                workspace.read(cx).backend_of(thread_id.unwrap_or_default()),
+            );
             let (title, detail) = match &request.kind {
                 ApprovalKind::Command {
                     command,
@@ -271,17 +277,27 @@ fn entry_body(
                 } => (
                     reason
                         .clone()
-                        .unwrap_or_else(|| "Codex wants to run a command".into()),
-                    format!("$ {command}\n  in {cwd}"),
+                        .unwrap_or_else(|| format!("{agent} wants to run a command")),
+                    if cwd.is_empty() {
+                        format!("$ {command}")
+                    } else {
+                        format!("$ {command}\n  in {cwd}")
+                    },
                 ),
                 ApprovalKind::FileChange { reason, grant_root } => (
                     reason
                         .clone()
-                        .unwrap_or_else(|| "Codex wants to change files".into()),
+                        .unwrap_or_else(|| format!("{agent} wants to change files")),
                     match grant_root {
                         Some(root) => format!("Write access under {root}"),
                         None => "Apply the proposed edits".into(),
                     },
+                ),
+                ApprovalKind::Tool { title, detail } => (
+                    format!("{agent}: {title}"),
+                    detail
+                        .clone()
+                        .unwrap_or_else(|| "Allow this tool to run".into()),
                 ),
             };
             match (answer, resolved) {

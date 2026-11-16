@@ -457,6 +457,8 @@ impl Transcript {
             AgentEvent::ThreadStarted(_)
             | AgentEvent::ThreadNameUpdated { .. }
             | AgentEvent::PredictionUpdated { .. }
+            | AgentEvent::ConfigUpdated { .. }
+            | AgentEvent::CommandsUpdated { .. }
             | AgentEvent::GoalUpdated { .. }
             | AgentEvent::RateLimitsUpdated(_)
             | AgentEvent::AccountChanged

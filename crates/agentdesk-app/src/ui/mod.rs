@@ -20,8 +20,9 @@ use ely_gpui_component::{
     theme::{ActiveTheme, ControlSize, Mode, TextSize, Theme},
 };
 use gpui::{
-    Action, AnyElement, App, Context, Entity, FocusHandle, Global, IntoElement, ParentElement,
-    Render, Styled, Subscription, WeakEntity, Window, WindowAppearance, actions, div, prelude::*,
+    Action, AnyElement, App, Context, Entity, FocusHandle, Global, InteractiveElement as _,
+    IntoElement, ParentElement, Render, StatefulInteractiveElement as _, Styled, Subscription,
+    WeakEntity, Window, WindowAppearance, actions, div, prelude::*,
 };
 use gpui_kit::component::theme::{Theme as KitTheme, ThemeMode};
 
@@ -491,6 +492,76 @@ impl RootView {
         .into_any_element()
     }
 
+    /// Each agent, whether it runs, and how to get it when it does not.
+    fn agents_list(&self, cx: &mut Context<Self>) -> AnyElement {
+        use crate::workspace::{AgentStatus, Status};
+        let theme = cx.theme();
+        let colors = theme.colors.clone();
+        let ws = self.workspace.read(cx);
+        let row = |name: String, dot: gpui::Hsla, said: String| {
+            div()
+                .flex()
+                .items_start()
+                .gap_2()
+                .text_size(theme.text_size(TextSize::Sm))
+                .child(
+                    div()
+                        .mt_1p5()
+                        .size(gpui::px(7.))
+                        .flex_none()
+                        .rounded_full()
+                        .bg(dot),
+                )
+                .child(div().w(gpui::px(130.)).flex_none().child(name))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_color(colors.fg_muted)
+                        .child(said),
+                )
+        };
+        let codex = match &ws.status {
+            Status::Ready => (colors.success, ws.backend_label.clone()),
+            Status::Connecting => (colors.warning, "Starting…".into()),
+            Status::Failed(reason) => (colors.danger, reason.clone()),
+        };
+        let mut list =
+            div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .gap_1p5()
+                .child(row("Codex".into(), codex.0, codex.1));
+        for agent in &ws.agents {
+            let (dot, said) = match &agent.status {
+                AgentStatus::Ready => (
+                    colors.success,
+                    agent
+                        .info
+                        .as_ref()
+                        .map(|i| {
+                            format!(
+                                "{} {}",
+                                if i.title.is_empty() {
+                                    &i.name
+                                } else {
+                                    &i.title
+                                },
+                                i.version
+                            )
+                        })
+                        .unwrap_or_else(|| "Ready".into()),
+                ),
+                AgentStatus::Starting => (colors.warning, "Starting…".into()),
+                AgentStatus::NotInstalled => (colors.fg_subtle, agent.profile.install.to_string()),
+                AgentStatus::Failed(reason) => (colors.danger, reason.clone()),
+            };
+            list = list.child(row(agent.profile.name.to_string(), dot, said));
+        }
+        list.into_any_element()
+    }
+
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let current = self
             .workspace
@@ -566,6 +637,18 @@ impl RootView {
             ("theme:dark", "Theme: dark", IconName::Moon),
         ]
         .map(|(value, label, icon)| Command::new(value, label).icon(icon));
+        let agents: Vec<Command> = std::iter::once(("codex", "Codex"))
+            .chain(
+                ws.agents
+                    .iter()
+                    .filter(|a| a.status != crate::workspace::AgentStatus::NotInstalled)
+                    .map(|a| (a.profile.id, a.profile.name)),
+            )
+            .map(|(id, name)| {
+                Command::new(format!("agent:{id}"), format!("New chat with {name}"))
+                    .icon(IconName::Bot)
+            })
+            .collect();
         let chats: Vec<Command> = ws
             .threads
             .iter()
@@ -581,6 +664,7 @@ impl RootView {
             close.update(cx, |this, cx| this.close_overlay(window, cx))
         })
         .group("Actions", actions)
+        .group("Agents", agents)
         .group("Chats", chats)
         .group("Access", modes)
         .group("Appearance", themes)
@@ -619,7 +703,13 @@ impl RootView {
                 cx.notify();
             }),
             other => {
-                if let Some(id) = other.strip_prefix("chat:") {
+                if let Some(agent) = other.strip_prefix("agent:") {
+                    let agent = agent.to_string();
+                    workspace.update(cx, |ws, cx| {
+                        ws.set_draft_backend(&agent, cx);
+                        ws.new_chat(cx);
+                    });
+                } else if let Some(id) = other.strip_prefix("chat:") {
                     let id = id.to_string();
                     workspace.update(cx, |ws, cx| ws.open_thread(id, cx));
                 } else if let Some(mode) = other.strip_prefix("mode:") {
@@ -650,6 +740,7 @@ impl RootView {
         codex_path: &Entity<TextInput>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let agents = self.agents_list(cx);
         let theme = cx.theme();
         let colors = theme.colors.clone();
         let ws = self.workspace.read(cx);
@@ -724,6 +815,10 @@ impl RootView {
         .detail(about)
         .child(
             div()
+                .id("settings-body")
+                .max_h(gpui::px(480.))
+                .overflow_y_scroll()
+                .pr_1()
                 .flex()
                 .flex_col()
                 .gap_5()
@@ -754,6 +849,11 @@ impl RootView {
                             }
                         })
                         .into_any_element(),
+                ))
+                .child(section(
+                    "Agents",
+                    "Claude Code, DeepSeek Harness and Antigravity run over the Agent Client Protocol. Set a command per agent with `agent_commands` in settings.json.",
+                    agents,
                 ))
                 .child(section(
                     "Codex CLI",

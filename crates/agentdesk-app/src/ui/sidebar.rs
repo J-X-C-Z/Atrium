@@ -114,7 +114,11 @@ pub fn render(
         .iter()
         .map(|thread| Conversation {
             key: thread.id.clone().into(),
-            title: thread.title().into(),
+            // Other agents' chats say whose they are.
+            title: match ws.agent(&thread.backend) {
+                Some(agent) => format!("{} · {}", agent.profile.short, thread.title()).into(),
+                None => thread.title().into(),
+            },
             at: Timestamp::from_second(thread.updated_at).unwrap_or(now),
             pinned: ws.settings.is_pinned(&thread.id),
         })

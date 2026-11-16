@@ -1,0 +1,24 @@
+[package]
+name = "acp-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Drives Agent Client Protocol agents (Claude Code, DeepSeek Harness, Antigravity, …) and translates ACP into AgentDesk events."
+
+[dependencies]
+agentdesk-core.workspace = true
+agent-rpc.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+futures.workspace = true
+log.workspace = true
+jiff.workspace = true
+base64.workspace = true
+
+[dev-dependencies]
+futures = { workspace = true, features = ["executor"] }
+
+[[bin]]
+name = "mock-acp"
+path = "src/bin/mock_acp.rs"
