@@ -6,7 +6,10 @@ use std::{
     thread,
 };
 
-use agentdesk_core::{ApprovalDecision, Item, RequestId, ThreadMeta, TurnStatus};
+use agentdesk_core::{
+    Account, ApprovalDecision, Goal, GoalStatus, Item, RateLimits, RequestId, ThreadMeta,
+    TurnStatus,
+};
 use anyhow::{Context as _, Result, anyhow};
 use futures::channel::mpsc;
 use serde_json::{Value, json};
@@ -48,6 +51,9 @@ pub struct ModelInfo {
     /// Reasoning efforts the model accepts, such as `low`, `medium`, `high`.
     pub efforts: Vec<String>,
     pub default_effort: Option<String>,
+    /// Faster service tiers the plan offers, as `(id, name, description)`,
+    /// such as `("priority", "Fast", "2x speed, increased usage")`.
+    pub service_tiers: Vec<(String, String, String)>,
 }
 
 /// How much Codex may do without asking, as Codex's own UI offers it.
@@ -128,7 +134,14 @@ pub struct TurnRequest {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub mode: Option<AccessMode>,
+    /// A service tier id, such as `priority` for Fast.
+    pub service_tier: Option<String>,
+    /// Plan before acting: Codex proposes a plan and waits. Needs `model`.
+    pub plan_mode: bool,
 }
+
+/// How to answer a question the agent asked: `(question id, answers)`.
+pub type Answers = Vec<(String, Vec<String>)>;
 
 /// What `review/start` looks at.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -136,6 +149,20 @@ pub enum ReviewTarget {
     UncommittedChanges,
     BaseBranch(String),
     Custom(String),
+}
+
+/// What a prediction is asked to say, when Codex has no built-in predictor.
+pub const PREDICTION_PROMPT: &str = "Predict the next message I am most likely to send in this conversation. \
+Reply with only that message, written as I would write it, in my language, at most 20 words. \
+Do not run tools. If there is no good guess, reply with nothing.";
+
+/// Where a requested prediction will come from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Prediction {
+    /// Codex sends `thread/prediction/updated` for the thread.
+    Notified,
+    /// The answer of this ephemeral fork's turn is the prediction.
+    Fork(String),
 }
 
 /// Kills the server when the last client handle goes.
@@ -222,7 +249,9 @@ impl CodexClient {
                         "version": env!("CARGO_PKG_VERSION"),
                     },
                     "capabilities": {
-                        "experimentalApi": false,
+                        // Prediction, goals, memory, plan mode and steering
+                        // live in the experimental API.
+                        "experimentalApi": true,
                         "requestAttestation": false,
                     },
                 }),
@@ -299,8 +328,7 @@ impl CodexClient {
         Ok(())
     }
 
-    /// Sends the user's message, starting a turn. Returns the turn's id.
-    pub async fn turn_start(&self, thread_id: &str, request: TurnRequest) -> Result<String> {
+    fn input(request: &TurnRequest) -> Vec<Value> {
         let mut input = vec![json!({ "type": "text", "text": request.text, "text_elements": [] })];
         for image in &request.images {
             input.push(json!({ "type": "localImage", "path": image.display().to_string() }));
@@ -314,19 +342,275 @@ impl CodexClient {
                 json!({ "type": "mention", "name": name, "path": path.display().to_string() }),
             );
         }
-        let mut params = json!({ "threadId": thread_id, "input": input });
-        if let Some(model) = request.model {
+        input
+    }
+
+    /// Sends the user's message, starting a turn. Returns the turn's id.
+    pub async fn turn_start(&self, thread_id: &str, request: TurnRequest) -> Result<String> {
+        let mut params = json!({ "threadId": thread_id, "input": Self::input(&request) });
+        if let Some(model) = &request.model {
             params["model"] = json!(model);
+            // Plan mode rides on the collaboration mode, which names its model.
+            params["collaborationMode"] = json!({
+                "mode": if request.plan_mode { "plan" } else { "default" },
+                "settings": {
+                    "model": model,
+                    "reasoning_effort": request.effort,
+                    "developer_instructions": null,
+                },
+            });
         }
-        if let Some(effort) = request.effort {
+        if let Some(effort) = &request.effort {
             params["effort"] = json!(effort);
         }
         if let Some(mode) = request.mode {
             params["approvalPolicy"] = json!(mode.approval_policy());
             params["sandboxPolicy"] = mode.sandbox_policy();
         }
+        if let Some(tier) = &request.service_tier {
+            params["serviceTier"] = json!(tier);
+        }
         let result = self.connection.request("turn/start", params).await?;
         Ok(str_of(&result["turn"], "id"))
+    }
+
+    /// Adds the user's message to the running turn, which reads it at its next step.
+    pub async fn turn_steer(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        request: TurnRequest,
+    ) -> Result<String> {
+        let result = self
+            .connection
+            .request(
+                "turn/steer",
+                json!({ "threadId": thread_id, "expectedTurnId": turn_id, "input": Self::input(&request) }),
+            )
+            .await?;
+        Ok(str_of(&result, "turnId"))
+    }
+
+    /// Asks Codex to predict the user's next message after `source_turn_id`.
+    /// Codex answers with `thread/prediction/updated`. Where it does not
+    /// implement the request yet, a throwaway fork in prediction mode answers
+    /// instead: then the returned id is the fork's, and its reply is the guess.
+    pub async fn request_prediction(
+        &self,
+        thread_id: &str,
+        source_turn_id: &str,
+    ) -> Result<Prediction> {
+        let asked = self
+            .connection
+            .request(
+                "thread/prediction/request",
+                json!({ "threadId": thread_id, "sourceTurnId": source_turn_id }),
+            )
+            .await;
+        match asked {
+            Ok(_) => return Ok(Prediction::Notified),
+            Err(RpcError::Server { code: -32601, .. }) => {}
+            Err(error) => return Err(error.into()),
+        }
+        let forked = self
+            .connection
+            .request(
+                "thread/fork",
+                json!({
+                    "threadId": thread_id,
+                    "lastTurnId": source_turn_id,
+                    "ephemeral": true,
+                    "experimentalPredictionMode": true,
+                    "experimentalDisablePredictionMcp": true,
+                }),
+            )
+            .await?;
+        let fork_id = str_of(&forked["thread"], "id");
+        self.connection
+            .request(
+                "turn/start",
+                json!({
+                    "threadId": fork_id,
+                    "input": [{ "type": "text", "text": PREDICTION_PROMPT, "text_elements": [] }],
+                }),
+            )
+            .await?;
+        Ok(Prediction::Fork(fork_id))
+    }
+
+    /// Stops receiving a thread's events and lets the server unload it.
+    pub async fn thread_unsubscribe(&self, thread_id: &str) -> Result<()> {
+        self.connection
+            .request("thread/unsubscribe", json!({ "threadId": thread_id }))
+            .await?;
+        Ok(())
+    }
+
+    /// Drops `before_turn_id` and every later turn from the thread's history
+    /// (files on disk are not touched), so the conversation can go another way.
+    pub async fn thread_revert(&self, thread_id: &str, before_turn_id: &str) -> Result<()> {
+        self.connection
+            .request(
+                "thread/revert",
+                json!({ "threadId": thread_id, "beforeTurnId": before_turn_id }),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Copies the thread through `last_turn_id` into a new chat.
+    pub async fn thread_fork(
+        &self,
+        thread_id: &str,
+        last_turn_id: Option<&str>,
+    ) -> Result<ThreadMeta> {
+        let mut params = json!({ "threadId": thread_id });
+        if let Some(turn) = last_turn_id {
+            params["lastTurnId"] = json!(turn);
+        }
+        let result = self.connection.request("thread/fork", params).await?;
+        translate::thread_meta(&result["thread"])
+            .ok_or_else(|| anyhow!("thread/fork returned no thread"))
+    }
+
+    /// Chats whose content mentions `term`, with a matching snippet each.
+    pub async fn thread_search(&self, term: &str, limit: u32) -> Result<Vec<(ThreadMeta, String)>> {
+        let result = self
+            .connection
+            .request(
+                "thread/search",
+                json!({ "searchTerm": term, "limit": limit, "sortKey": "recency_at" }),
+            )
+            .await?;
+        Ok(result["data"]
+            .as_array()
+            .map(|hits| {
+                hits.iter()
+                    .filter_map(|hit| {
+                        Some((
+                            translate::thread_meta(&hit["thread"])?,
+                            str_of(hit, "snippet"),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    pub async fn goal_get(&self, thread_id: &str) -> Result<Option<Goal>> {
+        let result = self
+            .connection
+            .request("thread/goal/get", json!({ "threadId": thread_id }))
+            .await?;
+        Ok(translate::goal(&result["goal"]))
+    }
+
+    /// Sets or updates the thread's goal. `None` fields keep their value.
+    pub async fn goal_set(
+        &self,
+        thread_id: &str,
+        objective: Option<&str>,
+        status: Option<GoalStatus>,
+        token_budget: Option<u64>,
+    ) -> Result<Option<Goal>> {
+        let mut params = json!({ "threadId": thread_id, "origin": "user" });
+        if let Some(objective) = objective {
+            params["objective"] = json!(objective);
+        }
+        if let Some(status) = status {
+            params["status"] = json!(status.wire());
+        }
+        if let Some(budget) = token_budget {
+            params["tokenBudget"] = json!(budget);
+        }
+        let result = self.connection.request("thread/goal/set", params).await?;
+        Ok(translate::goal(&result["goal"]))
+    }
+
+    pub async fn goal_clear(&self, thread_id: &str) -> Result<()> {
+        self.connection
+            .request("thread/goal/clear", json!({ "threadId": thread_id }))
+            .await?;
+        Ok(())
+    }
+
+    /// Whether the thread may use and add to Codex's memories.
+    pub async fn memory_mode_set(&self, thread_id: &str, enabled: bool) -> Result<()> {
+        self.connection
+            .request(
+                "thread/memoryMode/set",
+                json!({ "threadId": thread_id, "mode": if enabled { "enabled" } else { "disabled" } }),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// How many chats Codex has folded into memory, and whether memory is ready.
+    pub async fn memory_status(&self) -> Result<(u64, bool)> {
+        let result = self.connection.request("memory/status", json!({})).await?;
+        Ok((
+            result["v2ConsolidatedThreads"].as_u64().unwrap_or_default(),
+            result["v2Ready"].as_bool().unwrap_or(false),
+        ))
+    }
+
+    /// The subscription's usage windows and credits.
+    pub async fn rate_limits(&self) -> Result<RateLimits> {
+        let result = self
+            .connection
+            .request("account/rateLimits/read", json!({}))
+            .await?;
+        let codex = &result["rateLimitsByLimitId"]["codex"];
+        let snapshot = if codex.is_object() {
+            codex
+        } else {
+            &result["rateLimits"]
+        };
+        Ok(translate::rate_limits(snapshot))
+    }
+
+    /// The signed-in account, if any, and whether Codex needs one.
+    pub async fn account(&self) -> Result<(Option<Account>, bool)> {
+        let result = self.connection.request("account/read", json!({})).await?;
+        Ok((
+            translate::account(&result["account"]),
+            result["requiresOpenaiAuth"].as_bool().unwrap_or(false),
+        ))
+    }
+
+    /// Starts signing in with ChatGPT in the browser: `(login id, URL to open)`.
+    /// Completion arrives as `account/login/completed`.
+    pub async fn login_chatgpt(&self) -> Result<(String, String)> {
+        let result = self
+            .connection
+            .request("account/login/start", json!({ "type": "chatgpt" }))
+            .await?;
+        Ok((str_of(&result, "loginId"), str_of(&result, "authUrl")))
+    }
+
+    pub async fn login_cancel(&self, login_id: &str) -> Result<()> {
+        self.connection
+            .request("account/login/cancel", json!({ "loginId": login_id }))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn logout(&self) -> Result<()> {
+        self.connection
+            .request("account/logout", Value::Null)
+            .await?;
+        Ok(())
+    }
+
+    /// Answers the agent's questions.
+    pub fn answer_user_input(&self, request_id: RequestId, answers: Answers) -> Result<()> {
+        let answers: serde_json::Map<String, Value> = answers
+            .into_iter()
+            .map(|(id, given)| (id, json!({ "answers": given })))
+            .collect();
+        self.connection
+            .respond(request_id, json!({ "answers": answers }))?;
+        Ok(())
     }
 
     pub async fn thread_set_name(&self, thread_id: &str, name: &str) -> Result<()> {
@@ -424,6 +708,21 @@ impl CodexClient {
                             })
                             .unwrap_or_default(),
                         default_effort: m["defaultReasoningEffort"].as_str().map(str::to_owned),
+                        service_tiers: m["serviceTiers"]
+                            .as_array()
+                            .map(|tiers| {
+                                tiers
+                                    .iter()
+                                    .map(|t| {
+                                        (
+                                            str_of(t, "id"),
+                                            str_of(t, "name"),
+                                            str_of(t, "description"),
+                                        )
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
                     })
                     .collect()
             })

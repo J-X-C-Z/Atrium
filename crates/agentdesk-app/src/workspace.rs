@@ -8,10 +8,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use agentdesk_core::{AgentEvent, ApprovalDecision, Item, RequestId, ThreadMeta, Transcript};
+use agentdesk_core::{
+    Account, AgentEvent, ApprovalDecision, Goal, GoalStatus, Item, RateLimits, RequestId,
+    ThreadMeta, Transcript, TurnStatus,
+};
 use codex_client::{
-    AccessMode, CodexClient, CodexConfig, Incoming, ModelInfo, ReviewTarget, StartThread,
-    TurnRequest, translate,
+    AccessMode, Answers, CodexClient, CodexConfig, Incoming, ModelInfo, Prediction, ReviewTarget,
+    StartThread, TurnRequest, translate,
 };
 use futures::StreamExt;
 use gpui::{AppContext, Context, EventEmitter, Task};
@@ -113,10 +116,34 @@ pub struct Workspace {
     born: HashMap<String, Vec<Option<Instant>>>,
     /// When the running turn of each thread began.
     turn_started: HashMap<String, Instant>,
+    /// The message each thread's user will likely send next.
+    predictions: HashMap<String, String>,
+    /// Prediction forks in flight: fork id to (source thread, text so far).
+    prediction_forks: HashMap<String, (String, String)>,
+    pub goals: HashMap<String, Goal>,
+    /// Threads with memory switched off.
+    pub memory_off: HashSet<String>,
+    pub account: Option<Account>,
+    pub rate_limits: Option<RateLimits>,
+    /// Chats folded into memory, and whether memory is ready.
+    pub memory: Option<(u64, bool)>,
+    /// A ChatGPT sign-in in progress.
+    pub login: Option<String>,
+    /// The user message being edited: `(thread, turn it started)`.
+    pub editing: Option<(String, String)>,
+    /// Full-text search: the query and what it found.
+    pub search: Option<(String, Vec<(ThreadMeta, String)>)>,
+    _search: Option<Task<()>>,
     _pump: Option<Task<()>>,
 }
 
 impl EventEmitter<Notice> for Workspace {}
+
+/// Puts a message in the composer, such as one being edited.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Fill(pub Composed);
+
+impl EventEmitter<Fill> for Workspace {}
 
 impl Workspace {
     pub fn new(cx: &mut Context<Self>) -> Self {
@@ -135,6 +162,17 @@ impl Workspace {
             timings: HashMap::new(),
             born: HashMap::new(),
             turn_started: HashMap::new(),
+            predictions: HashMap::new(),
+            prediction_forks: HashMap::new(),
+            goals: HashMap::new(),
+            memory_off: HashSet::new(),
+            account: None,
+            rate_limits: None,
+            memory: None,
+            login: None,
+            editing: None,
+            search: None,
+            _search: None,
             _pump: None,
         };
         workspace.connect(cx);
@@ -211,6 +249,34 @@ impl Workspace {
             });
         })
         .detach();
+        self.refresh_account(cx);
+    }
+
+    /// Reloads who is signed in, their usage, and memory's state.
+    pub fn refresh_account(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let account = client.account().await;
+            let signed_in = matches!(&account, Ok((Some(_), _)));
+            let limits = if signed_in {
+                client.rate_limits().await.ok()
+            } else {
+                None
+            };
+            let memory = client.memory_status().await.ok();
+            let _ = this.update(cx, |ws, cx| {
+                if let Ok((account, requires)) = account {
+                    ws.signed_in = Some(account.is_some() || !requires);
+                    ws.account = account;
+                }
+                ws.rate_limits = limits;
+                ws.memory = memory;
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn handle(&mut self, incoming: Incoming, cx: &mut Context<Self>) {
@@ -237,8 +303,66 @@ impl Workspace {
     }
 
     fn apply(&mut self, event: AgentEvent, cx: &mut Context<Self>) {
+        // A prediction fork's events are its guess, not a chat to show.
+        if let Some(fork) = event
+            .thread_id()
+            .filter(|id| self.prediction_forks.contains_key(*id))
+        {
+            let fork = fork.to_string();
+            self.collect_prediction(&fork, &event, cx);
+            return;
+        }
         self.time(&event);
         match &event {
+            AgentEvent::PredictionUpdated { thread_id, text } => {
+                self.set_prediction(thread_id, text.clone());
+                return;
+            }
+            AgentEvent::GoalUpdated { thread_id, goal } => {
+                let finished = goal
+                    .as_ref()
+                    .is_some_and(|g| g.status == GoalStatus::Complete)
+                    && self
+                        .goals
+                        .get(thread_id)
+                        .is_some_and(|g| g.status != GoalStatus::Complete);
+                match goal {
+                    Some(goal) => self.goals.insert(thread_id.clone(), goal.clone()),
+                    None => self.goals.remove(thread_id),
+                };
+                if finished {
+                    cx.emit(Notice::Success("Goal complete".into()));
+                }
+                return;
+            }
+            AgentEvent::RateLimitsUpdated(update) => {
+                let limits = self.rate_limits.get_or_insert_with(RateLimits::default);
+                let was_reached = limits.reached;
+                limits.merge(update.clone());
+                if limits.reached && !was_reached {
+                    cx.emit(Notice::Error(
+                        "Usage limit reached. It resets soon; see Usage.".into(),
+                    ));
+                }
+                return;
+            }
+            AgentEvent::AccountChanged => {
+                self.refresh_account(cx);
+                return;
+            }
+            AgentEvent::LoginCompleted { success, error } => {
+                self.login = None;
+                if *success {
+                    cx.emit(Notice::Success("Signed in to ChatGPT".into()));
+                    self.refresh(cx);
+                } else {
+                    cx.emit(Notice::Error(format!(
+                        "Sign-in failed: {}",
+                        error.clone().unwrap_or_else(|| "unknown error".into())
+                    )));
+                }
+                return;
+            }
             AgentEvent::ThreadStarted(meta) => self.upsert_thread(meta.clone()),
             AgentEvent::ThreadNameUpdated { thread_id, name } => {
                 if let Some(thread) = self.threads.iter_mut().find(|t| t.id == *thread_id) {
@@ -250,8 +374,16 @@ impl Workspace {
                     .entry(thread_id.clone())
                     .or_insert_with(Instant::now);
             }
-            AgentEvent::TurnCompleted { thread_id, .. } => {
+            AgentEvent::TurnCompleted {
+                thread_id,
+                turn_id,
+                status,
+                ..
+            } => {
                 self.turn_started.remove(thread_id);
+                if *status == TurnStatus::Completed {
+                    self.predict(thread_id.clone(), turn_id.clone(), cx);
+                }
                 if let Some(thread) = self.threads.iter_mut().find(|t| t.id == *thread_id) {
                     thread.updated_at = jiff::Timestamp::now().as_second();
                 }
@@ -461,7 +593,8 @@ impl Workspace {
                     Ok((meta, turns)) => {
                         ws.upsert_thread(meta);
                         ws.transcripts
-                            .insert(thread_id, Transcript::from_history(turns));
+                            .insert(thread_id.clone(), Transcript::from_history(turns));
+                        ws.load_goal(thread_id, cx);
                     }
                     Err(error) => {
                         let mut transcript = Transcript::new();
@@ -476,15 +609,462 @@ impl Workspace {
         .detach();
     }
 
+    fn load_goal(&mut self, thread_id: String, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            if let Ok(Some(goal)) = client.goal_get(&thread_id).await {
+                let _ = this.update(cx, |ws, cx| {
+                    ws.goals.insert(thread_id, goal);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
     fn turn_request(&self, composed: &Composed) -> TurnRequest {
+        // Plan mode names its model, so resolve the default when none is chosen.
+        let model = match self.settings.plan_mode {
+            true => self.model_id(),
+            false => self.settings.model.clone(),
+        };
         TurnRequest {
             text: composed.text.clone(),
             images: composed.images.clone(),
             mentions: composed.mentions.clone(),
-            model: self.settings.model.clone(),
+            model,
             effort: self.settings.effort.clone(),
             mode: Some(self.settings.mode),
+            service_tier: self.settings.fast.then(|| self.fast_tier()).flatten(),
+            plan_mode: self.settings.plan_mode,
         }
+    }
+
+    /// The Fast tier the current model offers, if any.
+    pub fn fast_tier(&self) -> Option<String> {
+        self.model_info(None)
+            .and_then(|m| m.service_tiers.first().map(|(id, _, _)| id.clone()))
+    }
+
+    // ---- Prediction ----------------------------------------------------
+
+    /// The likely next message in the shown chat.
+    pub fn prediction(&self) -> Option<&str> {
+        self.active_thread_id()
+            .and_then(|id| self.predictions.get(id))
+            .map(String::as_str)
+    }
+
+    /// Forgets the shown chat's prediction, once used or typed over.
+    pub fn dismiss_prediction(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.active_thread_id().map(str::to_owned)
+            && self.predictions.remove(&id).is_some()
+        {
+            cx.notify();
+        }
+    }
+
+    fn set_prediction(&mut self, thread_id: &str, text: Option<String>) {
+        match text.map(|t| clean_prediction(&t)).filter(|t| !t.is_empty()) {
+            Some(text) => self.predictions.insert(thread_id.to_string(), text),
+            None => self.predictions.remove(thread_id),
+        };
+    }
+
+    /// Asks for a guess at the user's next message after `turn_id`.
+    fn predict(&mut self, thread_id: String, turn_id: String, cx: &mut Context<Self>) {
+        if self.settings.no_predictions
+            || self.prediction_forks.values().any(|(t, _)| *t == thread_id)
+        {
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            match client.request_prediction(&thread_id, &turn_id).await {
+                Ok(Prediction::Notified) => {}
+                Ok(Prediction::Fork(fork)) => {
+                    let _ = this.update(cx, |ws, _| {
+                        ws.prediction_forks.insert(fork, (thread_id, String::new()));
+                    });
+                }
+                Err(error) => log::debug!("no prediction: {error:#}"),
+            }
+        })
+        .detach();
+    }
+
+    /// Gathers a prediction fork's answer; its end sets the prediction.
+    fn collect_prediction(&mut self, fork: &str, event: &AgentEvent, cx: &mut Context<Self>) {
+        match event {
+            AgentEvent::AgentMessageDelta { delta, .. } => {
+                if let Some((_, text)) = self.prediction_forks.get_mut(fork) {
+                    text.push_str(delta);
+                }
+            }
+            AgentEvent::ItemCompleted {
+                item: Item::Agent { text: full, .. },
+                ..
+            } if !full.is_empty() => {
+                if let Some((_, text)) = self.prediction_forks.get_mut(fork) {
+                    *text = full.clone();
+                }
+            }
+            AgentEvent::TurnCompleted { .. }
+            | AgentEvent::Error {
+                will_retry: false, ..
+            } => {
+                if let Some((thread, text)) = self.prediction_forks.remove(fork) {
+                    // Only if the user has not moved on in the meantime.
+                    if !self
+                        .transcripts
+                        .get(&thread)
+                        .is_some_and(Transcript::is_running)
+                    {
+                        self.set_prediction(&thread, Some(text));
+                        cx.notify();
+                    }
+                }
+                if let Some(client) = self.client.clone() {
+                    let fork = fork.to_string();
+                    cx.background_spawn(async move {
+                        let _ = client.thread_unsubscribe(&fork).await;
+                    })
+                    .detach();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // ---- Editing, branching, steering ----------------------------------
+
+    /// Puts the user message that started `turn_id` back in the composer;
+    /// sending it replaces that turn and everything after.
+    pub fn start_edit(&mut self, turn_id: &str, cx: &mut Context<Self>) -> Option<Composed> {
+        let thread = self.active_thread_id()?.to_string();
+        let (text, attachments) = self.transcript()?.turn_prompt(turn_id)?;
+        self.editing = Some((thread, turn_id.to_string()));
+        let composed = Composed::from_prompt(text, attachments);
+        cx.emit(Fill(composed.clone()));
+        cx.notify();
+        Some(composed)
+    }
+
+    pub fn cancel_edit(&mut self, cx: &mut Context<Self>) {
+        if self.editing.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Copies the chat through `turn_id` into a new chat and opens it.
+    pub fn branch(&mut self, turn_id: Option<String>, cx: &mut Context<Self>) {
+        let (Some(thread), Some(client)) = (
+            self.active_thread_id().map(str::to_owned),
+            self.client.clone(),
+        ) else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let forked = client.thread_fork(&thread, turn_id.as_deref()).await;
+            let _ = this.update(cx, |ws, cx| match forked {
+                Ok(meta) => {
+                    let id = meta.id.clone();
+                    ws.upsert_thread(meta);
+                    cx.emit(Notice::Success("Branched into a new chat".into()));
+                    ws.open_thread(id, cx);
+                }
+                Err(error) => cx.emit(Notice::Error(format!("Could not branch: {error:#}"))),
+            });
+        })
+        .detach();
+    }
+
+    /// Adds a message to the running turn.
+    fn steer(&mut self, thread_id: String, composed: Composed, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let Some(turn) = self
+            .transcripts
+            .get(&thread_id)
+            .and_then(|t| t.active_turn())
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned)
+        else {
+            cx.emit(Notice::Info(
+                "Codex is still starting this turn; try again in a moment.".into(),
+            ));
+            return;
+        };
+        if let Some(transcript) = self.transcripts.get_mut(&thread_id) {
+            let before = transcript.len();
+            transcript.push_local_user(composed.text.clone(), composed.attachments());
+            self.note_births(&thread_id, before);
+        }
+        let request = self.turn_request(&composed);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = client.turn_steer(&thread_id, &turn, request).await {
+                let _ = this.update(cx, |_, cx| {
+                    cx.emit(Notice::Error(format!(
+                        "Could not add that to the running turn: {error:#}"
+                    )))
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Replaces the edited turn (and those after it) with `composed`.
+    fn resend_edited(
+        &mut self,
+        thread_id: String,
+        turn_id: String,
+        composed: Composed,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        self.editing = None;
+        cx.spawn(async move |this, cx| {
+            let reverted = client.thread_revert(&thread_id, &turn_id).await;
+            let resumed = match reverted {
+                Ok(()) => client.thread_resume(&thread_id).await,
+                Err(error) => Err(error),
+            };
+            let _ = this.update(cx, |ws, cx| match resumed {
+                Ok((_, turns)) => {
+                    ws.transcripts
+                        .insert(thread_id.clone(), Transcript::from_history(turns));
+                    ws.born.remove(&thread_id);
+                    ws.send(composed, cx);
+                }
+                Err(error) => cx.emit(Notice::Error(format!(
+                    "Could not edit the message: {error:#}"
+                ))),
+            });
+        })
+        .detach();
+    }
+
+    // ---- Goals, memory, questions ---------------------------------------
+
+    /// The shown chat's goal.
+    pub fn goal(&self) -> Option<&Goal> {
+        self.active_thread_id().and_then(|id| self.goals.get(id))
+    }
+
+    /// Sets the shown chat's goal and starts working toward it.
+    pub fn set_goal(&mut self, objective: String, budget: Option<u64>, cx: &mut Context<Self>) {
+        let (Some(thread), Some(client)) = (
+            self.active_thread_id().map(str::to_owned),
+            self.client.clone(),
+        ) else {
+            cx.emit(Notice::Info(
+                "Start a chat first, then give it a goal.".into(),
+            ));
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let set = client
+                .goal_set(&thread, Some(&objective), Some(GoalStatus::Active), budget)
+                .await;
+            let _ = this.update(cx, |ws, cx| match set {
+                Ok(Some(goal)) => {
+                    ws.goals.insert(thread, goal);
+                    cx.emit(Notice::Success(
+                        "Goal set. Codex keeps working toward it.".into(),
+                    ));
+                    cx.notify();
+                }
+                Ok(None) => {}
+                Err(error) => cx.emit(Notice::Error(format!("Could not set the goal: {error:#}"))),
+            });
+        })
+        .detach();
+    }
+
+    pub fn set_goal_status(&mut self, status: GoalStatus, cx: &mut Context<Self>) {
+        let (Some(thread), Some(client)) = (
+            self.active_thread_id().map(str::to_owned),
+            self.client.clone(),
+        ) else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let set = client.goal_set(&thread, None, Some(status), None).await;
+            let _ = this.update(cx, |ws, cx| {
+                if let Ok(Some(goal)) = set {
+                    ws.goals.insert(thread, goal);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub fn clear_goal(&mut self, cx: &mut Context<Self>) {
+        let (Some(thread), Some(client)) = (
+            self.active_thread_id().map(str::to_owned),
+            self.client.clone(),
+        ) else {
+            return;
+        };
+        self.goals.remove(&thread);
+        cx.notify();
+        cx.background_spawn(async move {
+            let _ = client.goal_clear(&thread).await;
+        })
+        .detach();
+    }
+
+    pub fn memory_enabled(&self) -> bool {
+        self.active_thread_id()
+            .is_none_or(|id| !self.memory_off.contains(id))
+    }
+
+    /// Lets the shown chat use and add to memory, or not.
+    pub fn toggle_memory(&mut self, cx: &mut Context<Self>) {
+        let (Some(thread), Some(client)) = (
+            self.active_thread_id().map(str::to_owned),
+            self.client.clone(),
+        ) else {
+            return;
+        };
+        let enabled = self.memory_off.contains(&thread);
+        if enabled {
+            self.memory_off.remove(&thread);
+        } else {
+            self.memory_off.insert(thread.clone());
+        }
+        cx.emit(Notice::Info(
+            if enabled {
+                "Memory on for this chat"
+            } else {
+                "Memory off for this chat"
+            }
+            .into(),
+        ));
+        cx.notify();
+        cx.background_spawn(async move {
+            let _ = client.memory_mode_set(&thread, enabled).await;
+        })
+        .detach();
+    }
+
+    pub fn answer_questions(
+        &mut self,
+        thread_id: &str,
+        request_id: RequestId,
+        answers: Answers,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(client) = &self.client else { return };
+        if let Err(error) = client.answer_user_input(request_id.clone(), answers.clone()) {
+            log::warn!("answering questions failed: {error:#}");
+            return;
+        }
+        if let Some(transcript) = self.transcripts.get_mut(thread_id) {
+            transcript.answer_questions(&request_id, answers);
+        }
+        cx.notify();
+    }
+
+    // ---- Account -------------------------------------------------------
+
+    /// Signs in with ChatGPT in the browser.
+    pub fn sign_in(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let started = client.login_chatgpt().await;
+            let _ = this.update(cx, |ws, cx| match started {
+                Ok((login, url)) => {
+                    ws.login = Some(login);
+                    cx.open_url(&url);
+                    cx.emit(Notice::Info("Finish signing in in your browser.".into()));
+                    cx.notify();
+                }
+                Err(error) => cx.emit(Notice::Error(format!("Could not start sign-in: {error:#}"))),
+            });
+        })
+        .detach();
+    }
+
+    pub fn cancel_sign_in(&mut self, cx: &mut Context<Self>) {
+        let (Some(login), Some(client)) = (self.login.take(), self.client.clone()) else {
+            return;
+        };
+        cx.notify();
+        cx.background_spawn(async move {
+            let _ = client.login_cancel(&login).await;
+        })
+        .detach();
+    }
+
+    pub fn sign_out(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let result = client.logout().await;
+            let _ = this.update(cx, |ws, cx| match result {
+                Ok(()) => {
+                    ws.account = None;
+                    ws.rate_limits = None;
+                    cx.emit(Notice::Info("Signed out".into()));
+                    ws.refresh_account(cx);
+                }
+                Err(error) => cx.emit(Notice::Error(format!("Could not sign out: {error:#}"))),
+            });
+        })
+        .detach();
+    }
+
+    /// Reloads usage now (also refreshed after every turn by Codex).
+    pub fn refresh_usage(&mut self, cx: &mut Context<Self>) {
+        self.refresh_account(cx);
+    }
+
+    // ---- Search --------------------------------------------------------
+
+    /// Searches every chat's content for `query`, a moment after typing stops.
+    pub fn search_chats(&mut self, query: String, cx: &mut Context<Self>) {
+        let query = query.trim().to_string();
+        if query.chars().count() < 2 {
+            self.search = None;
+            self._search = None;
+            return;
+        }
+        if self.search.as_ref().is_some_and(|(q, _)| *q == query) {
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        self._search = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(220))
+                .await;
+            let found = match client.thread_search(&query, 30).await {
+                Ok(found) => found,
+                Err(error) => {
+                    log::warn!("thread/search failed: {error:#}");
+                    Vec::new()
+                }
+            };
+            log::debug!("search {query:?}: {} chats", found.len());
+            let _ = this.update(cx, |ws, cx| {
+                ws.search = Some((query, found));
+                cx.notify();
+            });
+        }));
     }
 
     /// Sends a message in the current view, creating the thread for a draft.
@@ -493,11 +1073,30 @@ impl Workspace {
             text: composed.text.trim().to_string(),
             ..composed
         };
-        if (composed.text.is_empty() && composed.images.is_empty()) || self.is_running() {
+        if composed.text.is_empty() && composed.images.is_empty() {
+            return;
+        }
+        if self.client.is_none() {
+            cx.emit(Notice::Error("Codex is not running.".into()));
+            return;
+        }
+        if let View::Thread(thread_id) = self.view.clone() {
+            self.predictions.remove(&thread_id);
+            // A message while Codex works joins the running turn.
+            if self.is_running() {
+                self.steer(thread_id, composed, cx);
+                return;
+            }
+            if let Some((editing, turn)) = self.editing.clone()
+                && editing == thread_id
+            {
+                self.resend_edited(thread_id, turn, composed, cx);
+                return;
+            }
+        } else if self.is_running() {
             return;
         }
         let Some(client) = self.client.clone() else {
-            cx.emit(Notice::Error("Codex is not running.".into()));
             return;
         };
         let request = self.turn_request(&composed);
@@ -914,6 +1513,24 @@ impl Workspace {
     }
 }
 
+/// A prediction as one clean line: no quotes, no "User:" prefix.
+fn clean_prediction(text: &str) -> String {
+    let line = text
+        .trim()
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    let line = line
+        .strip_prefix("User:")
+        .or_else(|| line.strip_prefix("Me:"))
+        .unwrap_or(line)
+        .trim();
+    line.trim_matches(|c| c == '"' || c == '“' || c == '”')
+        .trim()
+        .to_string()
+}
+
 /// `codex_cli_rs/0.169.0 (...)` or `agentdesk/0.169.0 (...)` to `Codex 0.169.0`.
 fn backend_label(user_agent: &str) -> String {
     let version = user_agent
@@ -937,6 +1554,13 @@ mod tests {
             "Codex 0.169.0"
         );
         assert_eq!(backend_label(""), "Codex");
+    }
+
+    #[test]
+    fn predictions_read_as_one_clean_line() {
+        assert_eq!(clean_prediction("  \"Run the tests\"\n"), "Run the tests");
+        assert_eq!(clean_prediction("User: ship it"), "ship it");
+        assert_eq!(clean_prediction("\n\n"), "");
     }
 
     #[test]

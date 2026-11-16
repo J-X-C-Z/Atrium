@@ -6,11 +6,14 @@ mod composer;
 mod rows;
 mod sidebar;
 
+use agentdesk_core::{Account, plan_label};
 use codex_client::AccessMode;
 use ely_gpui_component::{
     buttons::{Button, ButtonVariant, SegmentedControl},
+    data_display::{Avatar, Badge, Tone},
     feedback::{Toast, ToastViewport, Toaster},
-    forms::{Input, TextInput},
+    forms::{Input, Switch, TextInput},
+    motion::ProgressBar,
     navigation::{Command, CommandPalette},
     overlays::{Dialog, PromptDialog},
     primitives::{FocusScope, IconName, Severity},
@@ -24,8 +27,9 @@ use gpui_kit::component::theme::{Theme as KitTheme, ThemeMode};
 
 use crate::{
     settings::ThemePref,
-    workspace::{Notice, Workspace},
+    workspace::{Fill, Notice, Workspace},
 };
+pub use composer::AcceptPrediction;
 use composer::Composer;
 
 actions!(
@@ -120,6 +124,11 @@ pub const TITLE_BAR_HEIGHT: f32 = 44.;
 /// What floats over the window.
 enum Overlay {
     Palette,
+    Account,
+    Goal {
+        objective: Entity<TextInput>,
+        budget: Entity<TextInput>,
+    },
     Settings {
         codex_path: Entity<TextInput>,
     },
@@ -152,9 +161,19 @@ impl RootView {
                 this.apply_theme(window, cx);
                 cx.notify();
             }),
-            cx.observe(&search, |_, _, cx| cx.notify()),
+            cx.observe(&search, |this, search, cx| {
+                let query = search.read(cx).text().to_string();
+                this.workspace
+                    .update(cx, |ws, cx| ws.search_chats(query, cx));
+                cx.notify()
+            }),
             cx.subscribe(&workspace, |this, _, notice: &Notice, cx| {
                 this.toast(notice, cx)
+            }),
+            cx.subscribe_in(&workspace, window, |this, _, fill: &Fill, window, cx| {
+                let composed = fill.0.clone();
+                this.composer
+                    .update(cx, |composer, cx| composer.fill(composed, window, cx));
             }),
             cx.observe_window_appearance(window, |this, window, cx| this.apply_theme(window, cx)),
         ];
@@ -236,6 +255,242 @@ impl RootView {
         cx.notify();
     }
 
+    pub fn open_account(&mut self, cx: &mut Context<Self>) {
+        self.workspace.update(cx, |ws, cx| ws.refresh_usage(cx));
+        self.overlay = Some(Overlay::Account);
+        cx.notify();
+    }
+
+    pub fn open_goal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.workspace.read(cx).goal().cloned();
+        let objective = cx.new(|cx| {
+            TextInput::new(window, cx)
+                .multi_line(2, 5)
+                .placeholder("What should Codex keep working toward?")
+        });
+        let budget = cx.new(|cx| {
+            TextInput::new(window, cx)
+                .placeholder("Token budget (optional), such as 500000")
+                .filter(|c| c.is_ascii_digit())
+        });
+        if let Some(goal) = current {
+            objective.update(cx, |input, cx| input.set_text(goal.objective, cx));
+            if let Some(tokens) = goal.token_budget {
+                budget.update(cx, |input, cx| input.set_text(tokens.to_string(), cx));
+            }
+        }
+        self.overlay = Some(Overlay::Goal { objective, budget });
+        cx.notify();
+    }
+
+    fn goal_dialog(
+        &self,
+        objective: &Entity<TextInput>,
+        budget: &Entity<TextInput>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let colors = theme.colors.clone();
+        let close = cx.entity();
+        let start = (
+            cx.entity(),
+            self.workspace.clone(),
+            objective.clone(),
+            budget.clone(),
+        );
+        Dialog::new("goal", "Set a goal", move |window, cx| {
+            close.update(cx, |this, cx| this.close_overlay(window, cx))
+        })
+        .detail("Codex keeps working toward the goal across turns until it is done, blocked, or out of budget.")
+        .child(
+            div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(Input::new(objective))
+                .child(Input::new(budget))
+                .child(
+                    div()
+                        .text_size(theme.text_size(TextSize::Xs))
+                        .text_color(colors.fg_muted)
+                        .child("Long goals use your plan's usage. Pause or clear the goal from the banner at any time."),
+                ),
+        )
+        .action(|close| {
+            Button::new("goal-cancel", "Cancel")
+                .variant(ButtonVariant::Ghost)
+                .on_click(move |_, window, cx| close(window, cx))
+        })
+        .action(move |close| {
+            let (root, workspace, objective, budget) = start;
+            Button::new("goal-start", "Start working")
+                .primary()
+                .on_click(move |_, window, cx| {
+                    let text = objective.read(cx).text().trim().to_string();
+                    if text.is_empty() {
+                        return;
+                    }
+                    let tokens = budget.read(cx).text().trim().parse::<u64>().ok();
+                    workspace.update(cx, |ws, cx| ws.set_goal(text, tokens, cx));
+                    root.update(cx, |_, cx| cx.notify());
+                    close(window, cx);
+                })
+        })
+        .into_any_element()
+    }
+
+    fn account_dialog(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let colors = theme.colors.clone();
+        let ws = self.workspace.read(cx);
+        let close = cx.entity();
+        let mut body = div().w_full().flex().flex_col().gap_4();
+        let signed_in = ws.account.is_some();
+        match &ws.account {
+            Some(Account::ChatGpt {
+                email,
+                plan,
+                workspace,
+            }) => {
+                let who = email.clone().unwrap_or_else(|| "ChatGPT account".into());
+                body = body.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(Avatar::new("account-avatar", who.clone()))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .child(div().font_weight(gpui::FontWeight::MEDIUM).child(who))
+                                .children(workspace.clone().map(|w| {
+                                    div()
+                                        .text_size(theme.text_size(TextSize::Xs))
+                                        .text_color(colors.fg_muted)
+                                        .child(w)
+                                })),
+                        )
+                        .child(Badge::new(plan_label(plan)).tone(Tone::Accent)),
+                );
+            }
+            Some(Account::ApiKey) => {
+                body = body.child(div().child(
+                    "Signed in with an API key: usage is billed per token, with no plan limits.",
+                ));
+            }
+            Some(Account::Other(kind)) => {
+                body = body.child(div().child(format!("Signed in through {kind}.")));
+            }
+            None => {
+                body =
+                    body.child(div().text_color(colors.fg_muted).child(
+                        "Sign in with ChatGPT to use your Plus or Pro subscription in Codex.",
+                    ));
+            }
+        }
+        if let Some(limits) = &ws.rate_limits {
+            let mut usage = div().flex().flex_col().gap_3();
+            for (ix, window) in [limits.primary, limits.secondary]
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                let reset = window.resets_at.map(resets_in).unwrap_or_default();
+                usage = usage.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .flex()
+                                .justify_between()
+                                .text_size(theme.text_size(TextSize::Sm))
+                                .child(window.label())
+                                .child(
+                                    div()
+                                        .text_color(colors.fg_muted)
+                                        .child(format!("{:.0}% used{reset}", window.used_percent)),
+                                ),
+                        )
+                        .child(ProgressBar::new(
+                            ("usage-bar", ix),
+                            (window.used_percent / 100.) as f32,
+                        )),
+                );
+            }
+            if let Some(credits) = &limits.credits {
+                let said = if credits.unlimited {
+                    "Unlimited credits".to_string()
+                } else {
+                    match &credits.balance {
+                        Some(balance) => format!("{balance} credits left"),
+                        None if credits.has_credits => "Credits available".into(),
+                        None => "No credits".into(),
+                    }
+                };
+                usage = usage.child(
+                    div()
+                        .text_size(theme.text_size(TextSize::Sm))
+                        .text_color(colors.fg_muted)
+                        .child(said),
+                );
+            }
+            if limits.reached {
+                usage = usage.child(
+                    div()
+                        .text_size(theme.text_size(TextSize::Sm))
+                        .text_color(colors.danger)
+                        .child("A usage limit is reached; Codex waits until it resets."),
+                );
+            }
+            body = body.child(usage);
+        }
+        if let Some((remembered, ready)) = ws.memory {
+            body = body.child(
+                div()
+                    .text_size(theme.text_size(TextSize::Sm))
+                    .text_color(colors.fg_muted)
+                    .child(if ready {
+                        format!("Memory: {remembered} chats remembered. Turn it off per chat from the chat menu.")
+                    } else {
+                        "Memory is getting ready.".to_string()
+                    }),
+            );
+        }
+        let pending = ws.login.is_some();
+        let workspace = self.workspace.clone();
+        Dialog::new("account", "Account & usage", move |window, cx| {
+            close.update(cx, |this, cx| this.close_overlay(window, cx))
+        })
+        .child(body)
+        .action(move |close| {
+            let workspace = workspace.clone();
+            match (signed_in, pending) {
+                (true, _) => Button::new("sign-out", "Sign out")
+                    .variant(ButtonVariant::Ghost)
+                    .on_click(move |_, window, cx| {
+                        workspace.update(cx, |ws, cx| ws.sign_out(cx));
+                        close(window, cx);
+                    }),
+                (false, true) => Button::new("cancel-sign-in", "Cancel sign-in")
+                    .variant(ButtonVariant::Ghost)
+                    .on_click(move |_, _, cx| workspace.update(cx, |ws, cx| ws.cancel_sign_in(cx))),
+                (false, false) => Button::new("sign-in", "Sign in with ChatGPT")
+                    .primary()
+                    .on_click(move |_, _, cx| workspace.update(cx, |ws, cx| ws.sign_in(cx))),
+            }
+        })
+        .action(|close| {
+            Button::new("account-close", "Done").on_click(move |_, window, cx| close(window, cx))
+        })
+        .into_any_element()
+    }
+
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let current = self
             .workspace
@@ -263,6 +518,28 @@ impl RootView {
             ("sidebar", "Toggle sidebar", IconName::PanelLeft, "⌘B"),
             ("settings", "Settings", IconName::Settings, "⌘,"),
             ("restart", "Restart Codex", IconName::RefreshCw, ""),
+            (
+                "goal",
+                "Set a goal for this chat…",
+                IconName::ListChecks,
+                "",
+            ),
+            ("branch", "Branch this chat", IconName::GitBranch, ""),
+            (
+                "memory",
+                "Toggle memory for this chat",
+                IconName::History,
+                "",
+            ),
+            ("usage", "Account & usage", IconName::Gauge, ""),
+            ("fast", "Toggle Fast mode", IconName::Zap, ""),
+            ("plan", "Toggle Plan mode", IconName::ListChecks, ""),
+            (
+                "predict",
+                "Toggle next-message predictions",
+                IconName::Sparkles,
+                "",
+            ),
         ]
         .map(|(value, label, icon, keys)| {
             let command = Command::new(value, label).icon(icon);
@@ -328,6 +605,19 @@ impl RootView {
             "sidebar" => window.dispatch_action(Box::new(ToggleSidebar), cx),
             "settings" => self.open_settings(window, cx),
             "restart" => workspace.update(cx, |ws, cx| ws.connect(cx)),
+            "goal" => self.open_goal(window, cx),
+            "branch" => workspace.update(cx, |ws, cx| ws.branch(None, cx)),
+            "memory" => workspace.update(cx, |ws, cx| ws.toggle_memory(cx)),
+            "usage" => self.open_account(cx),
+            "fast" | "plan" | "predict" => workspace.update(cx, |ws, cx| {
+                match value {
+                    "fast" => ws.settings.fast = !ws.settings.fast,
+                    "plan" => ws.settings.plan_mode = !ws.settings.plan_mode,
+                    _ => ws.settings.no_predictions = !ws.settings.no_predictions,
+                }
+                ws.settings.save();
+                cx.notify();
+            }),
             other => {
                 if let Some(id) = other.strip_prefix("chat:") {
                     let id = id.to_string();
@@ -449,6 +739,23 @@ impl RootView {
                     access.into_any_element(),
                 ))
                 .child(section(
+                    "Suggestions",
+                    "After each answer Codex guesses your next message; Tab takes it. Each guess uses a little of your plan.",
+                    Switch::new("predict", !ws.settings.no_predictions)
+                        .label("Predict my next message")
+                        .on_change({
+                            let workspace = self.workspace.clone();
+                            move |on, _, cx| {
+                                workspace.update(cx, |ws, cx| {
+                                    ws.settings.no_predictions = !on;
+                                    ws.settings.save();
+                                    cx.notify();
+                                })
+                            }
+                        })
+                        .into_any_element(),
+                ))
+                .child(section(
                     "Codex CLI",
                     "Path to the codex binary. Saving restarts Codex.",
                     Input::new(codex_path).into_any_element(),
@@ -503,6 +810,11 @@ impl Render for RootView {
         let overlay: Option<AnyElement> = match &self.overlay {
             None => None,
             Some(Overlay::Palette) => Some(self.palette(cx)),
+            Some(Overlay::Account) => Some(self.account_dialog(cx)),
+            Some(Overlay::Goal { objective, budget }) => {
+                let (objective, budget) = (objective.clone(), budget.clone());
+                Some(self.goal_dialog(&objective, &budget, cx))
+            }
             Some(Overlay::Settings { codex_path }) => {
                 let codex_path = codex_path.clone();
                 Some(self.settings_dialog(&codex_path, cx))
@@ -545,5 +857,19 @@ impl Render for RootView {
                 .children(overlay)
                 .child(ToastViewport::new("toasts", &self.toaster)),
         )
+    }
+}
+
+/// " · resets in 2h 17m" for a reset time in Unix seconds.
+fn resets_in(at: i64) -> String {
+    let left = at - jiff::Timestamp::now().as_second();
+    if left <= 0 {
+        return " · resets now".into();
+    }
+    let (days, hours, mins) = (left / 86400, left % 86400 / 3600, left % 3600 / 60);
+    match (days, hours) {
+        (0, 0) => format!(" · resets in {mins}m"),
+        (0, h) => format!(" · resets in {h}h {mins}m"),
+        (d, h) => format!(" · resets in {d}d {h}h"),
     }
 }

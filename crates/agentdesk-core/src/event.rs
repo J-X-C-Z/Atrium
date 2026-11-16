@@ -1,4 +1,6 @@
-use crate::model::{Item, PlanStep, RequestId, ThreadMeta, TokenUsage, TurnStatus};
+use crate::model::{
+    Goal, Item, PlanStep, Question, RateLimits, RequestId, ThreadMeta, TokenUsage, TurnStatus,
+};
 
 /// What the backend wants approved before it goes on.
 #[derive(Clone, Debug, PartialEq)]
@@ -35,6 +37,16 @@ pub enum ApprovalDecision {
     Decline,
     /// Refuse and stop the turn.
     Cancel,
+}
+
+/// The agent stopped to ask the user something.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UserInputRequest {
+    pub request_id: RequestId,
+    pub thread_id: String,
+    pub turn_id: String,
+    pub item_id: String,
+    pub questions: Vec<Question>,
 }
 
 /// Everything a backend can tell the UI, after translation from its protocol.
@@ -97,6 +109,24 @@ pub enum AgentEvent {
         usage: TokenUsage,
     },
     ApprovalRequested(ApprovalRequest),
+    UserInputRequested(UserInputRequest),
+    /// The message the user will likely send next, or `None` when there is no good guess.
+    PredictionUpdated {
+        thread_id: String,
+        text: Option<String>,
+    },
+    /// The thread's goal changed, or was cleared (`None`).
+    GoalUpdated {
+        thread_id: String,
+        goal: Option<Goal>,
+    },
+    RateLimitsUpdated(RateLimits),
+    /// The account or its plan changed; refetch it.
+    AccountChanged,
+    LoginCompleted {
+        success: bool,
+        error: Option<String>,
+    },
     /// The backend no longer waits on this request (answered elsewhere, or the turn ended).
     ApprovalResolved {
         thread_id: String,
@@ -131,8 +161,15 @@ impl AgentEvent {
             | AgentEvent::TokenUsage { thread_id, .. }
             | AgentEvent::ApprovalResolved { thread_id, .. } => Some(thread_id),
             AgentEvent::ApprovalRequested(request) => Some(&request.thread_id),
+            AgentEvent::UserInputRequested(request) => Some(&request.thread_id),
+            AgentEvent::PredictionUpdated { thread_id, .. }
+            | AgentEvent::GoalUpdated { thread_id, .. } => Some(thread_id),
             AgentEvent::Error { thread_id, .. } => thread_id.as_deref(),
-            AgentEvent::Warning(_) | AgentEvent::Disconnected { .. } => None,
+            AgentEvent::Warning(_)
+            | AgentEvent::Disconnected { .. }
+            | AgentEvent::RateLimitsUpdated(_)
+            | AgentEvent::AccountChanged
+            | AgentEvent::LoginCompleted { .. } => None,
         }
     }
 }

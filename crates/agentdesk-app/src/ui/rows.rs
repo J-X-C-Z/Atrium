@@ -3,26 +3,31 @@
 
 use std::time::Duration;
 
+use std::collections::HashMap;
+
 use agentdesk_core::{
     ApprovalDecision, ApprovalKind, ChangeKind, Entry, EntryKind, FileChange, Item, ItemStatus,
-    PlanStep, Transcript, TurnStatus,
+    PlanStep, Transcript, TurnStatus, UserInputRequest,
 };
 use ely_gpui_component::{
     agent::{
         AgentPlan, ChangeState, FileChange as DiffChange, FileChangeCard, Permission,
         PermissionPrompt, ToolCallCard,
     },
+    buttons::{Button, ButtonVariant, IconButton},
     chat::{
         ContextChips, ErrorMessage, MessageActions, MessageBubble, MessageFooter, Role, StepState,
         StreamingMarkdown, ThinkingBlock,
     },
-    motion::{Spinner, SpinnerStyle, ease_out_cubic},
+    forms::{Input, TextInput},
+    motion::{Skeleton, Spinner, SpinnerStyle, ease_out_cubic},
     primitives::{Icon, IconName},
-    theme::{ActiveTheme, IconSize, TextSize},
+    theme::{ActiveTheme, ControlSize, IconSize, Radius, TextSize},
 };
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, ElementId, Entity, IntoElement, ParentElement,
-    Styled, Window, div, prelude::*, pulsating_between, px,
+    Animation, AnimationExt, AnyElement, App, ElementId, Entity, IntoElement, ObjectFit,
+    ParentElement, SharedString, Styled, StyledImage, Window, div, img, prelude::*,
+    pulsating_between, px,
 };
 
 use crate::workspace::{Workspace, is_image};
@@ -81,7 +86,7 @@ pub fn row(
     };
     let footer = footer(workspace, transcript, ix, &entry, cx);
     let t = ws.entrance(ix);
-    let body = entry_body(workspace, thread.as_deref(), ix, &entry, cx);
+    let body = entry_body(workspace, thread.as_deref(), ix, &entry, window, cx);
     let body = div().flex().flex_col().gap_1().child(body).children(footer);
     column(body, t, window)
 }
@@ -146,7 +151,23 @@ fn footer(
             actions.on_regenerate(move |_, cx| retry.update(cx, |ws, cx| ws.retry(&turn, cx)));
     }
     let _ = cx;
-    Some(footer.child(actions).into_any_element())
+    let branch = workspace.clone();
+    let from = turn.clone();
+    Some(
+        footer
+            .child(actions)
+            .child(
+                IconButton::new(key("branch", &turn), IconName::GitBranch)
+                    .variant(ButtonVariant::Ghost)
+                    .size(ControlSize::Sm)
+                    .tooltip("Branch into a new chat from here")
+                    .on_click(move |_, _, cx| {
+                        let from = from.clone();
+                        branch.update(cx, |ws, cx| ws.branch(Some(from), cx))
+                    }),
+            )
+            .into_any_element(),
+    )
 }
 
 pub fn format_duration(took: Duration) -> String {
@@ -163,10 +184,80 @@ fn entry_body(
     thread_id: Option<&str>,
     ix: usize,
     entry: &Entry,
-    cx: &App,
+    window: &mut Window,
+    cx: &mut App,
 ) -> AnyElement {
     match &entry.kind {
+        EntryKind::Item(Item::User { .. }) => {
+            // Finished turns can be edited: the message comes back to the composer.
+            let ws = workspace.read(cx);
+            // Only the message that started a finished turn: steered ones joined it later.
+            let starts_turn = ws.transcript().is_some_and(|t| {
+                t.entries().iter().position(|e| {
+                    e.turn_id == entry.turn_id
+                        && matches!(e.kind, EntryKind::Item(Item::User { .. }))
+                }) == Some(ix)
+            });
+            let editable = thread_id.is_some()
+                && starts_turn
+                && !ws.is_running()
+                && ws
+                    .transcript()
+                    .and_then(|t| t.turn_summary(&entry.turn_id))
+                    .is_some();
+            let editing = ws
+                .editing
+                .as_ref()
+                .is_some_and(|(_, turn)| *turn == entry.turn_id);
+            let body = self::item(workspace, &entry_item(entry), entry.live, cx);
+            let edit = editable.then(|| {
+                let (workspace, turn) = (workspace.clone(), entry.turn_id.clone());
+                div().flex().justify_end().child(
+                    IconButton::new(key("edit", &entry.turn_id), IconName::Pencil)
+                        .variant(ButtonVariant::Ghost)
+                        .size(ControlSize::Sm)
+                        .tooltip("Edit and resend")
+                        .on_click(move |_, _, cx| {
+                            workspace.update(cx, |ws, cx| {
+                                ws.start_edit(&turn, cx);
+                            })
+                        }),
+                )
+            });
+            let colors = cx.theme().colors.clone();
+            div()
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .when(editing, |column| column.opacity(0.55))
+                .child(body)
+                .children(edit)
+                .when(editing, |column| {
+                    column.child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .text_xs()
+                            .text_color(colors.accent)
+                            .child("Editing: sending replaces this message and what follows"),
+                    )
+                })
+                .into_any_element()
+        }
         EntryKind::Item(item) => self::item(workspace, item, entry.live, cx),
+        EntryKind::Question {
+            request,
+            answers,
+            resolved,
+        } => question(
+            workspace,
+            thread_id,
+            request,
+            answers.as_ref(),
+            *resolved,
+            window,
+            cx,
+        ),
         EntryKind::Approval {
             request,
             answer,
@@ -393,17 +484,44 @@ fn item(workspace: &Entity<Workspace>, item: &Item, live: bool, cx: &App) -> Any
             }
             card.into_any_element()
         }
-        Item::WebSearch { id, query } => ToolCallCard::new(
-            key("search", id),
-            "Searched the web",
-            if live {
-                StepState::Working
-            } else {
-                StepState::Done
-            },
-        )
-        .summary(query.clone())
-        .into_any_element(),
+        Item::WebSearch { id, query, detail } => {
+            let mut card = ToolCallCard::new(
+                key("search", id),
+                if live {
+                    "Searching the web"
+                } else {
+                    "Searched the web"
+                },
+                if live {
+                    StepState::Working
+                } else {
+                    StepState::Done
+                },
+            )
+            .summary(query.clone());
+            if let Some(detail) = detail {
+                card = card.result(detail.clone());
+            }
+            card.into_any_element()
+        }
+        Item::Image {
+            id,
+            status,
+            path,
+            prompt,
+        } => image(id, *status, path.as_deref(), prompt.as_deref(), cx),
+        Item::SubAgent {
+            id,
+            label,
+            status,
+            detail,
+        } => {
+            let mut card = ToolCallCard::new(key("agent-sub", id), label.clone(), step(*status));
+            if let Some(detail) = detail {
+                card = card.summary(detail.clone());
+            }
+            card.into_any_element()
+        }
         Item::Other { label, .. } => note(IconName::Sparkles, label.clone(), true, cx),
     }
 }
@@ -488,6 +606,274 @@ fn plan(turn_id: &str, explanation: Option<&str>, steps: &[PlanStep]) -> AnyElem
 
 fn first_line(text: &str) -> String {
     text.lines().next().unwrap_or("").trim().to_string()
+}
+
+fn entry_item(entry: &Entry) -> Item {
+    match &entry.kind {
+        EntryKind::Item(item) => item.clone(),
+        _ => unreachable!("only item rows reach here"),
+    }
+}
+
+/// A generated image, or its placeholder while it is being made.
+fn image(
+    id: &str,
+    status: ItemStatus,
+    path: Option<&str>,
+    prompt: Option<&str>,
+    cx: &App,
+) -> AnyElement {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let radius = theme.radius(Radius::Lg);
+    let picture = match (status, path) {
+        (ItemStatus::Completed, Some(path)) => img(std::path::PathBuf::from(path))
+            .w(px(360.))
+            .max_w_full()
+            .object_fit(ObjectFit::Contain)
+            .rounded(radius)
+            .into_any_element(),
+        (ItemStatus::InProgress, _) => div()
+            .relative()
+            .child(
+                Skeleton::new(key("image-wait", id))
+                    .w(px(360.))
+                    .h(px(225.))
+                    .rounded(radius),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .text_sm()
+                    .text_color(colors.fg_muted)
+                    .child(
+                        Spinner::new(key("image-spin", id))
+                            .style(SpinnerStyle::Ring)
+                            .size(IconSize::Sm),
+                    )
+                    .child("Creating image…"),
+            )
+            .into_any_element(),
+        _ => {
+            return note(
+                IconName::Image,
+                "The image could not be made".into(),
+                false,
+                cx,
+            );
+        }
+    };
+    div()
+        .flex()
+        .flex_col()
+        .gap_1p5()
+        .child(picture)
+        .children(prompt.map(|prompt| {
+            div()
+                .text_xs()
+                .text_color(colors.fg_muted)
+                .child(prompt.to_string())
+        }))
+        .into_any_element()
+}
+
+/// The agent's questions, with choices, free text where allowed, and send.
+fn question(
+    workspace: &Entity<Workspace>,
+    thread_id: Option<&str>,
+    request: &UserInputRequest,
+    answers: Option<&Vec<(String, Vec<String>)>>,
+    resolved: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let card_id = format!("question-{}", request.request_id);
+    if answers.is_some() || resolved {
+        let said = answers
+            .map(|answers| {
+                answers
+                    .iter()
+                    .map(|(_, given)| given.join(", "))
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            })
+            .filter(|said| !said.is_empty())
+            .unwrap_or_else(|| "No answer needed".into());
+        return note(
+            IconName::MessageSquare,
+            format!("Answered: {said}"),
+            true,
+            cx,
+        );
+    }
+    let picked = window.use_keyed_state(
+        SharedString::from(format!("{card_id}-picked")),
+        cx,
+        |_, _| HashMap::<String, String>::new(),
+    );
+    let fields: Vec<(String, Entity<TextInput>)> = request
+        .questions
+        .iter()
+        .filter(|q| q.allow_other || q.options.is_empty())
+        .map(|q| {
+            let secret = q.secret;
+            let field = window.use_keyed_state(
+                SharedString::from(format!("{card_id}-{}", q.id)),
+                cx,
+                move |window, cx| {
+                    let input = TextInput::new(window, cx).placeholder("Or type an answer");
+                    if secret { input.masked() } else { input }
+                },
+            );
+            (q.id.clone(), field)
+        })
+        .collect();
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let chosen = picked.read(cx).clone();
+    let typed: HashMap<String, String> = fields
+        .iter()
+        .map(|(id, field)| (id.clone(), field.read(cx).text().trim().to_string()))
+        .collect();
+    let answer_of = |id: &str| -> Option<String> {
+        typed
+            .get(id)
+            .filter(|t| !t.is_empty())
+            .cloned()
+            .or_else(|| chosen.get(id).cloned())
+    };
+    let complete = request.questions.iter().all(|q| answer_of(&q.id).is_some());
+    let answers: Vec<(String, Vec<String>)> = request
+        .questions
+        .iter()
+        .filter_map(|q| answer_of(&q.id).map(|a| (q.id.clone(), vec![a])))
+        .collect();
+
+    let mut card = div()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .p_4()
+        .rounded(theme.radius(Radius::Lg))
+        .border_1()
+        .border_color(colors.accent)
+        .bg(colors.surface)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_sm()
+                .text_color(colors.fg_muted)
+                .child(
+                    Icon::new(IconName::MessageSquare)
+                        .size(IconSize::Sm)
+                        .color(colors.accent),
+                )
+                .child("Codex has a question"),
+        );
+    for q in &request.questions {
+        let field = fields
+            .iter()
+            .find(|(id, _)| *id == q.id)
+            .map(|(_, f)| f.clone());
+        let mut options = div().flex().flex_wrap().gap_2();
+        for (label, description) in &q.options {
+            let on = chosen.get(&q.id) == Some(label);
+            let (picked, id, value) = (picked.clone(), q.id.clone(), label.clone());
+            let tile = div()
+                .id(key("opt", &format!("{card_id}-{}-{label}", q.id)))
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .px_3()
+                .py_2()
+                .min_w(px(140.))
+                .rounded(theme.radius(Radius::Md))
+                .border_1()
+                .border_color(if on { colors.accent } else { colors.border })
+                .bg(if on { colors.selection } else { colors.bg })
+                .cursor_pointer()
+                .hover(|tile| tile.bg(colors.hover))
+                .on_click(move |_, _, cx| {
+                    picked.update(cx, |picked, cx| {
+                        picked.insert(id.clone(), value.clone());
+                        cx.notify();
+                    })
+                })
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .when(on, |row| {
+                            row.child(
+                                Icon::new(IconName::Check)
+                                    .size(IconSize::Xs)
+                                    .color(colors.accent),
+                            )
+                        })
+                        .child(label.clone()),
+                )
+                .when(!description.is_empty(), |tile| {
+                    tile.child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.fg_muted)
+                            .child(description.clone()),
+                    )
+                });
+            options = options.child(tile);
+        }
+        card = card.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .when(!q.header.is_empty(), |column| {
+                    column.child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.fg_subtle)
+                            .child(q.header.clone()),
+                    )
+                })
+                .child(
+                    div()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .child(q.question.clone()),
+                )
+                .child(options)
+                .children(field.map(|field| Input::new(&field))),
+        );
+    }
+    let (workspace, thread, request_id) = (
+        workspace.clone(),
+        thread_id.unwrap_or_default().to_string(),
+        request.request_id.clone(),
+    );
+    card.child(
+        div().flex().justify_end().child(
+            Button::new(key("answer", &card_id), "Send answer")
+                .primary()
+                .size(ControlSize::Sm)
+                .disabled(!complete)
+                .on_click(move |_, _, cx| {
+                    let answers = answers.clone();
+                    workspace.update(cx, |ws, cx| {
+                        ws.answer_questions(&thread, request_id.clone(), answers, cx)
+                    })
+                }),
+        ),
+    )
+    .into_any_element()
 }
 
 #[cfg(test)]

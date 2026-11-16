@@ -6,8 +6,9 @@
 //! [`Item::Other`] instead of failing the whole message.
 
 use agentdesk_core::{
-    AgentEvent, ApprovalKind, ApprovalRequest, ChangeKind, FileChange, Item, ItemStatus, PlanStep,
-    ThreadMeta, TokenUsage, TurnStatus,
+    Account, AgentEvent, ApprovalKind, ApprovalRequest, ChangeKind, Credits, FileChange, Goal,
+    GoalStatus, Item, ItemStatus, PlanStep, Question, RateLimits, RateWindow, ThreadMeta,
+    TokenUsage, TurnStatus, UserInputRequest,
 };
 use serde_json::Value;
 
@@ -22,7 +23,12 @@ fn opt_s(value: &Value, key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// A thread as the sidebar lists it. Ephemeral threads (such as the forks
+/// that predict the next message) are not the user's chats: `None`.
 pub fn thread_meta(thread: &Value) -> Option<ThreadMeta> {
+    if thread["ephemeral"].as_bool() == Some(true) {
+        return None;
+    }
     let id = thread["id"].as_str()?.to_string();
     Some(ThreadMeta {
         id,
@@ -184,9 +190,82 @@ pub fn item(item: &Value) -> Option<Item> {
             result: tool_text(&item["contentItems"]),
             duration_ms: item["durationMs"].as_u64(),
         },
-        "webSearch" => Item::WebSearch {
+        "webSearch" => {
+            let action = &item["action"];
+            let detail = match action["type"].as_str() {
+                Some("open_page") => opt_s(action, "url").map(|url| format!("Opened {url}")),
+                Some("find_in_page") => {
+                    opt_s(action, "pattern").map(|p| format!("Looked for “{p}”"))
+                }
+                Some("search") => {
+                    action["queries"]
+                        .as_array()
+                        .filter(|q| q.len() > 1)
+                        .map(|queries| {
+                            queries
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .collect::<Vec<_>>()
+                                .join(" · ")
+                        })
+                }
+                _ => None,
+            };
+            let query = opt_s(item, "query")
+                .or_else(|| opt_s(action, "query"))
+                .unwrap_or_default();
+            Item::WebSearch { id, query, detail }
+        }
+        "imageGeneration" => Item::Image {
             id,
-            query: s(item, "query"),
+            status: match item["status"].as_str() {
+                Some("completed") | Some("succeeded") => ItemStatus::Completed,
+                Some("failed") => ItemStatus::Failed,
+                _ if !item["failure"].is_null() => ItemStatus::Failed,
+                _ if item["savedPath"].is_string() => ItemStatus::Completed,
+                _ => ItemStatus::InProgress,
+            },
+            path: opt_s(item, "savedPath"),
+            prompt: opt_s(item, "revisedPrompt"),
+        },
+        "collabAgentToolCall" => {
+            let tool = s(item, "tool");
+            let label = match tool.as_str() {
+                "spawnAgent" => "Started a sub-agent",
+                "sendInput" | "sendMessage" | "followupTask" => "Messaged a sub-agent",
+                "wait" => "Waited for sub-agents",
+                "closeAgent" => "Closed a sub-agent",
+                "interruptAgent" => "Interrupted a sub-agent",
+                "resumeAgent" => "Resumed a sub-agent",
+                "listAgents" => "Listed sub-agents",
+                _ => "Sub-agent",
+            };
+            Item::SubAgent {
+                id,
+                label: label.into(),
+                status: match item["status"].as_str() {
+                    Some("completed") => ItemStatus::Completed,
+                    Some("failed") => ItemStatus::Failed,
+                    _ => ItemStatus::InProgress,
+                },
+                detail: opt_s(item, "prompt"),
+            }
+        }
+        "subAgentActivity" => Item::SubAgent {
+            id,
+            label: match item["kind"].as_str() {
+                Some("started") => "Sub-agent started",
+                Some("completed") => "Sub-agent finished",
+                Some("interrupted") => "Sub-agent interrupted",
+                _ => "Sub-agent working",
+            }
+            .into(),
+            status: match item["kind"].as_str() {
+                Some("completed") => ItemStatus::Completed,
+                Some("interrupted") => ItemStatus::Failed,
+                _ => ItemStatus::InProgress,
+            },
+            detail: opt_s(item, "agentPath").or_else(|| opt_s(item, "model")),
         },
         "contextCompaction" => Item::Other {
             id,
@@ -349,6 +428,29 @@ pub fn event(method: &str, params: &Value) -> Option<AgentEvent> {
                     .unwrap_or_else(|| method.to_string()),
             )
         }
+        "thread/prediction/updated" => AgentEvent::PredictionUpdated {
+            thread_id,
+            text: match params["result"]["type"].as_str() {
+                Some("completed") => opt_s(&params["result"], "text").map(|t| t.trim().to_string()),
+                _ => None,
+            },
+        },
+        "thread/goal/updated" => AgentEvent::GoalUpdated {
+            thread_id,
+            goal: goal(&params["goal"]),
+        },
+        "thread/goal/cleared" => AgentEvent::GoalUpdated {
+            thread_id,
+            goal: None,
+        },
+        "account/rateLimits/updated" => {
+            AgentEvent::RateLimitsUpdated(rate_limits(&params["rateLimits"]))
+        }
+        "account/updated" => AgentEvent::AccountChanged,
+        "account/login/completed" => AgentEvent::LoginCompleted {
+            success: params["success"].as_bool().unwrap_or(false),
+            error: opt_s(params, "error"),
+        },
         _ => return None,
     })
 }
@@ -357,6 +459,39 @@ pub fn event(method: &str, params: &Value) -> Option<AgentEvent> {
 /// and should be declined so Codex does not wait on them.
 pub fn request(id: &Value, method: &str, params: &Value) -> Option<AgentEvent> {
     let (thread_id, turn_id) = ids(params);
+    if method == "item/tool/requestUserInput" {
+        let questions = params["questions"]
+            .as_array()
+            .map(|questions| {
+                questions
+                    .iter()
+                    .map(|q| Question {
+                        id: s(q, "id"),
+                        header: s(q, "header"),
+                        question: s(q, "question"),
+                        options: q["options"]
+                            .as_array()
+                            .map(|options| {
+                                options
+                                    .iter()
+                                    .map(|o| (s(o, "label"), s(o, "description")))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        allow_other: q["isOther"].as_bool().unwrap_or(false),
+                        secret: q["isSecret"].as_bool().unwrap_or(false),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        return Some(AgentEvent::UserInputRequested(UserInputRequest {
+            request_id: id.clone(),
+            thread_id,
+            turn_id,
+            item_id: s(params, "itemId"),
+            questions,
+        }));
+    }
     let kind = match method {
         "item/commandExecution/requestApproval" => ApprovalKind::Command {
             command: opt_s(params, "command").unwrap_or_else(|| {
@@ -387,6 +522,58 @@ pub fn request(id: &Value, method: &str, params: &Value) -> Option<AgentEvent> {
         item_id: s(params, "itemId"),
         kind,
     }))
+}
+
+/// A thread goal, or `None` for none.
+pub fn goal(value: &Value) -> Option<Goal> {
+    let objective = value["objective"].as_str()?.to_string();
+    Some(Goal {
+        objective,
+        status: value["status"]
+            .as_str()
+            .and_then(GoalStatus::from_wire)
+            .unwrap_or(GoalStatus::Paused),
+        token_budget: value["tokenBudget"].as_u64(),
+        tokens_used: value["tokensUsed"].as_u64().unwrap_or_default(),
+        time_used_secs: value["timeUsedSeconds"].as_u64().unwrap_or_default(),
+    })
+}
+
+fn rate_window(value: &Value) -> Option<RateWindow> {
+    Some(RateWindow {
+        used_percent: value["usedPercent"].as_f64()?,
+        window_mins: value["windowDurationMins"].as_u64(),
+        resets_at: value["resetsAt"].as_i64(),
+    })
+}
+
+/// A rate-limit snapshot (`RateLimitSnapshot`).
+pub fn rate_limits(value: &Value) -> RateLimits {
+    RateLimits {
+        name: opt_s(value, "limitName"),
+        primary: rate_window(&value["primary"]),
+        secondary: rate_window(&value["secondary"]),
+        credits: value["credits"].is_object().then(|| Credits {
+            has_credits: value["credits"]["hasCredits"].as_bool().unwrap_or(false),
+            unlimited: value["credits"]["unlimited"].as_bool().unwrap_or(false),
+            balance: opt_s(&value["credits"], "balance"),
+        }),
+        plan: opt_s(value, "planType"),
+        reached: !value["rateLimitReachedType"].is_null(),
+    }
+}
+
+/// The signed-in account from `account/read`, or `None` when signed out.
+pub fn account(value: &Value) -> Option<Account> {
+    Some(match value["type"].as_str()? {
+        "apiKey" => Account::ApiKey,
+        "chatgpt" => Account::ChatGpt {
+            email: opt_s(value, "email"),
+            plan: opt_s(value, "planType").unwrap_or_else(|| "unknown".into()),
+            workspace: opt_s(value, "workspaceName"),
+        },
+        other => Account::Other(other.to_string()),
+    })
 }
 
 #[cfg(test)]
@@ -447,6 +634,21 @@ mod tests {
             }
         );
 
+        let image = item(&json!({"type": "imageGeneration", "id": "g", "status": "completed",
+            "revisedPrompt": "a cat", "failure": null, "savedPath": "/tmp/cat.png", "generationId": "x"})).unwrap();
+        assert!(matches!(
+            image,
+            Item::Image {
+                status: ItemStatus::Completed,
+                path: Some(_),
+                ..
+            }
+        ));
+        let search = item(&json!({"type": "webSearch", "id": "w", "query": "gpui",
+            "action": {"type": "open_page", "url": "https://gpui.rs"}, "results": null}))
+        .unwrap();
+        assert!(matches!(search, Item::WebSearch { detail: Some(d), .. } if d.contains("gpui.rs")));
+
         let future = item(&json!({"type": "somethingFromTheFuture", "id": "z"})).unwrap();
         assert!(matches!(future, Item::Other { .. }));
     }
@@ -481,6 +683,50 @@ mod tests {
             }
         ));
         assert!(event("remoteControl/status/changed", &json!({})).is_none());
+    }
+
+    #[test]
+    fn pro_notifications_translate() {
+        let prediction = event(
+            "thread/prediction/updated",
+            &json!({"threadId": "t", "sourceTurnId": "u", "result": {"type": "completed", "text": " Run the tests "}}),
+        );
+        assert_eq!(
+            prediction,
+            Some(AgentEvent::PredictionUpdated {
+                thread_id: "t".into(),
+                text: Some("Run the tests".into())
+            })
+        );
+        let limits = event(
+            "account/rateLimits/updated",
+            &json!({"rateLimits": {"limitId": "codex", "limitName": null, "primary": {"usedPercent": 42.5, "windowDurationMins": 300, "resetsAt": 1700000000},
+                "secondary": null, "credits": null, "planType": "pro", "rateLimitReachedType": null}}),
+        );
+        assert!(matches!(
+            limits,
+            Some(AgentEvent::RateLimitsUpdated(RateLimits {
+                plan: Some(_),
+                reached: false,
+                ..
+            }))
+        ));
+        assert_eq!(
+            account(&json!({"type": "chatgpt", "email": "a@b.c", "planType": "pro", "workspaceName": null}))
+                .and_then(|a| a.plan_label()),
+            Some("Pro".to_string())
+        );
+        let asked = request(
+            &json!(5),
+            "item/tool/requestUserInput",
+            &json!({"threadId": "t", "turnId": "u", "itemId": "i",
+            "questions": [{"id": "q", "header": "Pick", "question": "Which?", "isOther": true, "isSecret": false,
+                "options": [{"label": "A", "description": "first"}]}], "isBlocking": true, "autoResolutionMs": null}),
+        );
+        assert!(
+            matches!(asked, Some(AgentEvent::UserInputRequested(r)) if r.questions[0].options.len() == 1)
+        );
+        assert!(thread_meta(&json!({"id": "x", "ephemeral": true})).is_none());
     }
 
     #[test]

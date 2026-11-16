@@ -2,16 +2,17 @@
 //! conversation or the welcome screen, and the composer.
 
 use ely_gpui_component::{
-    buttons::{ButtonVariant, IconButton},
+    buttons::{Button, ButtonVariant, IconButton},
     chat::{ChatContainer, ErrorMessage, MessageList, SuggestionChips, WelcomeScreen},
     menus::{DropdownMenu, Menu, MenuItem, OverflowMenu},
-    motion::{Skeleton, SkeletonText, Spinner, SpinnerStyle},
-    primitives::IconName,
+    motion::{ProgressBar, ProgressRing, Skeleton, SkeletonText, Spinner, SpinnerStyle},
+    primitives::{Icon, IconName},
     shell::drag_region,
     theme::{ActiveTheme, ControlSize, IconSize, Radius, TextSize},
 };
 use gpui::{
-    AnyElement, App, Entity, IntoElement, ParentElement, Styled, Window, div, prelude::*, px,
+    AnyElement, App, Entity, InteractiveElement, IntoElement, ParentElement,
+    StatefulInteractiveElement, Styled, Window, div, prelude::*, px,
 };
 use jiff::{Timestamp, tz::TimeZone};
 
@@ -20,6 +21,8 @@ use super::{
     composer::{Composer, short_path},
     rows::{self, COLUMN},
 };
+use agentdesk_core::GoalStatus;
+
 use crate::workspace::{Status, View, Workspace};
 
 const STARTERS: [(&str, IconName); 4] = [
@@ -38,7 +41,8 @@ pub fn render(
     cx: &mut App,
 ) -> AnyElement {
     let colors = cx.theme().colors.clone();
-    let header = header(workspace, root, sidebar_collapsed, window, cx);
+    let header = header(workspace, root.clone(), sidebar_collapsed, window, cx);
+    let goal = goal_banner(workspace, root, cx);
     let body = body(workspace, composer, window, cx);
     div()
         .flex_1()
@@ -48,6 +52,7 @@ pub fn render(
         .flex_col()
         .bg(colors.bg)
         .child(header)
+        .children(goal)
         .child(div().flex_1().min_h_0().child(body))
         .into_any_element()
 }
@@ -104,57 +109,113 @@ fn header(
         models = models.item(item);
     }
 
+    let memory = ws.memory_enabled();
+    // How much of the plan's usage is spent: a ring that opens the details.
+    let usage_meter = ws
+        .rate_limits
+        .as_ref()
+        .and_then(|l| l.highest_used())
+        .map(|used| {
+            let open = root.clone();
+            let reached = ws.rate_limits.as_ref().is_some_and(|l| l.reached);
+            div()
+                .id("usage-meter")
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_1p5()
+                .py_0p5()
+                .rounded_full()
+                .cursor_pointer()
+                .hover(|meter| meter.bg(colors.hover))
+                .on_click(move |_, _, cx| open.update(cx, |root, cx| root.open_account(cx)))
+                .child(ProgressRing::new("usage-ring", (used / 100.) as f32).size(gpui::rems(0.9)))
+                .child(
+                    div()
+                        .text_size(theme.text_size(TextSize::Xs))
+                        .text_color(if reached || used >= 90. {
+                            colors.danger
+                        } else {
+                            colors.fg_muted
+                        })
+                        .child(format!("{used:.0}%")),
+                )
+        });
+
     // Chat menu: rename, pin, compact, review, archive.
-    let chat_menu =
-        thread_id.as_ref().map(|id| {
-            let pinned = ws.settings.is_pinned(id);
-            let (rename, pin, compact, review, archive) = (
-                (root.clone(), id.clone()),
-                (workspace.clone(), id.clone()),
-                workspace.clone(),
-                workspace.clone(),
-                (workspace.clone(), id.clone()),
-            );
-            let menu =
-                Menu::new()
-                    .item(MenuItem::new("Rename…").icon(IconName::Pencil).on_click(
-                        move |window, cx| {
-                            let (root, id) = rename.clone();
-                            root.update(cx, |root, cx| root.start_rename(id, window, cx));
-                        },
-                    ))
-                    .item(
-                        MenuItem::new(if pinned { "Unpin" } else { "Pin to top" })
-                            .icon(if pinned {
-                                IconName::PinOff
-                            } else {
-                                IconName::Pin
-                            })
-                            .on_click(move |_, cx| {
-                                let (ws, id) = pin.clone();
-                                ws.update(cx, |ws, cx| ws.toggle_pin(&id, cx));
-                            }),
-                    )
-                    .separator()
-                    .item(
-                        MenuItem::new("Review uncommitted changes")
-                            .icon(IconName::Eye)
-                            .on_click(move |_, cx| review.update(cx, |ws, cx| ws.review(None, cx))),
-                    )
-                    .item(
-                        MenuItem::new("Compact conversation")
-                            .icon(IconName::Minimize2)
-                            .on_click(move |_, cx| compact.update(cx, |ws, cx| ws.compact(cx))),
-                    )
-                    .separator()
-                    .item(MenuItem::new("Archive").icon(IconName::Archive).on_click(
-                        move |_, cx| {
+    let chat_menu = thread_id.as_ref().map(|id| {
+        let pinned = ws.settings.is_pinned(id);
+        let (rename, pin, compact, review, archive) = (
+            (root.clone(), id.clone()),
+            (workspace.clone(), id.clone()),
+            workspace.clone(),
+            workspace.clone(),
+            (workspace.clone(), id.clone()),
+        );
+        let menu =
+            Menu::new()
+                .item(MenuItem::new("Rename…").icon(IconName::Pencil).on_click(
+                    move |window, cx| {
+                        let (root, id) = rename.clone();
+                        root.update(cx, |root, cx| root.start_rename(id, window, cx));
+                    },
+                ))
+                .item(
+                    MenuItem::new(if pinned { "Unpin" } else { "Pin to top" })
+                        .icon(if pinned {
+                            IconName::PinOff
+                        } else {
+                            IconName::Pin
+                        })
+                        .on_click(move |_, cx| {
+                            let (ws, id) = pin.clone();
+                            ws.update(cx, |ws, cx| ws.toggle_pin(&id, cx));
+                        }),
+                )
+                .separator()
+                .item(
+                    MenuItem::new("Review uncommitted changes")
+                        .icon(IconName::Eye)
+                        .on_click(move |_, cx| review.update(cx, |ws, cx| ws.review(None, cx))),
+                )
+                .item(
+                    MenuItem::new("Compact conversation")
+                        .icon(IconName::Minimize2)
+                        .on_click(move |_, cx| compact.update(cx, |ws, cx| ws.compact(cx))),
+                )
+                .separator()
+                .item(
+                    MenuItem::new("Set a goal…")
+                        .icon(IconName::ListChecks)
+                        .on_click({
+                            let root = root.clone();
+                            move |window, cx| root.update(cx, |root, cx| root.open_goal(window, cx))
+                        }),
+                )
+                .item(
+                    MenuItem::new("Branch into a new chat")
+                        .icon(IconName::GitBranch)
+                        .on_click({
+                            let workspace = workspace.clone();
+                            move |_, cx| workspace.update(cx, |ws, cx| ws.branch(None, cx))
+                        }),
+                )
+                .item(MenuItem::check("Use memory", memory).on_click({
+                    let workspace = workspace.clone();
+                    move |_, cx| workspace.update(cx, |ws, cx| ws.toggle_memory(cx))
+                }))
+                .separator()
+                .item(
+                    MenuItem::new("Archive")
+                        .icon(IconName::Archive)
+                        .on_click(move |_, cx| {
                             let (ws, id) = archive.clone();
                             ws.update(cx, |ws, cx| ws.archive(id, cx));
-                        },
-                    ));
-            OverflowMenu::new("chat-menu", menu)
-        });
+                        }),
+                );
+        OverflowMenu::new("chat-menu", menu)
+    });
 
     let left_room = if sidebar_collapsed && cfg!(target_os = "macos") {
         px(28.)
@@ -210,6 +271,7 @@ fn header(
                 .text_color(colors.fg_subtle)
                 .child(usage)
         }))
+        .children(usage_meter)
         .children(chat_menu)
         .when(thread_id.is_some(), |bar| {
             bar.child(
@@ -356,6 +418,139 @@ fn format_tokens(tokens: u64) -> String {
         1_000..1_000_000 => format!("{:.1}k", tokens as f64 / 1_000.),
         _ => format!("{:.1}M", tokens as f64 / 1_000_000.),
     }
+}
+
+/// The chat's goal under the title bar: what, how far, and its controls.
+fn goal_banner(
+    workspace: &Entity<Workspace>,
+    root: Entity<RootView>,
+    cx: &mut App,
+) -> Option<AnyElement> {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let goal = workspace.read(cx).goal()?.clone();
+    let active = goal.status == GoalStatus::Active;
+    let tint = match goal.status {
+        GoalStatus::Active => colors.accent,
+        GoalStatus::Complete => colors.success,
+        GoalStatus::Paused => colors.fg_muted,
+        _ => colors.warning,
+    };
+    let spent = match goal.token_budget {
+        Some(budget) if budget > 0 => format!(
+            "{} of {} tokens",
+            format_tokens(goal.tokens_used),
+            format_tokens(budget)
+        ),
+        _ => format!("{} tokens", format_tokens(goal.tokens_used)),
+    };
+    let share = goal
+        .token_budget
+        .filter(|b| *b > 0)
+        .map(|b| (goal.tokens_used as f32 / b as f32).min(1.));
+    let (toggle, clear) = (workspace.clone(), workspace.clone());
+    Some(
+        div()
+            .flex_none()
+            .w_full()
+            .flex()
+            .justify_center()
+            .px_6()
+            .pt_2()
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(COLUMN))
+                    .flex()
+                    .flex_col()
+                    .gap_1p5()
+                    .px_3()
+                    .py_2()
+                    .rounded(theme.radius(Radius::Lg))
+                    .border_1()
+                    .border_color(colors.border)
+                    .bg(colors.surface)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_size(theme.text_size(TextSize::Sm))
+                            .child(
+                                Icon::new(IconName::ListChecks)
+                                    .size(IconSize::Sm)
+                                    .color(tint),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(goal.objective.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(theme.text_size(TextSize::Xs))
+                                    .text_color(tint)
+                                    .child(goal.status.label()),
+                            )
+                            .when(goal.status != GoalStatus::Complete, |row| {
+                                row.child(
+                                    Button::new(
+                                        "goal-toggle",
+                                        if active { "Pause" } else { "Resume" },
+                                    )
+                                    .variant(ButtonVariant::Ghost)
+                                    .size(ControlSize::Sm)
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            let next = if active {
+                                                GoalStatus::Paused
+                                            } else {
+                                                GoalStatus::Active
+                                            };
+                                            toggle.update(cx, |ws, cx| ws.set_goal_status(next, cx))
+                                        },
+                                    ),
+                                )
+                            })
+                            .child(
+                                IconButton::new("goal-edit", IconName::Pencil)
+                                    .variant(ButtonVariant::Ghost)
+                                    .size(ControlSize::Sm)
+                                    .tooltip("Change the goal")
+                                    .on_click(move |_, window, cx| {
+                                        root.update(cx, |root, cx| root.open_goal(window, cx))
+                                    }),
+                            )
+                            .child(
+                                IconButton::new("goal-clear", IconName::X)
+                                    .variant(ButtonVariant::Ghost)
+                                    .size(ControlSize::Sm)
+                                    .tooltip("Clear the goal")
+                                    .on_click(move |_, _, cx| {
+                                        clear.update(cx, |ws, cx| ws.clear_goal(cx))
+                                    }),
+                            ),
+                    )
+                    .when_some(share, |column, share| {
+                        column.child(ProgressBar::new("goal-budget", share))
+                    })
+                    .child(
+                        div()
+                            .text_size(theme.text_size(TextSize::Xs))
+                            .text_color(colors.fg_muted)
+                            .child(format!(
+                                "{spent} · {}",
+                                super::rows::format_duration(std::time::Duration::from_secs(
+                                    goal.time_used_secs
+                                ),)
+                            )),
+                    ),
+            )
+            .into_any_element(),
+    )
 }
 
 #[cfg(test)]

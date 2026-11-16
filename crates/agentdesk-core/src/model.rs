@@ -127,6 +127,23 @@ pub enum Item {
     WebSearch {
         id: String,
         query: String,
+        /// What else the search did, such as a page it opened.
+        detail: Option<String>,
+    },
+    /// An image the agent generated.
+    Image {
+        id: String,
+        status: ItemStatus,
+        /// Where the image was saved, once it was.
+        path: Option<String>,
+        prompt: Option<String>,
+    },
+    /// The agent started or talked to a sub-agent.
+    SubAgent {
+        id: String,
+        label: String,
+        status: ItemStatus,
+        detail: Option<String>,
     },
     /// Something the backend reported that we do not draw specially yet.
     Other {
@@ -145,7 +162,195 @@ impl Item {
             | Item::FileChange { id, .. }
             | Item::Tool { id, .. }
             | Item::WebSearch { id, .. }
+            | Item::Image { id, .. }
+            | Item::SubAgent { id, .. }
             | Item::Other { id, .. } => id,
         }
     }
+}
+
+/// Where a long-running goal stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GoalStatus {
+    Active,
+    Paused,
+    Blocked,
+    UsageLimited,
+    BudgetLimited,
+    Complete,
+}
+
+impl GoalStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            GoalStatus::Active => "Working",
+            GoalStatus::Paused => "Paused",
+            GoalStatus::Blocked => "Blocked",
+            GoalStatus::UsageLimited => "Usage limit reached",
+            GoalStatus::BudgetLimited => "Budget used up",
+            GoalStatus::Complete => "Complete",
+        }
+    }
+
+    pub fn wire(self) -> &'static str {
+        match self {
+            GoalStatus::Active => "active",
+            GoalStatus::Paused => "paused",
+            GoalStatus::Blocked => "blocked",
+            GoalStatus::UsageLimited => "usageLimited",
+            GoalStatus::BudgetLimited => "budgetLimited",
+            GoalStatus::Complete => "complete",
+        }
+    }
+
+    pub fn from_wire(text: &str) -> Option<Self> {
+        Some(match text {
+            "active" => GoalStatus::Active,
+            "paused" => GoalStatus::Paused,
+            "blocked" => GoalStatus::Blocked,
+            "usageLimited" => GoalStatus::UsageLimited,
+            "budgetLimited" => GoalStatus::BudgetLimited,
+            "complete" => GoalStatus::Complete,
+            _ => return None,
+        })
+    }
+}
+
+/// An objective the agent keeps working toward across turns, within a budget.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Goal {
+    pub objective: String,
+    pub status: GoalStatus,
+    pub token_budget: Option<u64>,
+    pub tokens_used: u64,
+    pub time_used_secs: u64,
+}
+
+/// One usage window, such as the five-hour or the weekly limit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RateWindow {
+    pub used_percent: f64,
+    pub window_mins: Option<u64>,
+    /// Unix seconds.
+    pub resets_at: Option<i64>,
+}
+
+impl RateWindow {
+    /// "5-hour", "Weekly", or the window in hours or days.
+    pub fn label(&self) -> String {
+        match self.window_mins {
+            Some(300) => "5-hour limit".into(),
+            Some(10080) => "Weekly limit".into(),
+            Some(mins) if mins % 1440 == 0 => format!("{}-day limit", mins / 1440),
+            Some(mins) if mins % 60 == 0 => format!("{}-hour limit", mins / 60),
+            Some(mins) => format!("{mins}-minute limit"),
+            None => "Usage limit".into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Credits {
+    pub has_credits: bool,
+    pub unlimited: bool,
+    pub balance: Option<String>,
+}
+
+/// How much of the subscription's included usage is spent.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RateLimits {
+    pub name: Option<String>,
+    pub primary: Option<RateWindow>,
+    pub secondary: Option<RateWindow>,
+    pub credits: Option<Credits>,
+    pub plan: Option<String>,
+    /// A limit is reached and usage is paused until it resets.
+    pub reached: bool,
+}
+
+impl RateLimits {
+    /// Merges a sparse update: fields it lacks keep their last value.
+    pub fn merge(&mut self, update: RateLimits) {
+        if update.name.is_some() {
+            self.name = update.name;
+        }
+        if update.primary.is_some() {
+            self.primary = update.primary;
+        }
+        if update.secondary.is_some() {
+            self.secondary = update.secondary;
+        }
+        if update.credits.is_some() {
+            self.credits = update.credits;
+        }
+        if update.plan.is_some() {
+            self.plan = update.plan;
+        }
+        self.reached = update.reached;
+    }
+
+    /// The fullest window's share used, 0 to 100.
+    pub fn highest_used(&self) -> Option<f64> {
+        [self.primary, self.secondary]
+            .into_iter()
+            .flatten()
+            .map(|window| window.used_percent)
+            .reduce(f64::max)
+    }
+}
+
+/// Who Codex is signed in as.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Account {
+    ApiKey,
+    ChatGpt {
+        email: Option<String>,
+        plan: String,
+        workspace: Option<String>,
+    },
+    Other(String),
+}
+
+impl Account {
+    /// "Pro", "Plus", "Team"… for a ChatGPT plan.
+    pub fn plan_label(&self) -> Option<String> {
+        let Account::ChatGpt { plan, .. } = self else {
+            return None;
+        };
+        Some(plan_label(plan))
+    }
+}
+
+/// A plan id as people say it: `pro` → "Pro", `prolite` → "Pro Lite".
+pub fn plan_label(plan: &str) -> String {
+    match plan {
+        "prolite" => "Pro Lite".into(),
+        "promax" => "Pro Max".into(),
+        "edu_plus" => "Edu Plus".into(),
+        "edu_pro" => "Edu Pro".into(),
+        "sci_plus" => "Sci Plus".into(),
+        "self_serve_business_prolite" => "Business Pro Lite".into(),
+        "self_serve_business_usage_based" | "business" => "Business".into(),
+        plan if plan.starts_with("ent") => "Enterprise".into(),
+        plan => {
+            let mut chars = plan.chars();
+            chars
+                .next()
+                .map(|c| c.to_uppercase().chain(chars).collect())
+                .unwrap_or_default()
+        }
+    }
+}
+
+/// One question the agent asks, with the choices it offers.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Question {
+    pub id: String,
+    pub header: String,
+    pub question: String,
+    /// `(label, description)` pairs.
+    pub options: Vec<(String, String)>,
+    /// Free text is allowed besides the options.
+    pub allow_other: bool,
+    pub secret: bool,
 }

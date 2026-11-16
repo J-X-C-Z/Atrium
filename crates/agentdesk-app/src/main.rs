@@ -43,6 +43,7 @@ fn main() {
                 KeyBinding::new("cmd-.", StopTurn, None),
                 KeyBinding::new("ctrl-.", StopTurn, None),
                 KeyBinding::new("cmd-q", Quit, None),
+                KeyBinding::new("tab", ui::AcceptPrediction, Some("Predicting")),
             ]);
             cx.on_action(|_: &Quit, cx| cx.quit());
             ui::register_actions(cx);

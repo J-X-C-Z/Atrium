@@ -56,13 +56,15 @@ struct Thread {
     created: i64,
     updated: i64,
     turns: Vec<Value>,
+    /// A throwaway fork, such as one that predicts the next message.
+    ephemeral: bool,
 }
 
 fn thread_json(t: &Thread, with_turns: bool) -> Value {
     json!({
         "id": t.id, "sessionId": t.id, "preview": t.preview, "name": null, "cwd": t.cwd,
         "model": "mock-1", "modelProvider": "mock", "createdAt": t.created, "updatedAt": t.updated,
-        "recencyAt": t.updated, "status": {"type": "idle"}, "ephemeral": false,
+        "recencyAt": t.updated, "status": {"type": "idle"}, "ephemeral": t.ephemeral,
         "turns": if with_turns { Value::Array(t.turns.clone()) } else { json!([]) },
     })
 }
@@ -73,6 +75,14 @@ struct State {
     answers: Mutex<HashMap<i64, mpsc::Sender<Value>>>,
     next_request: AtomicU64,
     interrupts: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    goals: Mutex<HashMap<String, Value>>,
+    signed_in: AtomicBool,
+    /// Share of the five-hour window used, in tenths of a percent.
+    used: AtomicU64,
+    /// The running turn of each thread, for steering.
+    running: Mutex<HashMap<String, String>>,
+    /// Messages steered into running turns, by turn.
+    steered: Mutex<HashMap<String, Vec<String>>>,
 }
 
 fn main() {
@@ -82,6 +92,11 @@ fn main() {
         answers: Mutex::new(HashMap::new()),
         next_request: AtomicU64::new(0),
         interrupts: Mutex::new(HashMap::new()),
+        goals: Mutex::new(HashMap::new()),
+        signed_in: AtomicBool::new(true),
+        used: AtomicU64::new(230),
+        running: Mutex::new(HashMap::new()),
+        steered: Mutex::new(HashMap::new()),
     });
     // Two stored threads so the sidebar has history.
     {
@@ -105,6 +120,7 @@ fn main() {
                 cwd: std::env::current_dir().unwrap().display().to_string(),
                 created: now() - ago,
                 updated: now() - ago,
+                ephemeral: false,
                 turns: vec![json!({
                     "id": next_id("turn"), "status": "completed", "items": [
                         {"type": "userMessage", "id": next_id("item"), "content": [{"type": "text", "text": text, "text_elements": []}]},
@@ -151,25 +167,282 @@ fn handle(method: &str, id: Value, params: Value, out: &Out, state: &Arc<State>)
             id,
             json!({"userAgent": "mock-codex/0.0.0", "codexHome": "/tmp/mock-codex", "platformFamily": "unix", "platformOs": std::env::consts::OS}),
         ),
-        "account/read" => reply(
+        "account/read" => {
+            let account = if state.signed_in.load(Ordering::Relaxed) {
+                json!({"type": "chatgpt", "email": "you@example.com", "planType": "pro", "workspaceName": null})
+            } else {
+                Value::Null
+            };
+            reply(
+                out,
+                id,
+                json!({"account": account, "userId": null, "requiresOpenaiAuth": true}),
+            );
+        }
+        "account/rateLimits/read" => {
+            if !state.signed_in.load(Ordering::Relaxed) {
+                send(
+                    out,
+                    json!({"id": id, "error": {"code": -32600, "message": "codex account authentication required to read rate limits"}}),
+                );
+            } else {
+                let snapshot = rate_snapshot(state);
+                reply(
+                    out,
+                    id,
+                    json!({"ordinaryUsageAllowed": true, "rateLimits": snapshot, "rateLimitsByLimitId": {"codex": snapshot}, "rateLimitResetCredits": null, "accountId": null}),
+                );
+            }
+        }
+        "account/login/start" => {
+            let login_id = next_id("login");
+            reply(
+                out,
+                id,
+                json!({"type": "chatgpt", "loginId": login_id, "authUrl": "https://auth.openai.com/oauth/authorize?mock=1"}),
+            );
+            let (out, state) = (out.clone(), state.clone());
+            thread::spawn(move || {
+                pause(1500);
+                state.signed_in.store(true, Ordering::Relaxed);
+                notify(
+                    &out,
+                    "account/login/completed",
+                    json!({"loginId": login_id, "success": true, "error": null, "onboardingEntrypoint": null}),
+                );
+                notify(
+                    &out,
+                    "account/updated",
+                    json!({"authMode": "chatgpt", "planType": "pro"}),
+                );
+            });
+        }
+        "account/login/cancel" => reply(out, id, json!({"status": "canceled"})),
+        "account/logout" => {
+            state.signed_in.store(false, Ordering::Relaxed);
+            reply(out, id, json!({}));
+            notify(
+                out,
+                "account/updated",
+                json!({"authMode": null, "planType": null}),
+            );
+        }
+        "memory/status" => reply(
             out,
             id,
-            json!({"account": {"type": "apiKey"}, "userId": null, "requiresOpenaiAuth": true}),
+            json!({"v2ConsolidatedThreads": 3, "v2Ready": true}),
         ),
+        "thread/memoryMode/set" | "thread/unsubscribe" => reply(out, id, json!({})),
+        "collaborationMode/list" => reply(
+            out,
+            id,
+            json!({"data": [
+            {"name": "Plan", "mode": "plan", "model": null, "reasoning_effort": "medium"},
+            {"name": "Default", "mode": "default", "model": null, "reasoning_effort": null}]}),
+        ),
+        "thread/prediction/request" => send(
+            out,
+            // As Codex 0.169 answers: the client falls back to a prediction fork.
+            json!({"id": id, "error": {"code": -32601, "message": "thread/prediction/request is not implemented yet"}}),
+        ),
+        "thread/fork" => {
+            let wanted = params["threadId"].as_str().unwrap_or_default().to_string();
+            let found = state
+                .threads
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|t| t.id == wanted)
+                .cloned();
+            let Some(parent) = found else {
+                send(
+                    out,
+                    json!({"id": id, "error": {"code": -32600, "message": format!("no thread {wanted}")}}),
+                );
+                return;
+            };
+            let ephemeral = params["ephemeral"].as_bool().unwrap_or(false);
+            let mut turns = parent.turns.clone();
+            if let Some(last) = params["lastTurnId"].as_str()
+                && let Some(ix) = turns.iter().position(|t| t["id"] == last)
+            {
+                turns.truncate(ix + 1);
+            }
+            let fork = Thread {
+                id: next_id(if ephemeral { "fork" } else { "thread" }),
+                preview: if ephemeral {
+                    String::new()
+                } else {
+                    format!("{} (branch)", parent.preview)
+                },
+                cwd: parent.cwd.clone(),
+                created: now(),
+                updated: now(),
+                turns,
+                ephemeral,
+            };
+            let body = thread_json(&fork, false);
+            state.threads.lock().unwrap().push(fork);
+            reply(
+                out,
+                id,
+                json!({"thread": body.clone(), "model": "mock-1", "modelProvider": "mock", "cwd": body["cwd"]}),
+            );
+            notify(out, "thread/started", json!({"thread": body}));
+        }
+        "thread/revert" => {
+            let wanted = params["threadId"].as_str().unwrap_or_default().to_string();
+            let before = params["beforeTurnId"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            let mut threads = state.threads.lock().unwrap();
+            let Some(thread) = threads.iter_mut().find(|t| t.id == wanted) else {
+                send(
+                    out,
+                    json!({"id": id, "error": {"code": -32600, "message": "no such thread"}}),
+                );
+                return;
+            };
+            if let Some(ix) = thread.turns.iter().position(|t| t["id"] == before.as_str()) {
+                thread.turns.truncate(ix);
+            }
+            let body = thread_json(thread, false);
+            drop(threads);
+            reply(
+                out,
+                id,
+                json!({"thread": body, "turnsBackwardsCursor": null, "itemsBackwardsCursor": null}),
+            );
+            notify(out, "thread/reverted", json!({"threadId": wanted}));
+        }
+        "thread/search" => {
+            let term = params["searchTerm"]
+                .as_str()
+                .unwrap_or_default()
+                .to_lowercase();
+            let threads = state.threads.lock().unwrap().clone();
+            let data: Vec<Value> = threads
+                .iter()
+                .filter(|t| !t.ephemeral)
+                .filter_map(|t| {
+                    let texts =
+                        std::iter::once(t.preview.clone()).chain(t.turns.iter().flat_map(|turn| {
+                            turn["items"]
+                                .as_array()
+                                .cloned()
+                                .unwrap_or_default()
+                                .into_iter()
+                                .filter_map(|item| {
+                                    item["text"].as_str().map(str::to_owned).or_else(|| {
+                                        item["content"][0]["text"].as_str().map(str::to_owned)
+                                    })
+                                })
+                        }));
+                    let hit = texts
+                        .into_iter()
+                        .find(|text| text.to_lowercase().contains(&term))?;
+                    Some(json!({"thread": thread_json(t, false), "snippet": hit}))
+                })
+                .collect();
+            reply(
+                out,
+                id,
+                json!({"data": data, "nextCursor": null, "backwardsCursor": null}),
+            );
+        }
+        "thread/goal/get" => {
+            let wanted = params["threadId"].as_str().unwrap_or_default();
+            let goal = state
+                .goals
+                .lock()
+                .unwrap()
+                .get(wanted)
+                .cloned()
+                .unwrap_or(Value::Null);
+            reply(out, id, json!({"goal": goal}));
+        }
+        "thread/goal/set" => {
+            let thread_id = params["threadId"].as_str().unwrap_or_default().to_string();
+            let mut goals = state.goals.lock().unwrap();
+            let goal = goals.entry(thread_id.clone()).or_insert_with(|| {
+                json!({
+                "threadId": thread_id, "objective": "", "status": "active", "tokenBudget": null,
+                "tokensUsed": 0, "timeUsedSeconds": 0, "createdAt": now(), "updatedAt": now()})
+            });
+            for key in ["objective", "status", "tokenBudget"] {
+                if !params[key].is_null() {
+                    goal[key] = params[key].clone();
+                }
+            }
+            goal["updatedAt"] = json!(now());
+            let goal = goal.clone();
+            drop(goals);
+            reply(out, id, json!({"goal": goal}));
+            notify(
+                out,
+                "thread/goal/updated",
+                json!({"threadId": thread_id, "turnId": null, "goal": goal}),
+            );
+        }
+        "thread/goal/clear" => {
+            let thread_id = params["threadId"].as_str().unwrap_or_default().to_string();
+            state.goals.lock().unwrap().remove(&thread_id);
+            reply(out, id, json!({}));
+            notify(out, "thread/goal/cleared", json!({"threadId": thread_id}));
+        }
+        "turn/steer" => {
+            let thread_id = params["threadId"].as_str().unwrap_or_default().to_string();
+            let expected = params["expectedTurnId"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            let running = state.running.lock().unwrap().get(&thread_id).cloned();
+            match running {
+                Some(turn) if turn == expected => {
+                    let text = params["input"][0]["text"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string();
+                    reply(out, id, json!({"turnId": turn}));
+                    let user = json!({"type": "userMessage", "id": next_id("item"), "clientId": null, "content": params["input"]});
+                    let ids = json!({"threadId": thread_id, "turnId": turn, "item": user, "startedAtMs": 0, "completedAtMs": 0});
+                    notify(out, "item/started", ids.clone());
+                    notify(out, "item/completed", ids);
+                    state
+                        .steered
+                        .lock()
+                        .unwrap()
+                        .entry(turn)
+                        .or_default()
+                        .push(text);
+                }
+                _ => send(
+                    out,
+                    json!({"id": id, "error": {"code": -32600, "message": "no active turn to steer"}}),
+                ),
+            }
+        }
         "model/list" => reply(
             out,
             id,
             json!({"data": [
                 {"id": "mock-1", "model": "mock-1", "displayName": "Mock 1", "description": "Fast scripted answers", "hidden": false, "isDefault": true,
-                 "supportedReasoningEfforts": [{"reasoningEffort": "low", "description": ""}, {"reasoningEffort": "medium", "description": ""}, {"reasoningEffort": "high", "description": ""}], "defaultReasoningEffort": "medium"},
+                 "supportedReasoningEfforts": [{"reasoningEffort": "low", "description": ""}, {"reasoningEffort": "medium", "description": ""}, {"reasoningEffort": "high", "description": ""}], "defaultReasoningEffort": "medium",
+                 "serviceTiers": [{"id": "priority", "name": "Fast", "description": "2x speed, increased usage"}]},
                 {"id": "mock-1-pro", "model": "mock-1-pro", "displayName": "Mock 1 Pro", "description": "Same script, more gravitas", "hidden": false, "isDefault": false,
-                 "supportedReasoningEfforts": [{"reasoningEffort": "medium", "description": ""}, {"reasoningEffort": "high", "description": ""}, {"reasoningEffort": "xhigh", "description": ""}], "defaultReasoningEffort": "high"}
+                 "supportedReasoningEfforts": [{"reasoningEffort": "medium", "description": ""}, {"reasoningEffort": "high", "description": ""}, {"reasoningEffort": "xhigh", "description": ""}], "defaultReasoningEffort": "high",
+                 "serviceTiers": [{"id": "priority", "name": "Fast", "description": "2x speed, increased usage"}]}
             ], "nextCursor": null}),
         ),
         "thread/list" => {
             let mut threads = state.threads.lock().unwrap().clone();
             threads.sort_by_key(|t| std::cmp::Reverse(t.updated));
-            let data: Vec<Value> = threads.iter().map(|t| thread_json(t, false)).collect();
+            let data: Vec<Value> = threads
+                .iter()
+                .filter(|t| !t.ephemeral)
+                .map(|t| thread_json(t, false))
+                .collect();
             reply(
                 out,
                 id,
@@ -187,6 +460,7 @@ fn handle(method: &str, id: Value, params: Value, out: &Out, state: &Arc<State>)
                 created: now(),
                 updated: now(),
                 turns: Vec::new(),
+                ephemeral: params["ephemeral"].as_bool().unwrap_or(false),
             };
             let body = thread_json(&thread, false);
             state.threads.lock().unwrap().push(thread);
@@ -250,8 +524,30 @@ fn handle(method: &str, id: Value, params: Value, out: &Out, state: &Arc<State>)
                 .lock()
                 .unwrap()
                 .insert(turn_id.clone(), stop.clone());
+            let ephemeral = state
+                .threads
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|t| t.id == thread_id && t.ephemeral);
+            let opts = Opts {
+                plan: params["collaborationMode"]["mode"] == "plan",
+                fast: params["serviceTier"] == "priority",
+            };
+            state
+                .running
+                .lock()
+                .unwrap()
+                .insert(thread_id.clone(), turn_id.clone());
             let (out, state) = (out.clone(), state.clone());
-            thread::spawn(move || run_turn(&out, &state, &thread_id, &turn_id, &input, &stop));
+            thread::spawn(move || {
+                if ephemeral {
+                    run_prediction(&out, &state, &thread_id, &turn_id);
+                } else {
+                    run_turn(&out, &state, &thread_id, &turn_id, &input, &stop, opts);
+                }
+                state.running.lock().unwrap().remove(&thread_id);
+            });
         }
         "thread/name/set" => {
             let wanted = params["threadId"].as_str().unwrap_or_default().to_string();
@@ -370,6 +666,18 @@ fn pause(ms: u64) {
     thread::sleep(Duration::from_millis(ms));
 }
 
+/// How a turn was asked to run.
+#[derive(Clone, Copy, Default)]
+struct Opts {
+    plan: bool,
+    fast: bool,
+}
+
+thread_local! {
+    /// Milliseconds between streamed chunks on this thread: Fast halves it.
+    static PACE: std::cell::Cell<u64> = const { std::cell::Cell::new(35) };
+}
+
 fn stream(
     out: &Out,
     method: &str,
@@ -387,7 +695,7 @@ fn stream(
         params["itemId"] = json!(item_id);
         params["delta"] = json!(chunk.concat());
         notify(out, method, params);
-        pause(35);
+        pause(PACE.with(|pace| pace.get()));
     }
     true
 }
@@ -399,7 +707,9 @@ fn run_turn(
     turn_id: &str,
     input: &Value,
     stop: &AtomicBool,
+    opts: Opts,
 ) {
+    PACE.with(|pace| pace.set(if opts.fast { 15 } else { 35 }));
     let started_at = std::time::Instant::now();
     let text = input
         .as_array()
@@ -471,6 +781,7 @@ fn run_turn(
     items.push(reasoning);
 
     let lower = text.to_lowercase();
+    let mut chosen: Option<String> = None;
     if !interrupted && lower.contains("plan") {
         let steps = ["Read the code", "Make the change", "Run the tests"];
         for done in 0..=steps.len() {
@@ -576,11 +887,91 @@ fn run_turn(
         items.push(change);
     }
 
+    if !interrupted && lower.contains("ask") {
+        let item_id = next_id("item");
+        let answer = ask(
+            out,
+            state,
+            "item/tool/requestUserInput",
+            with(json!({
+            "itemId": item_id, "isBlocking": true, "autoResolutionMs": null,
+            "questions": [{"id": "storage", "header": "Storage", "question": "Where should the data live?",
+                "isOther": true, "isSecret": false, "options": [
+                    {"label": "SQLite", "description": "One file next to the app"},
+                    {"label": "Postgres", "description": "A server you already run"}]}]})),
+        );
+        let picked = answer["answers"]["storage"]["answers"][0]
+            .as_str()
+            .unwrap_or("nothing")
+            .to_string();
+        chosen = Some(picked);
+    }
+    if !interrupted && lower.contains("search") {
+        let item = json!({"type": "webSearch", "id": next_id("item"), "query": "gpui text input ime",
+            "action": {"type": "open_page", "url": "https://www.gpui.rs/"}, "results": null});
+        notify(
+            out,
+            "item/started",
+            with(json!({"item": item, "startedAtMs": 0})),
+        );
+        pause(500);
+        notify(
+            out,
+            "item/completed",
+            with(json!({"item": item, "completedAtMs": 0})),
+        );
+        items.push(item);
+    }
+    if !interrupted && lower.contains("image") {
+        let path = std::env::temp_dir().join(format!("mock-codex-{}.png", next_id("img")));
+        write_png(&path, 320, 200);
+        let mut item = json!({"type": "imageGeneration", "id": next_id("item"), "status": "inProgress",
+            "revisedPrompt": "A soft gradient, from dusk blue to warm orange", "failure": null, "generationId": "g1"});
+        notify(
+            out,
+            "item/started",
+            with(json!({"item": item, "startedAtMs": 0})),
+        );
+        pause(900);
+        item["status"] = json!("completed");
+        item["savedPath"] = json!(path.display().to_string());
+        notify(
+            out,
+            "item/completed",
+            with(json!({"item": item, "completedAtMs": 0})),
+        );
+        items.push(item);
+    }
+    if !interrupted && lower.contains("agents") {
+        let spawn = json!({"type": "collabAgentToolCall", "id": next_id("item"), "tool": "spawnAgent", "status": "inProgress",
+            "senderThreadId": thread_id, "receiverThreadIds": [], "prompt": "Audit the error handling in codex-client",
+            "model": "mock-1", "reasoningEffort": null, "agentsStates": {}});
+        notify(
+            out,
+            "item/started",
+            with(json!({"item": spawn, "startedAtMs": 0})),
+        );
+        pause(600);
+        let mut done = spawn.clone();
+        done["status"] = json!("completed");
+        notify(
+            out,
+            "item/completed",
+            with(json!({"item": done, "completedAtMs": 0})),
+        );
+        items.push(done);
+    }
+
     let answer_id = next_id("item");
     let answer = format!(
         "Here is what I found about **{}**.\n\n1. The request reached the mock agent.\n2. It streamed this answer word by word.\n\n```rust\nfn main() {{\n    println!(\"hello from mock-codex\");\n}}\n```\n\nAsk me to *run* or *edit* something to see approvals and file changes.",
         text.lines().next().unwrap_or("your message")
     );
+    let answer = if opts.plan {
+        "## Proposed plan\n\n1. Read `transcript.rs` and its tests.\n2. Add the new row kind.\n3. Cover it with a test.\n\nSay **go** and I'll do it.".to_string()
+    } else {
+        answer
+    };
     let answer = if lower.contains("long") {
         let mut long = String::from("## A longer answer\n\n");
         for ix in 1..=12 {
@@ -589,6 +980,12 @@ fn run_turn(
         long
     } else {
         answer
+    };
+    let answer = match &chosen {
+        Some(picked) => format!(
+            "You picked **{picked}**. I'll set up storage with it and keep the schema in `migrations/`."
+        ),
+        None => answer,
     };
     if !interrupted {
         notify(
@@ -615,6 +1012,42 @@ fn run_turn(
         items.push(done);
     }
 
+    // Messages steered in while working get a reply at the next step.
+    let steered = state
+        .steered
+        .lock()
+        .unwrap()
+        .remove(turn_id)
+        .unwrap_or_default();
+    if !interrupted && !steered.is_empty() {
+        let reply = format!(
+            "Noted while working: *{}*. I'll keep that in mind from here.",
+            steered.join("; ")
+        );
+        let reply_id = next_id("item");
+        notify(
+            out,
+            "item/started",
+            with(
+                json!({"item": {"type": "agentMessage", "id": reply_id, "text": ""}, "startedAtMs": 0}),
+            ),
+        );
+        stream(
+            out,
+            "item/agentMessage/delta",
+            &ids,
+            &reply_id,
+            &reply,
+            stop,
+        );
+        let done = json!({"type": "agentMessage", "id": reply_id, "text": reply});
+        notify(
+            out,
+            "item/completed",
+            with(json!({"item": done, "completedAtMs": 0})),
+        );
+        items.push(done);
+    }
     notify(
         out,
         "thread/tokenUsage/updated",
@@ -631,6 +1064,26 @@ fn run_turn(
     let turn = json!({"id": turn_id, "status": status, "items": items, "error": null,
         "durationMs": started_at.elapsed().as_millis() as u64});
     notify(out, "turn/completed", with(json!({"turn": turn})));
+    state
+        .used
+        .fetch_add(if opts.fast { 40 } else { 20 }, Ordering::Relaxed);
+    notify(
+        out,
+        "account/rateLimits/updated",
+        json!({"rateLimits": rate_snapshot(state)}),
+    );
+    let goal = state.goals.lock().unwrap().get_mut(thread_id).map(|goal| {
+        goal["tokensUsed"] = json!(goal["tokensUsed"].as_u64().unwrap_or(0) + 1234);
+        goal["timeUsedSeconds"] = json!(goal["timeUsedSeconds"].as_u64().unwrap_or(0) + 3);
+        goal.clone()
+    });
+    if let Some(goal) = goal {
+        notify(
+            out,
+            "thread/goal/updated",
+            json!({"threadId": thread_id, "turnId": turn_id, "goal": goal}),
+        );
+    }
 
     let mut threads = state.threads.lock().unwrap();
     if let Some(thread) = threads.iter_mut().find(|t| t.id == thread_id) {
@@ -645,4 +1098,117 @@ fn run_turn(
         thread.updated = now();
         thread.turns.push(turn);
     }
+}
+
+fn rate_snapshot(state: &State) -> Value {
+    let used = state.used.load(Ordering::Relaxed) as f64 / 10.;
+    json!({"limitId": "codex", "limitName": null, "normalModelSlug": null,
+        "primary": {"usedPercent": used.min(100.), "windowDurationMins": 300, "resetsAt": now() + 2 * 3600 + 17 * 60},
+        "secondary": {"usedPercent": (used * 0.6 + 18.).min(100.), "windowDurationMins": 10080, "resetsAt": now() + 4 * 86400},
+        "credits": {"hasCredits": true, "unlimited": false, "balance": "120"},
+        "individualLimit": null, "spendControlReached": null, "planType": "pro", "rateLimitReachedType": null})
+}
+
+/// Answers a prediction fork: the user's likely next message, streamed.
+fn run_prediction(out: &Out, state: &State, thread_id: &str, turn_id: &str) {
+    let last_user = state
+        .threads
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|t| t.id == thread_id)
+        .and_then(|t| t.turns.last().cloned())
+        .and_then(|turn| {
+            turn["items"][0]["content"][0]["text"]
+                .as_str()
+                .map(str::to_lowercase)
+        })
+        .unwrap_or_default();
+    let guess = if last_user.contains("test") || last_user.contains("run") {
+        "Great, now commit the change with a clear message"
+    } else if last_user.contains("plan") {
+        "Go ahead and implement step 1"
+    } else if last_user.contains("edit") {
+        "Show me the full diff before you continue"
+    } else {
+        "Can you add tests for this?"
+    };
+    let ids = json!({"threadId": thread_id, "turnId": turn_id});
+    let mut started = ids.clone();
+    started["turn"] = json!({"id": turn_id, "status": "inProgress", "items": []});
+    notify(out, "turn/started", started);
+    pause(600);
+    let item_id = next_id("item");
+    let item = json!({"type": "agentMessage", "id": item_id, "text": guess});
+    let mut done = ids.clone();
+    done["item"] = item.clone();
+    notify(out, "item/completed", done);
+    let mut completed = ids;
+    completed["turn"] = json!({"id": turn_id, "status": "completed", "items": [item], "error": null, "durationMs": 600});
+    notify(out, "turn/completed", completed);
+}
+
+/// Writes a small gradient PNG, standing in for a generated image.
+fn write_png(path: &std::path::Path, width: u32, height: u32) {
+    fn crc32(data: &[u8]) -> u32 {
+        let mut crc = 0xffff_ffffu32;
+        for &byte in data {
+            crc ^= byte as u32;
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ 0xedb8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+    fn adler32(data: &[u8]) -> u32 {
+        let (mut a, mut b) = (1u32, 0u32);
+        for &byte in data {
+            a = (a + byte as u32) % 65521;
+            b = (b + a) % 65521;
+        }
+        (b << 16) | a
+    }
+    fn chunk(out: &mut Vec<u8>, kind: &[u8], data: &[u8]) {
+        out.extend((data.len() as u32).to_be_bytes());
+        let mut body = kind.to_vec();
+        body.extend(data);
+        out.extend(&body);
+        out.extend(crc32(&body).to_be_bytes());
+    }
+    let mut raw = Vec::new();
+    for y in 0..height {
+        raw.push(0);
+        for x in 0..width {
+            let t = x as f32 / width as f32;
+            let v = y as f32 / height as f32;
+            raw.extend([
+                (40. + 215. * t) as u8,
+                (70. + 90. * (1. - v) * t) as u8,
+                (180. * (1. - t) + 40. * v) as u8,
+            ]);
+        }
+    }
+    // zlib with stored (uncompressed) deflate blocks.
+    let mut zlib = vec![0x78, 0x01];
+    for (ix, block) in raw.chunks(65535).enumerate() {
+        let last = (ix + 1) * 65535 >= raw.len();
+        zlib.push(last as u8);
+        zlib.extend((block.len() as u16).to_le_bytes());
+        zlib.extend((!(block.len() as u16)).to_le_bytes());
+        zlib.extend(block);
+    }
+    zlib.extend(adler32(&raw).to_be_bytes());
+    let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    let mut header = Vec::new();
+    header.extend(width.to_be_bytes());
+    header.extend(height.to_be_bytes());
+    header.extend([8, 2, 0, 0, 0]);
+    chunk(&mut png, b"IHDR", &header);
+    chunk(&mut png, b"IDAT", &zlib);
+    chunk(&mut png, b"IEND", &[]);
+    let _ = std::fs::write(path, png);
 }

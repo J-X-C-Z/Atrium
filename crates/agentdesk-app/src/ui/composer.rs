@@ -5,16 +5,17 @@ use std::path::{Path, PathBuf};
 
 use codex_client::AccessMode;
 use ely_gpui_component::{
-    buttons::{ButtonVariant, IconButton},
+    buttons::{Button, ButtonVariant, IconButton, ToggleButton, ToggleItem},
     chat::{ContextChips, PromptInput},
     forms::{Choice, TextInput},
     menus::{DropdownMenu, Menu, MenuItem},
-    primitives::IconName,
-    theme::{ActiveTheme, ControlSize, TextSize},
+    primitives::{Icon, IconName},
+    theme::{ActiveTheme, ControlSize, IconSize, TextSize},
 };
 use gpui::{
-    AnyElement, App, AppContext, Context, Entity, Focusable, IntoElement, ParentElement,
-    PathPromptOptions, Render, SharedString, Styled, Subscription, Task, Window, div,
+    AnyElement, App, AppContext, Context, Entity, Focusable, InteractiveElement, IntoElement,
+    ParentElement, PathPromptOptions, Render, SharedString, Styled, Subscription, Task, Window,
+    actions, div, prelude::FluentBuilder,
 };
 
 use super::{NewChat, OpenSettings, ToggleSidebar};
@@ -29,9 +30,15 @@ pub struct Composer {
     found: Vec<PathBuf>,
     /// The `@` query the last search ran for.
     searched: Option<String>,
+    /// The placeholder last shown: the default, a prediction, or a steering hint.
+    placeholder: SharedString,
     _search: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
+
+actions!(agentdesk, [AcceptPrediction]);
+
+const DEFAULT_PLACEHOLDER: &str = "Ask Codex anything. @ to add files, / for commands";
 
 /// Slash commands: value, label, icon, what it says.
 const COMMANDS: [(&str, &str, IconName, &str); 6] = [
@@ -73,7 +80,7 @@ impl Composer {
         let draft = cx.new(|cx| {
             TextInput::new(window, cx)
                 .multi_line(1, 12)
-                .placeholder("Ask Codex anything. @ to add files, / for commands")
+                .placeholder(DEFAULT_PLACEHOLDER)
         });
         let subscriptions = vec![
             cx.observe(&draft, |this, _, cx| this.watch_mention(cx)),
@@ -86,6 +93,7 @@ impl Composer {
             mentions: Vec::new(),
             found: Vec::new(),
             searched: None,
+            placeholder: DEFAULT_PLACEHOLDER.into(),
             _search: None,
             _subscriptions: subscriptions,
         }
@@ -146,7 +154,8 @@ impl Composer {
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.draft.read(cx).text().to_string();
         let ws = self.workspace.read(cx);
-        if (text.trim().is_empty() && self.images.is_empty()) || ws.is_running() || !ws.is_ready() {
+        // While Codex works, a message steers the running turn.
+        if (text.trim().is_empty() && self.images.is_empty()) || !ws.is_ready() {
             return;
         }
         let composed = Composed {
@@ -158,6 +167,54 @@ impl Composer {
         self.workspace.update(cx, |ws, cx| ws.send(composed, cx));
         self.focus(window, cx);
         cx.notify();
+    }
+
+    /// Fills the composer with `composed`, such as a message being edited.
+    pub fn fill(
+        &mut self,
+        composed: crate::workspace::Composed,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.images = composed.images;
+        self.mentions = composed.mentions;
+        self.set_text(&composed.text, window, cx);
+        cx.notify();
+    }
+
+    /// Takes the predicted next message into the composer.
+    fn accept_prediction(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(prediction) = self.workspace.read(cx).prediction().map(str::to_owned) else {
+            return false;
+        };
+        if !self.draft.read(cx).text().is_empty() {
+            return false;
+        }
+        self.set_text(&prediction, window, cx);
+        self.workspace
+            .update(cx, |ws, cx| ws.dismiss_prediction(cx));
+        true
+    }
+
+    /// Keeps the placeholder saying what Enter will do.
+    fn update_placeholder(&mut self, cx: &mut Context<Self>) {
+        let ws = self.workspace.read(cx);
+        let wanted: SharedString = if let Some(prediction) = ws.prediction() {
+            format!("{prediction}   ⇥ Tab").into()
+        } else if ws.is_running() {
+            "Add to what Codex is doing: it reads this at its next step".into()
+        } else if ws.editing.is_some() {
+            "Edit your message".into()
+        } else if ws.settings.plan_mode {
+            "Describe the change: Codex plans first and waits for you".into()
+        } else {
+            DEFAULT_PLACEHOLDER.into()
+        };
+        if wanted != self.placeholder {
+            self.placeholder = wanted.clone();
+            self.draft
+                .update(cx, |input, cx| input.set_placeholder(wanted, cx));
+        }
     }
 
     /// Adds dropped or picked paths: images to show, other files to mention.
@@ -221,6 +278,50 @@ impl Composer {
                 .on_click(move |_, _, cx| this.update(cx, |this, cx| this.pick_files(cx)))
                 .into_any_element(),
         );
+
+        // Plan mode and Fast.
+        let workspace = self.workspace.clone();
+        tools.push(
+            ToggleButton::new(
+                "plan-mode",
+                ToggleItem::new("plan")
+                    .label("Plan")
+                    .icon(IconName::ListChecks)
+                    .tooltip("Plan mode: Codex proposes a plan and waits before changing anything"),
+                ws.settings.plan_mode,
+            )
+            .size(ControlSize::Sm)
+            .on_toggle(move |on, _, cx| {
+                workspace.update(cx, |ws, cx| {
+                    ws.settings.plan_mode = on;
+                    ws.settings.save();
+                    cx.notify();
+                })
+            })
+            .into_any_element(),
+        );
+        if ws.fast_tier().is_some() {
+            let workspace = self.workspace.clone();
+            tools.push(
+                ToggleButton::new(
+                    "fast",
+                    ToggleItem::new("fast")
+                        .label("Fast")
+                        .icon(IconName::Zap)
+                        .tooltip("About twice the speed; uses more of your plan's usage"),
+                    ws.settings.fast,
+                )
+                .size(ControlSize::Sm)
+                .on_toggle(move |on, _, cx| {
+                    workspace.update(cx, |ws, cx| {
+                        ws.settings.fast = on;
+                        ws.settings.save();
+                        cx.notify();
+                    })
+                })
+                .into_any_element(),
+            );
+        }
 
         // Access mode.
         let current = ws.settings.mode;
@@ -354,6 +455,9 @@ fn title_case(word: &str) -> String {
 
 impl Render for Composer {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.update_placeholder(cx);
+        let predicting =
+            self.workspace.read(cx).prediction().is_some() && self.draft.read(cx).text().is_empty();
         let tools = self.tools(cx);
         let theme = cx.theme();
         let colors = theme.colors.clone();
@@ -367,8 +471,10 @@ impl Render for Composer {
                 .and_then(|t| t.notice())
                 .map(|notice| SharedString::from(notice.to_string()))
                 .or_else(|| {
-                    (ws.signed_in == Some(false))
-                        .then(|| "Codex is not signed in: run `codex login` in a terminal.".into())
+                    (ws.signed_in == Some(false)).then(|| {
+                        "Not signed in: sign in with ChatGPT from the sidebar to use your plan."
+                            .into()
+                    })
                 }),
         };
         let root = self.workspace.read(cx).folder();
@@ -378,8 +484,44 @@ impl Render for Composer {
             this.update(cx, |this, cx| this.send(window, cx))
         });
         if running {
+            // Not `busy`: Enter must still send, to steer the running turn.
             let workspace = self.workspace.clone();
-            input = input.busy(move |_, cx| workspace.update(cx, |ws, cx| ws.stop(cx)));
+            input = input.tool(
+                IconButton::new("stop", IconName::Square)
+                    .variant(ButtonVariant::Outline)
+                    .size(ControlSize::Sm)
+                    .tooltip("Stop (⌘.)")
+                    .on_click(move |_, _, cx| workspace.update(cx, |ws, cx| ws.stop(cx))),
+            );
+        }
+        let editing = ws.editing.is_some();
+        if editing {
+            let workspace = self.workspace.clone();
+            let draft = self.draft.clone();
+            input = input.above(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_xs()
+                    .text_color(colors.accent)
+                    .child(
+                        Icon::new(IconName::Pencil)
+                            .size(IconSize::Xs)
+                            .color(colors.accent),
+                    )
+                    .child("Editing a message: sending replaces it and everything after")
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("cancel-edit", "Cancel")
+                            .variant(ButtonVariant::Ghost)
+                            .size(ControlSize::Sm)
+                            .on_click(move |_, _, cx| {
+                                draft.update(cx, |input, cx| input.set_text("", cx));
+                                workspace.update(cx, |ws, cx| ws.cancel_edit(cx))
+                            }),
+                    ),
+            );
         }
 
         let attached: Vec<(String, IconName)> = self
@@ -449,6 +591,12 @@ impl Render for Composer {
             .flex()
             .flex_col()
             .gap_1p5()
+            // Tab takes the prediction: bound only while one shows, so Tab
+            // keeps moving focus otherwise.
+            .when(predicting, |column| column.key_context("Predicting"))
+            .on_action(cx.listener(|this, _: &AcceptPrediction, window, cx| {
+                this.accept_prediction(window, cx);
+            }))
             .child(input)
             .child(
                 div()

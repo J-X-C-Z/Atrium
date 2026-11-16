@@ -1,15 +1,17 @@
 //! Left column: new chat, search, conversations by day, and the backend's
 //! state. Folds into an icon rail, its width animated.
 
+use agentdesk_core::{Account, plan_label};
 use ely_gpui_component::{
     buttons::{ButtonVariant, IconButton},
     chat::{Conversation, ConversationList, new_chat_button},
+    data_display::{Avatar, Badge, Tone},
     forms::{SearchInput, TextInput},
     layout::Sidebar,
     motion::{Spinner, SpinnerStyle},
-    primitives::IconName,
+    primitives::{Icon, IconName},
     shell::drag_region,
-    theme::{ActiveTheme, ControlSize, IconSize, TextSize},
+    theme::{ActiveTheme, AvatarSize, ControlSize, IconSize, TextSize},
 };
 use gpui::{
     AnyElement, App, Entity, IntoElement, ParentElement, SharedString, Styled, Window, div,
@@ -128,6 +130,25 @@ pub fn render(
     let query = search.read(cx).text().to_string();
 
     let open = workspace.clone();
+    let account_root = root.clone();
+    // Chats whose messages (not only titles) match the search.
+    let hits: Vec<(String, String, String)> = match &ws.search {
+        Some((searched, hits)) if searched.trim() == query.trim() => hits
+            .iter()
+            .map(|(meta, snippet)| (meta.id.clone(), meta.title(), snippet.clone()))
+            .collect(),
+        _ => Vec::new(),
+    };
+    // Whether any title matches, as the list filters: every word, any case.
+    let titles_match = query.trim().is_empty()
+        || ws.threads.iter().any(|thread| {
+            let title = thread.title().to_lowercase();
+            query
+                .split_whitespace()
+                .all(|word| title.contains(&word.to_lowercase()))
+        });
+    let account = ws.account.clone();
+    let signing_in = ws.login.is_some();
     let fresh = workspace.clone();
     let retry = workspace.clone();
     let pin = workspace.clone();
@@ -227,8 +248,110 @@ pub fn render(
                             ),
                     )
                 })
-                .when(!empty, |column| column.child(list)),
+                // With only message hits, the list's "no match" would push them away.
+                .when(!empty && (titles_match || hits.is_empty()), |column| {
+                    column.child(list)
+                })
+                .when(!hits.is_empty(), |column| {
+                    column
+                        .child(
+                            div()
+                                .px_2()
+                                .pt_3()
+                                .pb_1()
+                                .text_size(theme.text_size(TextSize::Xs))
+                                .text_color(colors.fg_subtle)
+                                .child("In messages"),
+                        )
+                        .children(hits.into_iter().map(|(id, title, snippet)| {
+                            let open = workspace.clone();
+                            div()
+                                .id(SharedString::from(format!("hit-{id}")))
+                                .flex()
+                                .flex_col()
+                                .gap_0p5()
+                                .px_2()
+                                .py_1p5()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .hover(|row| row.bg(colors.hover))
+                                .on_click(move |_, _, cx| {
+                                    let id = id.clone();
+                                    open.update(cx, |ws, cx| ws.open_thread(id, cx))
+                                })
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_size(theme.text_size(TextSize::Sm))
+                                        .child(title),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(theme.text_size(TextSize::Xs))
+                                        .text_color(colors.fg_muted)
+                                        .line_clamp(2)
+                                        .child(snippet),
+                                )
+                        }))
+                }),
         )
+        .child({
+            let open = account_root.clone();
+            let row = div()
+                .id("account-row")
+                .flex_none()
+                .mx_2()
+                .mb_1()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .py_1p5()
+                .rounded_md()
+                .cursor_pointer()
+                .hover(|row| row.bg(colors.hover))
+                .on_click(move |_, _, cx| open.update(cx, |root, cx| root.open_account(cx)));
+            match &account {
+                Some(Account::ChatGpt { email, plan, .. }) => {
+                    let who = email.clone().unwrap_or_else(|| "ChatGPT".into());
+                    row.child(Avatar::new("me", who.clone()).size(AvatarSize::Sm))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(theme.text_size(TextSize::Sm))
+                                .child(who),
+                        )
+                        .child(Badge::new(plan_label(plan)).tone(Tone::Accent))
+                        .into_any_element()
+                }
+                Some(Account::ApiKey) => row
+                    .text_size(theme.text_size(TextSize::Sm))
+                    .text_color(colors.fg_muted)
+                    .child(Icon::new(IconName::Lock).size(IconSize::Sm))
+                    .child("API key")
+                    .into_any_element(),
+                Some(Account::Other(kind)) => row
+                    .text_size(theme.text_size(TextSize::Sm))
+                    .child(kind.clone())
+                    .into_any_element(),
+                None => row
+                    .text_size(theme.text_size(TextSize::Sm))
+                    .text_color(colors.accent)
+                    .child(
+                        Icon::new(IconName::Sparkles)
+                            .size(IconSize::Sm)
+                            .color(colors.accent),
+                    )
+                    .child(if signing_in {
+                        "Finish signing in in your browser…"
+                    } else {
+                        "Sign in with ChatGPT"
+                    })
+                    .into_any_element(),
+            }
+        })
         .child(
             div()
                 .flex_none()

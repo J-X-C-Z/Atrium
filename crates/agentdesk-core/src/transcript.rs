@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::{
-    event::{AgentEvent, ApprovalDecision, ApprovalRequest},
+    event::{AgentEvent, ApprovalDecision, ApprovalRequest, UserInputRequest},
     model::{Item, ItemStatus, PlanStep, TokenUsage, TurnStatus},
 };
 
@@ -13,6 +13,13 @@ pub enum EntryKind {
         request: ApprovalRequest,
         /// Set once the user answered; `resolved` once the backend let go of it.
         answer: Option<ApprovalDecision>,
+        resolved: bool,
+    },
+    /// The agent asks the user questions and waits for answers.
+    Question {
+        request: UserInputRequest,
+        /// The answers given, once given: `(question id, answers)`.
+        answers: Option<Vec<(String, Vec<String>)>>,
         resolved: bool,
     },
     Plan {
@@ -219,6 +226,34 @@ impl Transcript {
         self.bump();
     }
 
+    /// Questions still waiting on the user.
+    pub fn pending_questions(&self) -> impl Iterator<Item = &UserInputRequest> {
+        self.entries.iter().filter_map(|entry| match &entry.kind {
+            EntryKind::Question {
+                request,
+                answers: None,
+                resolved: false,
+            } => Some(request),
+            _ => None,
+        })
+    }
+
+    /// Records the user's answers to the agent's questions.
+    pub fn answer_questions(
+        &mut self,
+        request_id: &serde_json::Value,
+        given: Vec<(String, Vec<String>)>,
+    ) {
+        let key = approval_key(request_id);
+        if let Some(&ix) = self.index.get(&key)
+            && let EntryKind::Question { answers, .. } = &mut self.entries[ix].kind
+        {
+            *answers = Some(given);
+            self.entries[ix].live = false;
+            self.bump();
+        }
+    }
+
     /// Records the user's answer to an approval.
     pub fn answer_approval(&mut self, request_id: &serde_json::Value, decision: ApprovalDecision) {
         let key = approval_key(request_id);
@@ -272,7 +307,9 @@ impl Transcript {
                 for entry in &mut self.entries {
                     if entry.turn_id == *turn_id && entry.live {
                         entry.live = false;
-                        if let EntryKind::Approval { resolved, .. } = &mut entry.kind {
+                        if let EntryKind::Approval { resolved, .. }
+                        | EntryKind::Question { resolved, .. } = &mut entry.kind
+                        {
                             *resolved = true;
                         }
                     }
@@ -370,9 +407,25 @@ impl Transcript {
                     );
                 }
             }
+            AgentEvent::UserInputRequested(request) => {
+                let key = approval_key(&request.request_id);
+                if !self.index.contains_key(&key) {
+                    self.push(
+                        request.turn_id.clone(),
+                        key,
+                        EntryKind::Question {
+                            request: request.clone(),
+                            answers: None,
+                            resolved: false,
+                        },
+                        true,
+                    );
+                }
+            }
             AgentEvent::ApprovalResolved { request_id, .. } => {
                 if let Some(&ix) = self.index.get(&approval_key(request_id))
-                    && let EntryKind::Approval { resolved, .. } = &mut self.entries[ix].kind
+                    && let EntryKind::Approval { resolved, .. }
+                    | EntryKind::Question { resolved, .. } = &mut self.entries[ix].kind
                 {
                     *resolved = true;
                     self.entries[ix].live = false;
@@ -403,6 +456,11 @@ impl Transcript {
             }
             AgentEvent::ThreadStarted(_)
             | AgentEvent::ThreadNameUpdated { .. }
+            | AgentEvent::PredictionUpdated { .. }
+            | AgentEvent::GoalUpdated { .. }
+            | AgentEvent::RateLimitsUpdated(_)
+            | AgentEvent::AccountChanged
+            | AgentEvent::LoginCompleted { .. }
             | AgentEvent::Warning(_) => {}
         }
         self.version != before
@@ -653,6 +711,66 @@ mod tests {
         );
         t.answer_approval(&serde_json::json!(7), ApprovalDecision::Accept);
         assert_eq!(t.pending_approvals().count(), 0);
+    }
+
+    #[test]
+    fn questions_wait_for_answers_then_resolve() {
+        let mut t = Transcript::new();
+        let request = UserInputRequest {
+            request_id: serde_json::json!("q1"),
+            thread_id: "t".into(),
+            turn_id: "u1".into(),
+            item_id: "i".into(),
+            questions: vec![crate::model::Question {
+                id: "db".into(),
+                header: "Database".into(),
+                question: "Which database?".into(),
+                options: vec![("Postgres".into(), "".into())],
+                allow_other: true,
+                secret: false,
+            }],
+        };
+        t.apply(&AgentEvent::UserInputRequested(request));
+        assert_eq!(t.pending_questions().count(), 1);
+        t.answer_questions(
+            &serde_json::json!("q1"),
+            vec![("db".into(), vec!["Postgres".into()])],
+        );
+        assert_eq!(t.pending_questions().count(), 0);
+        t.apply(&AgentEvent::ApprovalResolved {
+            thread_id: "t".into(),
+            request_id: serde_json::json!("q1"),
+        });
+        assert!(matches!(
+            &t.entries()[0].kind,
+            EntryKind::Question { resolved: true, .. }
+        ));
+    }
+
+    #[test]
+    fn rate_limit_updates_merge_sparsely() {
+        use crate::model::{RateLimits, RateWindow};
+        let mut limits = RateLimits {
+            primary: Some(RateWindow {
+                used_percent: 10.,
+                window_mins: Some(300),
+                resets_at: None,
+            }),
+            plan: Some("pro".into()),
+            ..Default::default()
+        };
+        limits.merge(RateLimits {
+            secondary: Some(RateWindow {
+                used_percent: 40.,
+                window_mins: Some(10080),
+                resets_at: None,
+            }),
+            ..Default::default()
+        });
+        assert_eq!(limits.plan.as_deref(), Some("pro"));
+        assert_eq!(limits.highest_used(), Some(40.));
+        assert_eq!(limits.primary.unwrap().label(), "5-hour limit");
+        assert_eq!(crate::model::plan_label("prolite"), "Pro Lite");
     }
 
     #[test]

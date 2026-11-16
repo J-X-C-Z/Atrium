@@ -35,6 +35,12 @@ pub struct Settings {
     pub pinned: Vec<String>,
     /// Whether the sidebar is folded to its icon rail.
     pub sidebar_collapsed: bool,
+    /// Ask for the Fast service tier (about twice the speed, more usage).
+    pub fast: bool,
+    /// Plan mode: Codex proposes a plan and waits before it changes anything.
+    pub plan_mode: bool,
+    /// Do not guess the next message after each answer.
+    pub no_predictions: bool,
 }
 
 impl Settings {

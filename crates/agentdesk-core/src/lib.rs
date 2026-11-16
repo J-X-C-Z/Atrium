@@ -10,9 +10,9 @@ mod event;
 mod model;
 mod transcript;
 
-pub use event::{AgentEvent, ApprovalDecision, ApprovalKind, ApprovalRequest};
+pub use event::{AgentEvent, ApprovalDecision, ApprovalKind, ApprovalRequest, UserInputRequest};
 pub use model::{
-    ChangeKind, FileChange, Item, ItemStatus, PlanStep, RequestId, ThreadMeta, TokenUsage,
-    TurnStatus,
+    Account, ChangeKind, Credits, FileChange, Goal, GoalStatus, Item, ItemStatus, PlanStep,
+    Question, RateLimits, RateWindow, RequestId, ThreadMeta, TokenUsage, TurnStatus, plan_label,
 };
 pub use transcript::{Entry, EntryKind, Transcript, TurnSummary};
