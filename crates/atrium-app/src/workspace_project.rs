@@ -11,7 +11,7 @@ use super::{CODEX, Composed, Notice, View, Workspace};
 use crate::i18n::{t, tf};
 use crate::{
     agents,
-    project::{self, ATRIUM, Project, Workstream},
+    project::{self, ATRIUM, Project, Role, Task, TaskStatus, Workstream},
 };
 
 /// Where the user is: the everyday chats, or a project.
@@ -58,6 +58,8 @@ pub struct StreamView {
     pub goal_status: Option<GoalStatus>,
     pub speed: Option<String>,
     pub context: Option<f64>,
+    /// The task it was started for: a lead's roadmap, a worker's job.
+    pub task: Option<Task>,
 }
 
 impl Workspace {
@@ -258,6 +260,7 @@ impl Workspace {
     pub fn create_stream(
         &mut self,
         name: String,
+        role: Role,
         backend: String,
         goal: String,
         scope: Vec<String>,
@@ -291,6 +294,14 @@ impl Workspace {
             scope,
             notices_seen: project.notices.len(),
             created_at: jiff::Timestamp::now().as_second(),
+            role,
+            // Leads the user adds still report to the controller.
+            parent: match role {
+                Role::Lead => project.controller().map(|c| c.id.clone()),
+                _ => None,
+            },
+            task: None,
+            reported: false,
         };
         let id = stream.id.clone();
         let title = format!("{} · {}", project.file.name, stream.name);
@@ -505,6 +516,86 @@ impl Workspace {
         );
     }
 
+    /// Leads the controller asked for and the user has not answered yet.
+    pub fn proposed_leads(&self) -> Vec<Task> {
+        self.active_project().map_or_else(Vec::new, |p| {
+            p.tasks
+                .iter()
+                .filter(|t| p.awaits_approval(t))
+                .cloned()
+                .collect()
+        })
+    }
+
+    /// Tasks waiting for an agent to be started: queued under a lead, or
+    /// approved and not yet picked up.
+    pub fn queued_tasks(&self, owner: &str) -> Vec<Task> {
+        self.active_project().map_or_else(Vec::new, |p| {
+            p.tasks
+                .iter()
+                .filter(|t| {
+                    t.owner == owner
+                        && t.status == TaskStatus::Open
+                        && p.stream_for_task(&t.key()).is_none()
+                        && !p.awaits_approval(t)
+                })
+                .cloned()
+                .collect()
+        })
+    }
+
+    /// The user says yes to a lead the controller asked for; Atrium starts
+    /// it at its next look at the tasks.
+    pub fn approve_task(&mut self, key: &str, cx: &mut Context<Self>) {
+        let Some(root) = self.project_root() else {
+            return;
+        };
+        if let Some(project) = self.project_mut(&root) {
+            if !project.file.approved.iter().any(|k| k == key) {
+                project.file.approved.push(key.to_string());
+            }
+            if let Err(error) = project.save() {
+                cx.emit(Notice::Error(format!("{error:#}")));
+            }
+        }
+        cx.notify();
+    }
+
+    /// The user says no: the task is marked failed and its asker told.
+    pub fn reject_task(&mut self, key: &str, cx: &mut Context<Self>) {
+        let Some(root) = self.project_root() else {
+            return;
+        };
+        if let Some(project) = self.project_mut(&root) {
+            let owner = project
+                .task(key)
+                .map(|t| (t.owner.clone(), t.title.clone()));
+            if let Err(error) = project.set_task_status(key, TaskStatus::Failed) {
+                cx.emit(Notice::Error(format!("{error:#}")));
+            }
+            if let Some((owner, title)) = owner {
+                let _ = project.post(
+                    project::YOU,
+                    vec![owner],
+                    &format!("I turned down \"{title}\" (`{key}`). Rethink that part of the plan."),
+                );
+            }
+        }
+        cx.notify();
+    }
+
+    /// Whether to hold the controller's leads for approval.
+    pub fn set_approve_leads(&mut self, on: bool, cx: &mut Context<Self>) {
+        let Some(root) = self.project_root() else {
+            return;
+        };
+        if let Some(project) = self.project_mut(&root) {
+            project.file.approve_leads = on;
+            let _ = project.save();
+        }
+        cx.notify();
+    }
+
     /// Posts a notice from the user.
     pub fn post_notice(&mut self, to: Vec<String>, text: String, cx: &mut Context<Self>) {
         let Some(root) = self.project_root() else {
@@ -664,6 +755,7 @@ impl Workspace {
                     context: transcript
                         .and_then(|t| t.usage())
                         .and_then(|u| u.context_share()),
+                    task: project.task_of(stream).cloned(),
                     stream: stream.clone(),
                     state,
                     plan,

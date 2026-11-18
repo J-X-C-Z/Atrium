@@ -158,6 +158,7 @@ enum Overlay {
         goal: Entity<TextInput>,
         scope: Entity<TextInput>,
         backend: String,
+        role: crate::project::Role,
     },
 }
 
@@ -1093,10 +1094,16 @@ impl Render for RootView {
                 goal,
                 scope,
                 backend,
+                role,
             }) => {
-                let (name, goal, scope, backend) =
-                    (name.clone(), goal.clone(), scope.clone(), backend.clone());
-                Some(self.new_stream_dialog(&name, &goal, &scope, &backend, cx))
+                let (name, goal, scope, backend, role) = (
+                    name.clone(),
+                    goal.clone(),
+                    scope.clone(),
+                    backend.clone(),
+                    *role,
+                );
+                Some(self.new_stream_dialog(&name, &goal, &scope, &backend, role, cx))
             }
             Some(Overlay::Rename { thread_id, field }) => {
                 let (close, submit) = (cx.entity(), cx.entity());

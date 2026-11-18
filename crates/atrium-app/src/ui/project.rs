@@ -24,7 +24,7 @@ use super::{Overlay, RootView, TITLE_BAR_HEIGHT, composer::short_path};
 use crate::i18n::{t, tf};
 use crate::{
     agents,
-    project::{self, ATRIUM, YOU},
+    project::{self, ATRIUM, Role, Task, TaskStatus, YOU},
     workspace::{AgentStatus, CODEX, StreamState, StreamView, Workspace},
 };
 
@@ -33,6 +33,7 @@ use crate::{
 pub enum AtriumTab {
     #[default]
     Notices,
+    Plan,
     Brief,
     Contracts,
     Status,
@@ -42,6 +43,7 @@ impl AtriumTab {
     fn value(self) -> &'static str {
         match self {
             AtriumTab::Notices => "notices",
+            AtriumTab::Plan => "plan",
             AtriumTab::Brief => "brief",
             AtriumTab::Contracts => "contracts",
             AtriumTab::Status => "status",
@@ -50,6 +52,7 @@ impl AtriumTab {
 
     fn from_value(value: &str) -> Self {
         match value {
+            "plan" => AtriumTab::Plan,
             "brief" => AtriumTab::Brief,
             "contracts" => AtriumTab::Contracts,
             "status" => AtriumTab::Status,
@@ -209,14 +212,14 @@ pub fn sidebar_list(workspace: &Entity<Workspace>, cx: &App) -> AnyElement {
                 }),
         );
         if is_active {
-            for view in &views {
+            for (depth, view) in tree(&views) {
                 let id = view.stream.id.clone();
                 let open = workspace.clone();
                 let selected = open_stream.as_deref() == Some(id.as_str());
                 list = list.child(
                     div()
                         .id(SharedString::from(format!("stream-{id}")))
-                        .ml_4()
+                        .ml(px(16. + 14. * depth as f32))
                         .flex()
                         .items_center()
                         .gap_2()
@@ -232,12 +235,40 @@ pub fn sidebar_list(workspace: &Entity<Workspace>, cx: &App) -> AnyElement {
                             open.update(cx, |ws, cx| ws.show_stream(&id, cx))
                         })
                         .child(state_dot(&view.state, cx))
+                        .when(view.stream.role == Role::Controller, |row| {
+                            row.child(
+                                Icon::new(IconName::Network)
+                                    .size(IconSize::Xs)
+                                    .color(colors.fg_muted),
+                            )
+                        })
                         .child(
                             div()
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .child(view.stream.name.clone()),
+                                .when(view.stream.role == Role::Worker, |name| {
+                                    name.text_color(colors.fg_muted)
+                                })
+                                .child(if view.stream.role == Role::Controller {
+                                    t("Controller").to_string()
+                                } else {
+                                    view.stream.name.clone()
+                                }),
+                        )
+                        .when_some(
+                            view.task
+                                .as_ref()
+                                .filter(|_| view.stream.role == Role::Lead)
+                                .and_then(Task::progress),
+                            |row, (done, total)| {
+                                row.child(
+                                    div()
+                                        .text_size(theme.text_size(TextSize::Xs))
+                                        .text_color(colors.fg_subtle)
+                                        .child(format!("{done}/{total}")),
+                                )
+                            },
                         )
                         .when(view.unread > 0, |row| {
                             row.child(
@@ -341,17 +372,33 @@ pub fn render_overview(
                 )),
         )
         .child(
-            Button::new("new-stream", t("New workstream"))
+            Button::new("new-stream", t("New lead"))
                 .icon(IconName::Plus)
                 .size(ControlSize::Sm)
                 .on_click(move |_, window, cx| {
-                    add.update(cx, |root, cx| root.open_new_stream(window, cx))
+                    add.update(cx, |root, cx| {
+                        root.open_new_stream_as(Role::Lead, window, cx)
+                    })
                 }),
         )
         .child({
             let remove = (workspace.clone(), project.root.clone());
             let open_dir = project.dir();
+            let approve_leads = project.file.approve_leads;
+            let toggle = workspace.clone();
             let menu = Menu::new()
+                .item(
+                    MenuItem::new(t("Approve the controller's leads before they start"))
+                        .icon(if approve_leads {
+                            IconName::SquareCheck
+                        } else {
+                            IconName::Square
+                        })
+                        .on_click(move |_, cx| {
+                            toggle.update(cx, |ws, cx| ws.set_approve_leads(!approve_leads, cx))
+                        }),
+                )
+                .separator()
                 .item(
                     MenuItem::new(t("Open the atrium folder"))
                         .icon(IconName::FolderOpen)
@@ -429,11 +476,17 @@ pub fn render_overview(
         strip
     });
 
+    let controller = views
+        .iter()
+        .find(|v| v.stream.role == Role::Controller)
+        .map(|view| controller_card(workspace, view, &views, cx));
+    let proposals = proposals_strip(workspace, cx);
     let cards: Vec<AnyElement> = views
         .iter()
-        .map(|view| stream_card(workspace, view, cx))
+        .filter(|v| v.stream.role == Role::Lead)
+        .map(|view| stream_card(workspace, view, &views, cx))
         .collect();
-    let empty = cards.is_empty();
+    let empty = cards.is_empty() && controller.is_none();
     let mut grid = div().flex().flex_col().gap_3();
     let mut cards = cards.into_iter();
     while let Some(first) = cards.next() {
@@ -459,6 +512,8 @@ pub fn render_overview(
         .flex_col()
         .gap_4()
         .children(attention)
+        .children(controller)
+        .children(proposals)
         .when(empty, |body| {
             body.child(
                 div()
@@ -475,20 +530,37 @@ pub fn render_overview(
                         div()
                             .text_size(theme.text_size(TextSize::Lg))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child(t("Start a workstream")),
+                            .child(t("Start with a controller")),
                     )
                     .child(
                         div()
                             .text_size(theme.text_size(TextSize::Sm))
                             .text_color(colors.fg_muted)
-                            .child(t("Each workstream is a long-running session with its own goal and scope, such as the frontend, a backend feature, or performance work. They work on their own and align through the atrium on the right.")),
+                            .child(t("Give the controller the project's goal. It splits the work into leads, each owning a part with its own roadmap, and leads hand self-contained pieces to sub-agents. Or add leads yourself.")),
                     )
                     .child(
-                        Button::new("first-stream", t("New workstream"))
-                            .primary()
-                            .icon(IconName::Plus)
-                            .on_click(move |_, window, cx| {
-                                add.update(cx, |root, cx| root.open_new_stream(window, cx))
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(
+                                Button::new("first-controller", t("New controller"))
+                                    .primary()
+                                    .icon(IconName::Network)
+                                    .on_click(move |_, window, cx| {
+                                        add.update(cx, |root, cx| {
+                                            root.open_new_stream_as(Role::Controller, window, cx)
+                                        })
+                                    }),
+                            )
+                            .child({
+                                let add = root.clone();
+                                Button::new("first-lead", t("New lead"))
+                                    .icon(IconName::Plus)
+                                    .on_click(move |_, window, cx| {
+                                        add.update(cx, |root, cx| {
+                                            root.open_new_stream_as(Role::Lead, window, cx)
+                                        })
+                                    })
                             }),
                     ),
             )
@@ -516,7 +588,12 @@ pub fn render_overview(
         .into_any_element()
 }
 
-fn stream_card(workspace: &Entity<Workspace>, view: &StreamView, cx: &App) -> AnyElement {
+fn stream_card(
+    workspace: &Entity<Workspace>,
+    view: &StreamView,
+    views: &[StreamView],
+    cx: &App,
+) -> AnyElement {
     let theme = cx.theme();
     let colors = theme.colors.clone();
     let ws = workspace.read(cx);
@@ -525,7 +602,40 @@ fn stream_card(workspace: &Entity<Workspace>, view: &StreamView, cx: &App) -> An
     let tiny = theme.text_size(TextSize::Xs);
     let open = workspace.clone();
 
+    let roadmap = view.task.as_ref().and_then(|task| {
+        let (done, total) = task.progress()?;
+        let next = task
+            .roadmap
+            .iter()
+            .find(|m| !m.done)
+            .map(|m| m.text.clone());
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .flex()
+                        .justify_between()
+                        .gap_2()
+                        .text_size(tiny)
+                        .text_color(colors.fg_muted)
+                        .child(div().truncate().child(match next {
+                            Some(next) => tf("Roadmap · next: {step}", &[("step", &next)]),
+                            None => t("Roadmap done").to_string(),
+                        }))
+                        .child(div().flex_none().child(format!("{done}/{total}"))),
+                )
+                .child(ProgressBar::new(
+                    SharedString::from(format!("roadmap-{id}")),
+                    done as f32 / total.max(1) as f32,
+                ))
+                .into_any_element(),
+        )
+    });
     let progress = match (view.plan, &view.step, &view.focus) {
+        _ if roadmap.is_some() => roadmap,
         (Some((done, total)), step, _) => Some(
             div()
                 .flex()
@@ -616,6 +726,7 @@ fn stream_card(workspace: &Entity<Workspace>, view: &StreamView, cx: &App) -> An
         ));
     }
 
+    let workers = sub_agents(workspace, view, views, cx);
     let (deliver, carry_on) = (workspace.clone(), workspace.clone());
     let idle = matches!(view.state, StreamState::Idle | StreamState::Failed(_));
     let unread = view.unread > 0;
@@ -722,6 +833,7 @@ fn stream_card(workspace: &Entity<Workspace>, view: &StreamView, cx: &App) -> An
                     .children(facts),
             )
         })
+        .children(workers)
         .child(
             div()
                 .flex()
@@ -763,6 +875,437 @@ fn stream_card(workspace: &Entity<Workspace>, view: &StreamView, cx: &App) -> An
         .into_any_element()
 }
 
+/// Streams in tree order with their depth: the controller, then each lead
+/// followed by its workers, then anything whose parent is gone.
+fn tree(views: &[StreamView]) -> Vec<(usize, &StreamView)> {
+    let mut out: Vec<(usize, &StreamView)> = Vec::new();
+    let mut placed = std::collections::HashSet::new();
+    fn place<'a>(
+        view: &'a StreamView,
+        depth: usize,
+        views: &'a [StreamView],
+        out: &mut Vec<(usize, &'a StreamView)>,
+        placed: &mut std::collections::HashSet<String>,
+    ) {
+        if !placed.insert(view.stream.id.clone()) {
+            return;
+        }
+        out.push((depth, view));
+        for child in views
+            .iter()
+            .filter(|v| v.stream.parent.as_deref() == Some(view.stream.id.as_str()))
+        {
+            place(child, depth + 1, views, out, placed);
+        }
+    }
+    let roots = views.iter().filter(|v| {
+        v.stream
+            .parent
+            .as_deref()
+            .is_none_or(|p| !views.iter().any(|o| o.stream.id == p))
+    });
+    let mut roots: Vec<&StreamView> = roots.collect();
+    roots.sort_by_key(|v| v.stream.role != Role::Controller);
+    for view in roots {
+        // Leads hang under the controller only in the sidebar; the
+        // controller's children come right after it.
+        place(view, 0, views, &mut out, &mut placed);
+    }
+    out
+}
+
+/// The controller across the top: what it is doing and how far the leads are.
+fn controller_card(
+    workspace: &Entity<Workspace>,
+    view: &StreamView,
+    views: &[StreamView],
+    cx: &App,
+) -> AnyElement {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let tiny = theme.text_size(TextSize::Xs);
+    let small = theme.text_size(TextSize::Sm);
+    let ws = workspace.read(cx);
+    let id = view.stream.id.clone();
+    let open = workspace.clone();
+    let leads: Vec<&StreamView> = views
+        .iter()
+        .filter(|v| v.stream.role == Role::Lead)
+        .collect();
+    let (done, total) = leads
+        .iter()
+        .filter_map(|v| v.task.as_ref().and_then(Task::progress))
+        .fold((0, 0), |(d, t), (dd, tt)| (d + dd, t + tt));
+    let finished = leads
+        .iter()
+        .filter(|v| {
+            v.task
+                .as_ref()
+                .is_some_and(|t| t.status == TaskStatus::Done)
+        })
+        .count();
+    let queued = ws.queued_tasks(&id).len();
+    let carry_on = workspace.clone();
+    let continue_id = id.clone();
+    let idle = matches!(view.state, StreamState::Idle | StreamState::Failed(_));
+    div()
+        .id("controller-card")
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .p_3()
+        .rounded(theme.radius(Radius::Lg))
+        .border_1()
+        .border_color(match view.state {
+            StreamState::NeedsYou(_) => colors.warning,
+            _ => colors.border_strong,
+        })
+        .bg(colors.surface)
+        .cursor_pointer()
+        .hover(|card| card.bg(colors.hover))
+        .on_click(move |_, _, cx| {
+            let id = id.clone();
+            open.update(cx, |ws, cx| ws.show_stream(&id, cx))
+        })
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(state_dot(&view.state, cx))
+                .child(
+                    Icon::new(IconName::Network)
+                        .size(IconSize::Sm)
+                        .color(colors.fg_muted),
+                )
+                .child(
+                    div()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child(t("Controller")),
+                )
+                .child(Badge::new(agent_short(ws, &view.stream.backend)))
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .text_size(tiny)
+                        .text_color(state_color(&view.state, cx))
+                        .child(state_label(&view.state)),
+                ),
+        )
+        .child(
+            div()
+                .text_size(small)
+                .text_color(colors.fg_muted)
+                .child(clip(&view.stream.goal, 220)),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .text_size(tiny)
+                .text_color(colors.fg_subtle)
+                .child(tf(
+                    "{n} leads · {finished} done",
+                    &[("n", &leads.len()), ("finished", &finished)],
+                ))
+                .when(total > 0, |row| {
+                    row.child(tf(
+                        "{done}/{total} milestones",
+                        &[("done", &done), ("total", &total)],
+                    ))
+                })
+                .when(queued > 0, |row| {
+                    row.child(tf("{n} leads about to start", &[("n", &queued)]))
+                })
+                .children(view.said.clone().map(|said| {
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(format!("“{said}”"))
+                })),
+        )
+        .when(total > 0, |card| {
+            card.child(ProgressBar::new(
+                "controller-progress",
+                done as f32 / total.max(1) as f32,
+            ))
+        })
+        .when(idle, |card| {
+            card.child(
+                div().flex().justify_end().child(
+                    Button::new("controller-continue", t("Review progress"))
+                        .size(ControlSize::Sm)
+                        .variant(ButtonVariant::Ghost)
+                        .icon(IconName::Play)
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            let id = continue_id.clone();
+                            carry_on.update(cx, |ws, cx| ws.continue_stream(&id, cx))
+                        }),
+                ),
+            )
+        })
+        .into_any_element()
+}
+
+/// Leads the controller proposed, waiting for the user's go-ahead.
+fn proposals_strip(workspace: &Entity<Workspace>, cx: &App) -> Option<AnyElement> {
+    let ws = workspace.read(cx);
+    let proposed = ws.proposed_leads();
+    if proposed.is_empty() {
+        return None;
+    }
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let tiny = theme.text_size(TextSize::Xs);
+    let small = theme.text_size(TextSize::Sm);
+    let approve_all = (
+        workspace.clone(),
+        proposed.iter().map(Task::key).collect::<Vec<_>>(),
+    );
+    let mut strip = div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .p_3()
+        .rounded(theme.radius(Radius::Lg))
+        .border_1()
+        .border_color(colors.accent)
+        .bg(colors.surface)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    Icon::new(IconName::ListChecks)
+                        .size(IconSize::Sm)
+                        .color(colors.accent),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(small)
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child(tf(
+                            "The controller proposes {n} leads",
+                            &[("n", &proposed.len())],
+                        )),
+                )
+                .child(
+                    Button::new("approve-all", t("Start all"))
+                        .size(ControlSize::Sm)
+                        .primary()
+                        .on_click(move |_, _, cx| {
+                            let (ws, keys) = approve_all.clone();
+                            ws.update(cx, |ws, cx| {
+                                for key in &keys {
+                                    ws.approve_task(key, cx);
+                                }
+                            })
+                        }),
+                ),
+        );
+    for task in &proposed {
+        let key = task.key();
+        let (approve, reject) = (workspace.clone(), workspace.clone());
+        let (approve_key, reject_key) = (key.clone(), key.clone());
+        let agent = task
+            .agent
+            .clone()
+            .map(|a| crate::agents::backend_label(&a))
+            .unwrap_or_else(|| t("same agent").into());
+        let steps: Vec<String> = task.roadmap.iter().map(|m| m.text.clone()).collect();
+        strip = strip.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .p_2()
+                .rounded(theme.radius(Radius::Md))
+                .bg(colors.sunken)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(small)
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .child(task.title.clone()),
+                        )
+                        .child(Badge::new(agent))
+                        .child(
+                            Button::new(
+                                SharedString::from(format!("reject-{key}")),
+                                t("Turn down"),
+                            )
+                            .size(ControlSize::Sm)
+                            .variant(ButtonVariant::Ghost)
+                            .on_click(move |_, _, cx| {
+                                let key = reject_key.clone();
+                                reject.update(cx, |ws, cx| ws.reject_task(&key, cx))
+                            }),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("approve-{key}")), t("Start"))
+                                .size(ControlSize::Sm)
+                                .on_click(move |_, _, cx| {
+                                    let key = approve_key.clone();
+                                    approve.update(cx, |ws, cx| ws.approve_task(&key, cx))
+                                }),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(tiny)
+                        .text_color(colors.fg_muted)
+                        .child(clip(&task.body, 200)),
+                )
+                .child(
+                    div()
+                        .text_size(tiny)
+                        .text_color(colors.fg_subtle)
+                        .truncate()
+                        .child(tf("Scope: {scope}", &[("scope", &scope_text(&task.scope))])),
+                )
+                .when(!steps.is_empty(), |item| {
+                    item.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .text_size(tiny)
+                            .text_color(colors.fg_muted)
+                            .children(
+                                steps
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(ix, step)| format!("{}. {}", ix + 1, step)),
+                            ),
+                    )
+                }),
+        );
+    }
+    Some(strip.into_any_element())
+}
+
+/// A lead's sub-agents and queued tasks, one row each.
+fn sub_agents(
+    workspace: &Entity<Workspace>,
+    lead: &StreamView,
+    views: &[StreamView],
+    cx: &App,
+) -> Option<AnyElement> {
+    let ws = workspace.read(cx);
+    let workers: Vec<&StreamView> = views
+        .iter()
+        .filter(|v| v.stream.parent.as_deref() == Some(lead.stream.id.as_str()))
+        .filter(|v| v.stream.role == Role::Worker)
+        .collect();
+    let queued = ws.queued_tasks(&lead.stream.id);
+    if workers.is_empty() && queued.is_empty() {
+        return None;
+    }
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let tiny = theme.text_size(TextSize::Xs);
+    let running = workers
+        .iter()
+        .filter(|w| !w.task.as_ref().is_some_and(|t| t.status.finished()))
+        .count();
+    let mut list = div()
+        .flex()
+        .flex_col()
+        .gap_0p5()
+        .pt_1()
+        .border_t_1()
+        .border_color(colors.border)
+        .child(div().text_size(tiny).text_color(colors.fg_subtle).child(tf(
+            "Sub-agents · {running} running · {queued} queued",
+            &[("running", &running), ("queued", &queued.len())],
+        )));
+    for worker in workers {
+        let id = worker.stream.id.clone();
+        let open = workspace.clone();
+        let status = worker.task.as_ref().map(|t| t.status);
+        list = list.child(
+            div()
+                .id(SharedString::from(format!("worker-{id}")))
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_1()
+                .py_0p5()
+                .rounded_md()
+                .text_size(tiny)
+                .hover(|row| row.bg(colors.hover))
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    let id = id.clone();
+                    open.update(cx, |ws, cx| ws.show_stream(&id, cx))
+                })
+                .child(match status {
+                    Some(TaskStatus::Done) => Icon::new(IconName::CircleCheck)
+                        .size(IconSize::Xs)
+                        .color(colors.success)
+                        .into_any_element(),
+                    Some(TaskStatus::Failed) => Icon::new(IconName::CircleX)
+                        .size(IconSize::Xs)
+                        .color(colors.danger)
+                        .into_any_element(),
+                    _ => state_dot(&worker.state, cx),
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(colors.fg)
+                        .child(worker.stream.name.clone()),
+                )
+                .child(Badge::new(agent_short(ws, &worker.stream.backend)))
+                .child(div().text_color(colors.fg_subtle).child(match status {
+                    Some(TaskStatus::Done) => t("done").to_string(),
+                    Some(TaskStatus::Failed) => t("failed").to_string(),
+                    _ => state_label(&worker.state),
+                })),
+        );
+    }
+    for task in queued {
+        list = list.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_1()
+                .py_0p5()
+                .text_size(tiny)
+                .text_color(colors.fg_subtle)
+                .child(
+                    Icon::new(IconName::Clock)
+                        .size(IconSize::Xs)
+                        .color(colors.fg_subtle),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(task.title.clone()),
+                )
+                .child(t("queued")),
+        );
+    }
+    Some(list.into_any_element())
+}
+
 /// The right panel: notices, the brief, contracts and statuses.
 fn atrium_panel(
     workspace: &Entity<Workspace>,
@@ -794,6 +1337,7 @@ fn atrium_panel(
     let switch = root.clone();
     let tabs = SegmentedControl::new("atrium-tab", tab.value())
         .segment("notices", t("Notices"), None)
+        .segment("plan", t("Plan"), None)
         .segment("brief", t("Brief"), None)
         .segment("contracts", t("Contracts"), None)
         .segment("status", t("Status"), None)
@@ -928,6 +1472,13 @@ fn atrium_panel(
                 .child(list)
                 .into_any_element()
         }
+        AtriumTab::Plan => doc_view(
+            t("Plan"),
+            t("The controller's plan: the milestones in order and which lead owns each."),
+            &project.plan,
+            open_file(dir.join("plan.md")),
+            cx,
+        ),
         AtriumTab::Brief => doc_view(
             t("Brief"),
             t("Shared conventions and decisions. Every workstream reads it first."),
@@ -1218,6 +1769,15 @@ pub fn stream_bar(workspace: &Entity<Workspace>, cx: &App) -> Option<AnyElement>
 
 impl RootView {
     pub fn open_new_stream(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // With no controller yet, the first thing to add is one.
+        let role = match self.workspace.read(cx).active_project() {
+            Some(p) if p.controller().is_none() && p.file.streams.is_empty() => Role::Controller,
+            _ => Role::Lead,
+        };
+        self.open_new_stream_as(role, window, cx);
+    }
+
+    pub fn open_new_stream_as(&mut self, role: Role, window: &mut Window, cx: &mut Context<Self>) {
         let name = cx.new(|cx| TextInput::new(window, cx).placeholder(t("Name, such as Frontend")));
         let goal = cx.new(|cx| {
             TextInput::new(window, cx)
@@ -1235,6 +1795,7 @@ impl RootView {
             goal,
             scope,
             backend,
+            role,
         });
         cx.notify();
     }
@@ -1245,6 +1806,7 @@ impl RootView {
         goal: &Entity<TextInput>,
         scope: &Entity<TextInput>,
         backend: &str,
+        role: Role,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme();
@@ -1278,6 +1840,33 @@ impl RootView {
                 .text_color(colors.fg_muted)
                 .child(text.to_string())
         };
+        let has_controller = ws
+            .active_project()
+            .is_some_and(|p| p.controller().is_some());
+        let controller = role == Role::Controller;
+        let set_role = cx.entity();
+        let roles = (!has_controller).then(|| {
+            SegmentedControl::new(
+                "stream-role",
+                if controller { "controller" } else { "lead" },
+            )
+            .size(ControlSize::Sm)
+            .segment("controller", t("Controller"), Some(IconName::Network))
+            .segment("lead", t("Lead"), Some(IconName::User))
+            .on_change(move |value, _, cx| {
+                let value = value.to_string();
+                set_role.update(cx, |root, cx| {
+                    if let Some(Overlay::NewStream { role, .. }) = &mut root.overlay {
+                        *role = if value == "controller" {
+                            Role::Controller
+                        } else {
+                            Role::Lead
+                        };
+                    }
+                    cx.notify();
+                })
+            })
+        });
         let start = (
             cx.entity(),
             self.workspace.clone(),
@@ -1286,20 +1875,31 @@ impl RootView {
             scope.clone(),
             backend.to_string(),
         );
-        Dialog::new("new-stream", t("New workstream"), move |window, cx| {
-            close.update(cx, |this, cx| this.close_overlay(window, cx))
+        Dialog::new(
+            "new-stream",
+            if controller { t("New controller") } else { t("New lead") },
+            move |window, cx| close.update(cx, |this, cx| this.close_overlay(window, cx)),
+        )
+        .detail(if controller {
+            t("The controller splits the project into leads, gives each a roadmap and keeps the plan. It writes no code, and wakes only when a lead reports.")
+        } else {
+            t("A long-running session that owns one part of the project. It gets its goal, its scope and the atrium's rules, then works on its own, handing pieces to sub-agents when it helps.")
         })
-        .detail(t("A long-running session in this project. It gets its goal, its scope and the atrium's rules, then works on its own."))
         .child(
             div()
                 .w_full()
                 .flex()
                 .flex_col()
                 .gap_3()
-                .child(div().flex().flex_col().gap_1().child(label(t("Name"))).child(Input::new(name)))
+                .children(roles.map(|roles| {
+                    div().flex().flex_col().gap_1().child(label(t("Role"))).child(roles)
+                }))
+                .when(!controller, |form| {
+                    form.child(div().flex().flex_col().gap_1().child(label(t("Name"))).child(Input::new(name)))
+                })
                 .child(div().flex().flex_col().gap_1().child(label(t("Agent"))).child(agents))
-                .child(div().flex().flex_col().gap_1().child(label(t("Goal"))).child(Input::new(goal)))
-                .child(
+                .child(div().flex().flex_col().gap_1().child(label(if controller { t("The project's goal") } else { t("Goal") })).child(Input::new(goal)))
+                .when(!controller, |form| form.child(
                     div()
                         .flex()
                         .flex_col()
@@ -1312,7 +1912,7 @@ impl RootView {
                                 .text_color(colors.fg_subtle)
                                 .child(t("Changes it makes in another workstream's scope are flagged and posted to that workstream.")),
                         ),
-                ),
+                )),
         )
         .action(|close| {
             Button::new("stream-cancel", t("Cancel"))
@@ -1324,7 +1924,11 @@ impl RootView {
             Button::new("stream-start", t("Start"))
                 .primary()
                 .on_click(move |_, window, cx| {
-                    let title = name.read(cx).text().trim().to_string();
+                    let title = if role == Role::Controller {
+                        t("Controller").to_string()
+                    } else {
+                        name.read(cx).text().trim().to_string()
+                    };
                     let objective = goal.read(cx).text().trim().to_string();
                     if title.is_empty() || objective.is_empty() {
                         root.update(cx, |root, cx| {
@@ -1337,17 +1941,17 @@ impl RootView {
                         });
                         return;
                     }
-                    let paths: Vec<String> = scope
+                    let paths: Vec<String> = if role == Role::Controller { Vec::new() } else { scope
                         .read(cx)
                         .text()
                         .split([',', ' ', '\n'])
                         .map(str::trim)
                         .filter(|s| !s.is_empty())
                         .map(str::to_owned)
-                        .collect();
+                        .collect() };
                     let backend = backend.clone();
                     workspace.update(cx, |ws, cx| {
-                        ws.create_stream(title, backend, objective, paths, cx)
+                        ws.create_stream(title, role, backend, objective, paths, cx)
                     });
                     close(window, cx);
                 })
