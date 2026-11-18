@@ -24,6 +24,7 @@ use super::{
 };
 use atrium_core::GoalStatus;
 
+use crate::i18n::{t, tf};
 use crate::workspace::{AgentStatus, CODEX, Status, View, Workspace};
 
 const STARTERS: [(&str, IconName); 4] = [
@@ -76,7 +77,7 @@ fn header(
     let running = ws.running_for();
 
     let mut models = Menu::new().item(
-        MenuItem::radio("Codex default", ws.settings.model.is_none()).on_click({
+        MenuItem::radio(t("Codex default"), ws.settings.model.is_none()).on_click({
             let workspace = workspace.clone();
             move |_, cx| workspace.update(cx, |ws, cx| ws.set_model(None, cx))
         }),
@@ -121,8 +122,9 @@ fn header(
                 .cursor_pointer()
                 .hover(|meter| meter.bg(colors.hover))
                 .on_click(move |_, _, cx| open.update(cx, |root, cx| root.open_account(cx)))
-                .tooltip(ely_gpui_component::primitives::Tooltip::text(format!(
-                    "Plan usage: {used:.0}% of the closest limit"
+                .tooltip(ely_gpui_component::primitives::Tooltip::text(tf(
+                    "Plan usage: {used}% of the closest limit",
+                    &[("used", &format!("{used:.0}"))],
                 )))
                 .child(
                     Icon::new(IconName::Gauge)
@@ -148,7 +150,7 @@ fn header(
         let mut menu = Menu::new();
         if codex {
             let rename = (root.clone(), id.clone());
-            menu = menu.item(MenuItem::new("Rename…").icon(IconName::Pencil).on_click(
+            menu = menu.item(MenuItem::new(t("Rename…")).icon(IconName::Pencil).on_click(
                 move |window, cx| {
                     let (root, id) = rename.clone();
                     root.update(cx, |root, cx| root.start_rename(id, window, cx));
@@ -157,7 +159,7 @@ fn header(
         }
         let pin = (workspace.clone(), id.clone());
         menu = menu.item(
-            MenuItem::new(if pinned { "Unpin" } else { "Pin to top" })
+            MenuItem::new(if pinned { t("Unpin") } else { t("Pin to top") })
                 .icon(if pinned {
                     IconName::PinOff
                 } else {
@@ -173,18 +175,18 @@ fn header(
             menu = menu
                 .separator()
                 .item(
-                    MenuItem::new("Review uncommitted changes")
+                    MenuItem::new(t("Review uncommitted changes"))
                         .icon(IconName::Eye)
                         .on_click(move |_, cx| review.update(cx, |ws, cx| ws.review(None, cx))),
                 )
                 .item(
-                    MenuItem::new("Compact conversation")
+                    MenuItem::new(t("Compact conversation"))
                         .icon(IconName::Minimize2)
                         .on_click(move |_, cx| compact.update(cx, |ws, cx| ws.compact(cx))),
                 )
                 .separator()
                 .item(
-                    MenuItem::new("Set a goal…")
+                    MenuItem::new(t("Set a goal…"))
                         .icon(IconName::ListChecks)
                         .on_click({
                             let root = root.clone();
@@ -192,14 +194,14 @@ fn header(
                         }),
                 )
                 .item(
-                    MenuItem::new("Branch into a new chat")
+                    MenuItem::new(t("Branch into a new chat"))
                         .icon(IconName::GitBranch)
                         .on_click({
                             let workspace = workspace.clone();
                             move |_, cx| workspace.update(cx, |ws, cx| ws.branch(None, cx))
                         }),
                 )
-                .item(MenuItem::check("Use memory", memory).on_click({
+                .item(MenuItem::check(t("Use memory"), memory).on_click({
                     let workspace = workspace.clone();
                     move |_, cx| workspace.update(cx, |ws, cx| ws.toggle_memory(cx))
                 }));
@@ -209,14 +211,14 @@ fn header(
         menu = menu
             .separator()
             .item(
-                MenuItem::new("Context & speed")
+                MenuItem::new(t("Context & speed"))
                     .icon(IconName::Zap)
                     .keys("⌘I")
                     .on_click(move |_, cx| details.update(cx, |root, cx| root.open_context(cx))),
             )
             .separator()
             .item(
-                MenuItem::new("Archive")
+                MenuItem::new(t("Archive"))
                     .icon(IconName::Archive)
                     .on_click(move |_, cx| {
                         let (ws, id) = archive.clone();
@@ -252,7 +254,7 @@ fn header(
             let mut menu = if ws.devices.is_empty() {
                 here.into_iter().fold(Menu::new(), |menu, i| menu.item(i))
             } else {
-                Menu::new().group("This computer", here)
+                Menu::new().group(t("This computer"), here)
             };
             for device in &ws.devices {
                 let mut items = Vec::new();
@@ -269,11 +271,11 @@ fn header(
                 let title = match &device.status {
                     crate::workspace::DeviceStatus::Online => device.id.clone(),
                     crate::workspace::DeviceStatus::Offline(_) => {
-                        format!("{} · offline", device.id)
+                        tf("{device} · offline", &[("device", &device.id)])
                     }
                 };
                 if items.is_empty() {
-                    items.push(MenuItem::new("No agents there").disabled(true));
+                    items.push(MenuItem::new(t("No agents there")).disabled(true));
                 }
                 menu = menu.group(title, items);
             }
@@ -318,14 +320,18 @@ fn header(
             match state {
                 agent_rpc::node::LinkState::Reconnecting { attempt, .. } => Some((
                     colors.warning,
-                    format!("Reconnecting to {device}… ({attempt})"),
+                    tf(
+                        "Reconnecting to {device}… ({attempt})",
+                        &[("device", &device), ("attempt", &attempt)],
+                    ),
                 )),
                 agent_rpc::node::LinkState::Gone(why) => {
                     Some((colors.danger, format!("{device}: {why}")))
                 }
-                agent_rpc::node::LinkState::Ended { .. } => {
-                    Some((colors.danger, format!("The agent on {device} stopped")))
-                }
+                agent_rpc::node::LinkState::Ended { .. } => Some((
+                    colors.danger,
+                    tf("The agent on {device} stopped", &[("device", &device)]),
+                )),
                 _ => None,
             }
         })
@@ -394,7 +400,7 @@ fn header(
                         .size(IconSize::Xs)
                         .color(colors.accent),
                 )
-                .child(format!("Working · {}s", took.as_secs()))
+                .child(tf("Working · {secs}s", &[("secs", &took.as_secs())]))
         }))
         .children(quick_view)
         .children(usage_meter)
@@ -404,7 +410,7 @@ fn header(
                 IconButton::new("header-new-chat", IconName::SquarePen)
                     .variant(ButtonVariant::Ghost)
                     .size(ControlSize::Sm)
-                    .tooltip("New chat (⌘N)")
+                    .tooltip(t("New chat (⌘N)"))
                     .on_click(|_, window, cx| window.dispatch_action(Box::new(NewChat), cx)),
             )
         })
@@ -451,7 +457,7 @@ fn body(
             .p_8()
             .child(
                 div().max_w(px(560.)).child(
-                    ErrorMessage::new("codex-failed", "Could not start Codex")
+                    ErrorMessage::new("codex-failed", t("Could not start Codex"))
                         .detail(reason.clone())
                         .on_retry(move |_, cx| retry.update(cx, |ws, cx| ws.connect(cx))),
                 ),
@@ -513,10 +519,10 @@ fn body(
             .child(composer_column(composer))
             .child(SuggestionChips::new(
                 "starters",
-                STARTERS,
+                STARTERS.map(|(text, icon)| (t(text), icon)),
                 move |ix, window, cx| {
                     fill.update(cx, |composer, cx| {
-                        composer.set_text(STARTERS[ix].0, window, cx)
+                        composer.set_text(t(STARTERS[ix].0), window, cx)
                     });
                 },
             ))
@@ -555,12 +561,17 @@ fn goal_banner(
         _ => colors.warning,
     };
     let spent = match goal.token_budget {
-        Some(budget) if budget > 0 => format!(
-            "{} of {} tokens",
-            format_tokens(goal.tokens_used),
-            format_tokens(budget)
+        Some(budget) if budget > 0 => tf(
+            "{used} of {budget} tokens",
+            &[
+                ("used", &format_tokens(goal.tokens_used)),
+                ("budget", &format_tokens(budget)),
+            ],
         ),
-        _ => format!("{} tokens", format_tokens(goal.tokens_used)),
+        _ => tf(
+            "{used} tokens",
+            &[("used", &format_tokens(goal.tokens_used))],
+        ),
     };
     let share = goal
         .token_budget
@@ -611,13 +622,13 @@ fn goal_banner(
                                     .flex_none()
                                     .text_size(theme.text_size(TextSize::Xs))
                                     .text_color(tint)
-                                    .child(goal.status.label()),
+                                    .child(t(goal.status.label())),
                             )
                             .when(goal.status != GoalStatus::Complete, |row| {
                                 row.child(
                                     Button::new(
                                         "goal-toggle",
-                                        if active { "Pause" } else { "Resume" },
+                                        if active { t("Pause") } else { t("Resume") },
                                     )
                                     .variant(ButtonVariant::Ghost)
                                     .size(ControlSize::Sm)
@@ -637,7 +648,7 @@ fn goal_banner(
                                 IconButton::new("goal-edit", IconName::Pencil)
                                     .variant(ButtonVariant::Ghost)
                                     .size(ControlSize::Sm)
-                                    .tooltip("Change the goal")
+                                    .tooltip(t("Change the goal"))
                                     .on_click(move |_, window, cx| {
                                         root.update(cx, |root, cx| root.open_goal(window, cx))
                                     }),
@@ -646,7 +657,7 @@ fn goal_banner(
                                 IconButton::new("goal-clear", IconName::X)
                                     .variant(ButtonVariant::Ghost)
                                     .size(ControlSize::Sm)
-                                    .tooltip("Clear the goal")
+                                    .tooltip(t("Clear the goal"))
                                     .on_click(move |_, _, cx| {
                                         clear.update(cx, |ws, cx| ws.clear_goal(cx))
                                     }),
@@ -673,7 +684,7 @@ fn goal_banner(
 
 fn agent_label(name: &str, status: Option<&'static str>) -> String {
     match status {
-        Some(status) => format!("{name} · {status}"),
+        Some(status) => format!("{name} · {}", t(status)),
         None => name.to_string(),
     }
 }
@@ -718,17 +729,26 @@ fn readiness(ws: &Workspace, folder: &str) -> String {
     let backend = ws.view_backend();
     let name = crate::agents::backend_label(backend);
     match backend_status(ws, backend) {
-        None => format!("{name} is ready in {folder}"),
-        Some("starting") => format!("Starting {name}…"),
-        Some("offline") => format!("{name}: the device is offline."),
+        None => tf(
+            "{name} is ready in {folder}",
+            &[("name", &name), ("folder", &folder)],
+        ),
+        Some("starting") => tf("Starting {name}…", &[("name", &name)]),
+        Some("offline") => tf("{name}: the device is offline.", &[("name", &name)]),
         Some("not installed") => {
             let install = ws
                 .agent(backend)
                 .map(|a| a.profile.install.clone())
                 .unwrap_or_default();
-            format!("{name} is not installed. {install}")
+            tf(
+                "{name} is not installed. {install}",
+                &[("name", &name), ("install", &install)],
+            )
         }
-        Some(_) => format!("{name} is not running. Pick it again to restart it."),
+        Some(_) => tf(
+            "{name} is not running. Pick it again to restart it.",
+            &[("name", &name)],
+        ),
     }
 }
 

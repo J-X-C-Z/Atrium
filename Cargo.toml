@@ -1,5 +1,6 @@
 [workspace]
 resolver = "3"
+exclude = ["third_party"]
 members = [
     "crates/atrium-core",
     "crates/agent-rpc",
@@ -41,3 +42,9 @@ ely-gpui-component = { git = "https://github.com/ZacharyZhang-NY/Ely-GPUI-Compon
 
 [profile.dev.package."*"]
 opt-level = 2
+# Dependencies without debug info: much smaller builds.
+debug = false
+
+# Ely with its chat and agent copy localized (see third_party/ely-gpui-components/ATRIUM.md).
+[patch."https://github.com/ZacharyZhang-NY/Ely-GPUI-Components"]
+ely-gpui-component = { path = "third_party/ely-gpui-components" }

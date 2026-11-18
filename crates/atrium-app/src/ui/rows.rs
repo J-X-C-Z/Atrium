@@ -30,6 +30,7 @@ use gpui::{
     pulsating_between, px,
 };
 
+use crate::i18n::{t, tf};
 use crate::workspace::{Workspace, is_image};
 
 /// The reading column's width.
@@ -105,8 +106,10 @@ fn thinking(running: Option<Duration>) -> AnyElement {
         .child(
             div()
                 .child(match running {
-                    Some(took) if took.as_secs() >= 2 => format!("Thinking · {}s", took.as_secs()),
-                    _ => "Thinking".to_string(),
+                    Some(took) if took.as_secs() >= 2 => {
+                        tf("Thinking · {secs}s", &[("secs", &took.as_secs())])
+                    }
+                    _ => t("Thinking").to_string(),
                 })
                 .with_animation(
                     "thinking-pulse",
@@ -135,8 +138,8 @@ fn footer(
     let answer = transcript.turn_answer(&turn);
     let mut footer = MessageFooter::new();
     match summary.status {
-        TurnStatus::Interrupted => footer = footer.fact("Stopped"),
-        TurnStatus::Failed => footer = footer.fact("Failed"),
+        TurnStatus::Interrupted => footer = footer.fact(t("Stopped")),
+        TurnStatus::Failed => footer = footer.fact(t("Failed")),
         _ => {}
     }
     let pace = transcript.turn_pace(&turn, std::time::Instant::now());
@@ -172,7 +175,7 @@ fn footer(
                     IconButton::new(key("branch", &turn), IconName::GitBranch)
                         .variant(ButtonVariant::Ghost)
                         .size(ControlSize::Sm)
-                        .tooltip("Branch into a new chat from here")
+                        .tooltip(t("Branch into a new chat from here"))
                         .on_click(move |_, _, cx| {
                             let from = from.clone();
                             branch.update(cx, |ws, cx| ws.branch(Some(from), cx))
@@ -188,7 +191,7 @@ pub fn format_duration(took: Duration) -> String {
     match secs {
         0 => format!("{:.1} s", took.as_secs_f32()),
         1..60 => format!("{secs} s"),
-        _ => format!("{}m {}s", secs / 60, secs % 60),
+        _ => tf("{m}m {s}s", &[("m", &(secs / 60)), ("s", &(secs % 60))]),
     }
 }
 
@@ -230,7 +233,7 @@ fn entry_body(
                     IconButton::new(key("edit", &entry.turn_id), IconName::Pencil)
                         .variant(ButtonVariant::Ghost)
                         .size(ControlSize::Sm)
-                        .tooltip("Edit and resend")
+                        .tooltip(t("Edit and resend"))
                         .on_click(move |_, _, cx| {
                             workspace.update(cx, |ws, cx| {
                                 ws.start_edit(&turn, cx);
@@ -253,7 +256,7 @@ fn entry_body(
                             .justify_end()
                             .text_xs()
                             .text_color(colors.accent)
-                            .child("Editing: sending replaces this message and what follows"),
+                            .child(t("Editing: sending replaces this message and what follows")),
                     )
                 })
                 .into_any_element()
@@ -286,29 +289,32 @@ fn entry_body(
                     cwd,
                     reason,
                 } => (
-                    reason
-                        .clone()
-                        .unwrap_or_else(|| format!("{agent} wants to run a command")),
+                    reason.clone().unwrap_or_else(|| {
+                        tf("{agent} wants to run a command", &[("agent", &agent)])
+                    }),
                     if cwd.is_empty() {
                         format!("$ {command}")
                     } else {
-                        format!("$ {command}\n  in {cwd}")
+                        tf(
+                            "$ {command}\n  in {cwd}",
+                            &[("command", command), ("cwd", cwd)],
+                        )
                     },
                 ),
                 ApprovalKind::FileChange { reason, grant_root } => (
-                    reason
-                        .clone()
-                        .unwrap_or_else(|| format!("{agent} wants to change files")),
+                    reason.clone().unwrap_or_else(|| {
+                        tf("{agent} wants to change files", &[("agent", &agent)])
+                    }),
                     match grant_root {
-                        Some(root) => format!("Write access under {root}"),
-                        None => "Apply the proposed edits".into(),
+                        Some(root) => tf("Write access under {root}", &[("root", root)]),
+                        None => t("Apply the proposed edits").into(),
                     },
                 ),
                 ApprovalKind::Tool { title, detail } => (
                     format!("{agent}: {title}"),
                     detail
                         .clone()
-                        .unwrap_or_else(|| "Allow this tool to run".into()),
+                        .unwrap_or_else(|| t("Allow this tool to run").into()),
                 ),
             };
             match (answer, resolved) {
@@ -337,15 +343,17 @@ fn entry_body(
                 }
                 (answer, _) => {
                     let (said, icon, ok) = match answer {
-                        Some(ApprovalDecision::Accept) => ("Allowed once", IconName::Check, true),
+                        Some(ApprovalDecision::Accept) => {
+                            (t("Allowed once"), IconName::Check, true)
+                        }
                         Some(ApprovalDecision::AcceptForSession) => {
-                            ("Allowed for this session", IconName::Check, true)
+                            (t("Allowed for this session"), IconName::Check, true)
                         }
-                        Some(ApprovalDecision::Decline) => ("Declined", IconName::X, false),
+                        Some(ApprovalDecision::Decline) => (t("Declined"), IconName::X, false),
                         Some(ApprovalDecision::Cancel) => {
-                            ("Declined and stopped", IconName::X, false)
+                            (t("Declined and stopped"), IconName::X, false)
                         }
-                        None => ("No longer needed", IconName::Check, true),
+                        None => (t("No longer needed"), IconName::Check, true),
                     };
                     note(icon, format!("{said} · {}", first_line(&detail)), ok, cx)
                 }
@@ -356,7 +364,7 @@ fn entry_body(
         }
         EntryKind::Error(message) => {
             let mut error =
-                ErrorMessage::new(key("error", &ix.to_string()), "Something went wrong")
+                ErrorMessage::new(key("error", &ix.to_string()), t("Something went wrong"))
                     .detail(message.clone());
             let turn = entry.turn_id.clone();
             if !turn.is_empty() {
@@ -449,10 +457,10 @@ fn item(workspace: &Entity<Workspace>, item: &Item, live: bool, cx: &App) -> Any
             duration_ms,
         } => {
             let name = match status {
-                ItemStatus::InProgress => "Running",
-                ItemStatus::Declined => "Declined",
-                ItemStatus::Failed => "Failed",
-                ItemStatus::Completed => "Ran",
+                ItemStatus::InProgress => t("Running"),
+                ItemStatus::Declined => t("Declined"),
+                ItemStatus::Failed => t("Failed"),
+                ItemStatus::Completed => t("Ran"),
             };
             let mut card = ToolCallCard::new(key("cmd", id), name, step(*status))
                 .summary(command.clone())
@@ -515,9 +523,9 @@ fn item(workspace: &Entity<Workspace>, item: &Item, live: bool, cx: &App) -> Any
             let mut card = ToolCallCard::new(
                 key("search", id),
                 if live {
-                    "Searching the web"
+                    t("Searching the web")
                 } else {
-                    "Searched the web"
+                    t("Searched the web")
                 },
                 if live {
                     StepState::Working
@@ -625,8 +633,8 @@ fn plan(turn_id: &str, explanation: Option<&str>, steps: &[PlanStep]) -> AnyElem
         })
         .collect();
     let title = match explanation {
-        Some(text) => format!("Plan · {text}"),
-        None => "Plan".to_string(),
+        Some(text) => tf("Plan · {text}", &[("text", &text)]),
+        None => t("Plan").to_string(),
     };
     AgentPlan::new(key("plan", turn_id), title, items).into_any_element()
 }
@@ -683,13 +691,13 @@ fn image(
                             .style(SpinnerStyle::Ring)
                             .size(IconSize::Sm),
                     )
-                    .child("Creating image…"),
+                    .child(t("Creating image…")),
             )
             .into_any_element(),
         _ => {
             return note(
                 IconName::Image,
-                "The image could not be made".into(),
+                t("The image could not be made").into(),
                 false,
                 cx,
             );
@@ -730,10 +738,10 @@ fn question(
                     .join(" · ")
             })
             .filter(|said| !said.is_empty())
-            .unwrap_or_else(|| "No answer needed".into());
+            .unwrap_or_else(|| t("No answer needed").into());
         return note(
             IconName::MessageSquare,
-            format!("Answered: {said}"),
+            tf("Answered: {said}", &[("said", &said)]),
             true,
             cx,
         );
@@ -753,7 +761,7 @@ fn question(
                 SharedString::from(format!("{card_id}-{}", q.id)),
                 cx,
                 move |window, cx| {
-                    let input = TextInput::new(window, cx).placeholder("Or type an answer");
+                    let input = TextInput::new(window, cx).placeholder(t("Or type an answer"));
                     if secret { input.masked() } else { input }
                 },
             );
@@ -802,7 +810,7 @@ fn question(
                         .size(IconSize::Sm)
                         .color(colors.accent),
                 )
-                .child("Codex has a question"),
+                .child(t("Codex has a question")),
         );
     for q in &request.questions {
         let field = fields
@@ -888,7 +896,7 @@ fn question(
     );
     card.child(
         div().flex().justify_end().child(
-            Button::new(key("answer", &card_id), "Send answer")
+            Button::new(key("answer", &card_id), t("Send answer"))
                 .primary()
                 .size(ControlSize::Sm)
                 .disabled(!complete)

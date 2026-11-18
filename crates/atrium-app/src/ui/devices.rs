@@ -13,6 +13,7 @@ use gpui::{
     div, prelude::*, px,
 };
 
+use crate::i18n::{t, tf};
 use crate::workspace::{AgentStatus, DeviceStatus, Workspace};
 
 pub fn section(workspace: &Entity<Workspace>, address: &Entity<TextInput>, cx: &App) -> AnyElement {
@@ -23,16 +24,21 @@ pub fn section(workspace: &Entity<Workspace>, address: &Entity<TextInput>, cx: &
     let tiny = theme.text_size(TextSize::Xs);
 
     let tailnet = match &ws.tailnet {
-        None => "Looking for devices…".to_string(),
-        Some(Ok(online)) => format!(
-            "Tailnet: {online} device{} online · {} running atrium-node",
-            if *online == 1 { "" } else { "s" },
-            ws.devices
-                .iter()
-                .filter(|d| d.status == DeviceStatus::Online)
-                .count()
+        None => t("Looking for devices…").to_string(),
+        Some(Ok(online)) => tf(
+            "Tailnet: {online} online · {nodes} running atrium-node",
+            &[
+                ("online", online),
+                (
+                    "nodes",
+                    &ws.devices
+                        .iter()
+                        .filter(|d| d.status == DeviceStatus::Online)
+                        .count(),
+                ),
+            ],
         ),
-        Some(Err(why)) => format!("Tailnet not read: {why}"),
+        Some(Err(why)) => tf("Tailnet not read: {why}", &[("why", why)]),
     };
     let refresh = workspace.clone();
     let mut column = div().flex().flex_col().gap_2().child(
@@ -52,9 +58,9 @@ pub fn section(workspace: &Entity<Workspace>, address: &Entity<TextInput>, cx: &
                 Button::new(
                     "devices-refresh",
                     if ws.discovering {
-                        "Looking…"
+                        t("Looking…")
                     } else {
-                        "Refresh"
+                        t("Refresh")
                     },
                 )
                 .size(ControlSize::Sm)
@@ -71,8 +77,8 @@ pub fn section(workspace: &Entity<Workspace>, address: &Entity<TextInput>, cx: &
         if device.codex_status != AgentStatus::NotInstalled {
             agents.push(match &device.codex_status {
                 AgentStatus::Ready => "Codex".into(),
-                AgentStatus::Starting => "Codex (starting)".into(),
-                AgentStatus::Failed(_) => "Codex (not running)".into(),
+                AgentStatus::Starting => tf("{agent} (starting)", &[("agent", &"Codex")]),
+                AgentStatus::Failed(_) => tf("{agent} (not running)", &[("agent", &"Codex")]),
                 AgentStatus::NotInstalled => String::new(),
             });
         }
@@ -83,8 +89,10 @@ pub fn section(workspace: &Entity<Workspace>, address: &Entity<TextInput>, cx: &
         {
             agents.push(match &agent.status {
                 AgentStatus::Ready => agent.profile.short.clone(),
-                AgentStatus::Starting => format!("{} (starting)", agent.profile.short),
-                _ => format!("{} (not running)", agent.profile.short),
+                AgentStatus::Starting => {
+                    tf("{agent} (starting)", &[("agent", &agent.profile.short)])
+                }
+                _ => tf("{agent} (not running)", &[("agent", &agent.profile.short)]),
             });
         }
         let missing: Vec<String> = device
@@ -144,18 +152,16 @@ pub fn section(workspace: &Entity<Workspace>, address: &Entity<TextInput>, cx: &
                 )
                 .child(div().text_size(tiny).text_color(colors.fg_muted).child(
                     match &device.status {
-                        DeviceStatus::Offline(why) => format!("Offline: {why}"),
-                        DeviceStatus::Online if agents.is_empty() => "No agents".into(),
+                        DeviceStatus::Offline(why) => tf("Offline: {why}", &[("why", why)]),
+                        DeviceStatus::Online if agents.is_empty() => t("No agents").into(),
                         DeviceStatus::Online => agents.join(" · "),
                     },
                 ))
                 .when(!missing.is_empty(), |card| {
-                    card.child(
-                        div()
-                            .text_size(tiny)
-                            .text_color(colors.fg_subtle)
-                            .child(format!("Not installed there: {}", missing.join(", "))),
-                    )
+                    card.child(div().text_size(tiny).text_color(colors.fg_subtle).child(tf(
+                        "Not installed there: {list}",
+                        &[("list", &missing.join(", "))],
+                    )))
                 }),
         );
     }
@@ -164,7 +170,7 @@ pub fn section(workspace: &Entity<Workspace>, address: &Entity<TextInput>, cx: &
             div()
                 .text_size(tiny)
                 .text_color(colors.fg_subtle)
-                .child("No devices yet. Run atrium-node on another computer of your tailnet; it shows up here."),
+                .child(t("No devices yet. Run atrium-node on another computer of your tailnet; it shows up here.")),
         );
     }
 
@@ -183,13 +189,13 @@ pub fn section(workspace: &Entity<Workspace>, address: &Entity<TextInput>, cx: &
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .child(format!("Added: {node}")),
+                        .child(tf("Added: {node}", &[("node", &node)])),
                 )
                 .child(
                     IconButton::new(("remove-node", ix), IconName::X)
                         .variant(ButtonVariant::Ghost)
                         .size(ControlSize::Sm)
-                        .tooltip("Forget this address")
+                        .tooltip(t("Forget this address"))
                         .on_click(move |_, _, cx| {
                             let node = node.clone();
                             remove.update(cx, |ws, cx| ws.remove_node(&node, cx))
@@ -207,7 +213,7 @@ pub fn section(workspace: &Entity<Workspace>, address: &Entity<TextInput>, cx: &
                 .gap_2()
                 .child(div().flex_1().child(Input::new(address)))
                 .child(
-                    Button::new("add-node-button", "Add")
+                    Button::new("add-node-button", t("Add"))
                         .size(ControlSize::Sm)
                         .on_click(move |_, _, cx| {
                             let text = input.read(cx).text().to_string();

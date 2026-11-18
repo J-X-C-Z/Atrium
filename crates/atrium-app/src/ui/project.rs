@@ -21,6 +21,7 @@ use gpui::{
 };
 
 use super::{Overlay, RootView, TITLE_BAR_HEIGHT, composer::short_path};
+use crate::i18n::{t, tf};
 use crate::{
     agents,
     project::{self, ATRIUM, YOU},
@@ -70,13 +71,13 @@ fn state_color(state: &StreamState, cx: &App) -> Hsla {
 
 fn state_label(state: &StreamState) -> String {
     match state {
-        StreamState::Starting => "Starting…".into(),
-        StreamState::Offline => "Agent not running".into(),
-        StreamState::Working => "Working".into(),
-        StreamState::NeedsYou(1) => "Needs you".into(),
-        StreamState::NeedsYou(n) => format!("Needs you ({n})"),
-        StreamState::Failed(_) => "Hit an error".into(),
-        StreamState::Idle => "Idle".into(),
+        StreamState::Starting => t("Starting…").into(),
+        StreamState::Offline => t("Agent not running").into(),
+        StreamState::Working => t("Working").into(),
+        StreamState::NeedsYou(1) => t("Needs you").into(),
+        StreamState::NeedsYou(n) => tf("Needs you ({n})", &[("n", n)]),
+        StreamState::Failed(_) => t("Hit an error").into(),
+        StreamState::Idle => t("Idle").into(),
     }
 }
 
@@ -111,7 +112,7 @@ pub fn choose_project(workspace: Entity<Workspace>, cx: &mut App) {
         files: false,
         directories: true,
         multiple: false,
-        prompt: Some("Open as a project".into()),
+        prompt: Some(t("Open as a project").into()),
     });
     cx.spawn(async move |cx| {
         if let Ok(Ok(Some(paths))) = picked.await
@@ -146,12 +147,12 @@ pub fn sidebar_list(workspace: &Entity<Workspace>, cx: &App) -> AnyElement {
                 .gap_1()
                 .text_size(small)
                 .text_color(colors.fg_muted)
-                .child("No projects yet.")
+                .child(t("No projects yet."))
                 .child(
                     div()
                         .text_size(theme.text_size(TextSize::Xs))
                         .text_color(colors.fg_subtle)
-                        .child("A project is a folder that several long-running sessions work on, each toward its own goal."),
+                        .child(t("A project is a folder that several long-running sessions work on, each toward its own goal.")),
                 ),
         );
     }
@@ -243,7 +244,7 @@ pub fn sidebar_list(workspace: &Entity<Workspace>, cx: &App) -> AnyElement {
                                 div()
                                     .text_size(theme.text_size(TextSize::Xs))
                                     .text_color(colors.accent)
-                                    .child(format!("{} new", view.unread)),
+                                    .child(tf("{n} new", &[("n", &view.unread)])),
                             )
                         }),
                 );
@@ -327,17 +328,20 @@ pub fn render_overview(
                 .text_size(theme.text_size(TextSize::Xs))
                 .text_color(colors.fg_muted)
                 .child(format!(
-                    "{} workstreams · {working} working{}",
-                    views.len(),
+                    "{}{}",
+                    tf(
+                        "{n} workstreams · {working} working",
+                        &[("n", &views.len()), ("working", &working)],
+                    ),
                     if needing.is_empty() {
                         String::new()
                     } else {
-                        format!(" · {} need you", needing.len())
+                        tf(" · {n} need you", &[("n", &needing.len())])
                     }
                 )),
         )
         .child(
-            Button::new("new-stream", "New workstream")
+            Button::new("new-stream", t("New workstream"))
                 .icon(IconName::Plus)
                 .size(ControlSize::Sm)
                 .on_click(move |_, window, cx| {
@@ -349,13 +353,13 @@ pub fn render_overview(
             let open_dir = project.dir();
             let menu = Menu::new()
                 .item(
-                    MenuItem::new("Open the atrium folder")
+                    MenuItem::new(t("Open the atrium folder"))
                         .icon(IconName::FolderOpen)
                         .on_click(move |_, cx| cx.open_with_system(&open_dir)),
                 )
                 .separator()
                 .item(
-                    MenuItem::new("Remove from Atrium")
+                    MenuItem::new(t("Remove from Atrium"))
                         .icon(IconName::X)
                         .on_click(move |_, cx| {
                             let (ws, root) = remove.clone();
@@ -387,7 +391,7 @@ pub fn render_overview(
                             .size(IconSize::Sm)
                             .color(colors.warning),
                     )
-                    .child("Needs you"),
+                    .child(t("Needs you")),
             );
         for view in &needing {
             let id = view.stream.id.clone();
@@ -408,9 +412,9 @@ pub fn render_overview(
                             .child(view.stream.name.clone()),
                     )
                     .child(div().flex_1().text_color(colors.fg_muted).child(if n == 1 {
-                        "is waiting for an approval or an answer".to_string()
+                        t("is waiting for an approval or an answer").to_string()
                     } else {
-                        format!("is waiting on {n} approvals or answers")
+                        tf("is waiting on {n} approvals or answers", &[("n", &n)])
                     }))
                     .child(
                         Button::new(SharedString::from(format!("attend-{id}")), "Open")
@@ -471,16 +475,16 @@ pub fn render_overview(
                         div()
                             .text_size(theme.text_size(TextSize::Lg))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("Start a workstream"),
+                            .child(t("Start a workstream")),
                     )
                     .child(
                         div()
                             .text_size(theme.text_size(TextSize::Sm))
                             .text_color(colors.fg_muted)
-                            .child("Each workstream is a long-running session with its own goal and scope, such as the frontend, a backend feature, or performance work. They work on their own and align through the atrium on the right."),
+                            .child(t("Each workstream is a long-running session with its own goal and scope, such as the frontend, a backend feature, or performance work. They work on their own and align through the atrium on the right.")),
                     )
                     .child(
-                        Button::new("first-stream", "New workstream")
+                        Button::new("first-stream", t("New workstream"))
                             .primary()
                             .icon(IconName::Plus)
                             .on_click(move |_, window, cx| {
@@ -537,7 +541,7 @@ fn stream_card(workspace: &Entity<Workspace>, view: &StreamView, cx: &App) -> An
                         .child(
                             div()
                                 .truncate()
-                                .child(step.clone().unwrap_or_else(|| "Plan done".into())),
+                                .child(step.clone().unwrap_or_else(|| t("Plan done").into())),
                         )
                         .child(div().flex_none().child(format!("{done}/{total}"))),
                 )
@@ -553,7 +557,7 @@ fn stream_card(workspace: &Entity<Workspace>, view: &StreamView, cx: &App) -> An
                 .gap_1()
                 .text_size(tiny)
                 .text_color(colors.fg_muted)
-                .child(div().flex_none().child("Focus:"))
+                .child(div().flex_none().child(t("Focus:")))
                 .child(div().truncate().child(focus.clone()))
                 .into_any_element(),
         ),
@@ -575,22 +579,22 @@ fn stream_card(workspace: &Entity<Workspace>, view: &StreamView, cx: &App) -> An
     if view.unread > 0 {
         facts.push(fact(
             IconName::Mail,
-            format!(
-                "{} new notice{}",
-                view.unread,
-                if view.unread == 1 { "" } else { "s" }
-            ),
+            if view.unread == 1 {
+                t("1 new notice").to_string()
+            } else {
+                tf("{n} new notices", &[("n", &view.unread)])
+            },
             colors.accent,
         ));
     }
     if view.crossings > 0 {
         facts.push(fact(
             IconName::TriangleAlert,
-            format!(
-                "{} change{} outside its scope",
-                view.crossings,
-                if view.crossings == 1 { "" } else { "s" }
-            ),
+            if view.crossings == 1 {
+                t("1 change outside its scope").to_string()
+            } else {
+                tf("{n} changes outside its scope", &[("n", &view.crossings)])
+            },
             colors.warning,
         ));
     }
@@ -600,7 +604,10 @@ fn stream_card(workspace: &Entity<Workspace>, view: &StreamView, cx: &App) -> An
     if let Some(share) = view.context {
         facts.push(fact(
             IconName::Gauge,
-            format!("{:.0}% context", share * 100.),
+            tf(
+                "{share}% context",
+                &[("share", &format!("{:.0}", share * 100.))],
+            ),
             if share >= 0.8 {
                 colors.warning
             } else {
@@ -651,7 +658,7 @@ fn stream_card(workspace: &Entity<Workspace>, view: &StreamView, cx: &App) -> An
                 .child(Badge::new(agent_short(ws, &view.stream.backend)))
                 .when(
                     view.goal_status == Some(atrium_core::GoalStatus::Complete),
-                    |row| row.child(Badge::new("Goal done").tone(Tone::Success)),
+                    |row| row.child(Badge::new(t("Goal done")).tone(Tone::Success)),
                 )
                 .child(
                     div()
@@ -667,7 +674,7 @@ fn stream_card(workspace: &Entity<Workspace>, view: &StreamView, cx: &App) -> An
                 .text_size(small)
                 .text_color(colors.fg_muted)
                 .child(if view.stream.goal.is_empty() {
-                    "No goal set".to_string()
+                    t("No goal set").to_string()
                 } else {
                     clip(&view.stream.goal, 160)
                 }),
@@ -677,9 +684,9 @@ fn stream_card(workspace: &Entity<Workspace>, view: &StreamView, cx: &App) -> An
                 .text_size(tiny)
                 .text_color(colors.fg_subtle)
                 .truncate()
-                .child(format!(
-                    "Scope: {}",
-                    project::scope_label(&view.stream.scope).replace('`', "")
+                .child(tf(
+                    "Scope: {scope}",
+                    &[("scope", &scope_text(&view.stream.scope))],
                 )),
         )
         .children(progress)
@@ -725,7 +732,7 @@ fn stream_card(workspace: &Entity<Workspace>, view: &StreamView, cx: &App) -> An
                     row.child(
                         Button::new(
                             SharedString::from(format!("deliver-{deliver_id}")),
-                            "Hand over notices",
+                            t("Hand over notices"),
                         )
                         .size(ControlSize::Sm)
                         .variant(ButtonVariant::Ghost)
@@ -740,7 +747,7 @@ fn stream_card(workspace: &Entity<Workspace>, view: &StreamView, cx: &App) -> An
                     row.child(
                         Button::new(
                             SharedString::from(format!("continue-{continue_id}")),
-                            "Carry on",
+                            t("Carry on"),
                         )
                         .size(ControlSize::Sm)
                         .variant(ButtonVariant::Ghost)
@@ -774,9 +781,9 @@ fn atrium_panel(
     let tiny = theme.text_size(TextSize::Xs);
     let name_of = |id: &str| -> String {
         match id {
-            YOU => "You".into(),
+            YOU => t("You").into(),
             ATRIUM => "Atrium".into(),
-            "all" => "everyone".into(),
+            "all" => t("everyone").into(),
             id => project
                 .stream(id)
                 .map(|s| s.name.clone())
@@ -786,10 +793,10 @@ fn atrium_panel(
 
     let switch = root.clone();
     let tabs = SegmentedControl::new("atrium-tab", tab.value())
-        .segment("notices", "Notices", None)
-        .segment("brief", "Brief", None)
-        .segment("contracts", "Contracts", None)
-        .segment("status", "Status", None)
+        .segment("notices", t("Notices"), None)
+        .segment("brief", t("Brief"), None)
+        .segment("contracts", t("Contracts"), None)
+        .segment("status", t("Status"), None)
         .size(ControlSize::Sm)
         .on_change(move |value, _, cx| {
             let tab = AtriumTab::from_value(value.as_ref());
@@ -807,7 +814,7 @@ fn atrium_panel(
         AtriumTab::Notices => {
             let to = view.notice_to.clone();
             let mut targets =
-                Menu::new().item(MenuItem::radio("Everyone", to == "all").on_click({
+                Menu::new().item(MenuItem::radio(t("Everyone"), to == "all").on_click({
                     let root = root.clone();
                     move |_, cx| {
                         root.update(cx, |r, cx| {
@@ -841,12 +848,16 @@ fn atrium_panel(
                         .items_center()
                         .gap_2()
                         .child(
-                            DropdownMenu::new("notice-to", format!("To {}", name_of(&to)), targets)
-                                .variant(ButtonVariant::Ghost),
+                            DropdownMenu::new(
+                                "notice-to",
+                                tf("To {who}", &[("who", &name_of(&to))]),
+                                targets,
+                            )
+                            .variant(ButtonVariant::Ghost),
                         )
                         .child(div().flex_1())
                         .child(
-                            Button::new("post-notice", "Post")
+                            Button::new("post-notice", t("Post"))
                                 .size(ControlSize::Sm)
                                 .on_click(move |_, window, cx| {
                                     let (ws, input, to) = post.clone();
@@ -866,7 +877,7 @@ fn atrium_panel(
                     div()
                         .text_size(small)
                         .text_color(colors.fg_subtle)
-                        .child("No notices yet. Workstreams post here when they change something others depend on."),
+                        .child(t("No notices yet. Workstreams post here when they change something others depend on.")),
                 );
             }
             for notice in project.notices.iter().rev().take(60) {
@@ -918,8 +929,8 @@ fn atrium_panel(
                 .into_any_element()
         }
         AtriumTab::Brief => doc_view(
-            "Brief",
-            "Shared conventions and decisions. Every workstream reads it first.",
+            t("Brief"),
+            t("Shared conventions and decisions. Every workstream reads it first."),
             &project.brief,
             open_file(dir.join("brief.md")),
             cx,
@@ -936,10 +947,10 @@ fn atrium_panel(
                             .min_w_0()
                             .text_size(tiny)
                             .text_color(colors.fg_muted)
-                            .child("Interfaces between workstreams. Whoever changes one updates its file and posts a notice."),
+                            .child(t("Interfaces between workstreams. Whoever changes one updates its file and posts a notice.")),
                     )
                     .child(
-                        Button::new("open-contracts", "Open folder")
+                        Button::new("open-contracts", t("Open folder"))
                             .size(ControlSize::Sm)
                             .variant(ButtonVariant::Ghost)
                             .on_click(open_file(dir.join("contracts"))),
@@ -973,7 +984,7 @@ fn atrium_panel(
                     div()
                         .text_size(small)
                         .text_color(colors.fg_subtle)
-                        .child("No contracts yet."),
+                        .child(t("No contracts yet.")),
                 );
             }
             column.into_any_element()
@@ -998,7 +1009,13 @@ fn atrium_panel(
                         )
                         .child(div().text_size(tiny).text_color(colors.fg_muted).child(
                             text.map(|t| clip(t, 900)).unwrap_or_else(|| {
-                                format!("No status yet ({}/status/{}.md).", project::DIR, stream.id)
+                                tf(
+                                    "No status yet ({path}).",
+                                    &[(
+                                        "path",
+                                        &format!("{}/status/{}.md", project::DIR, stream.id),
+                                    )],
+                                )
                             }),
                         )),
                 );
@@ -1008,7 +1025,7 @@ fn atrium_panel(
                     div()
                         .text_size(small)
                         .text_color(colors.fg_subtle)
-                        .child("Workstreams write their status here."),
+                        .child(t("Workstreams write their status here.")),
                 );
             }
             column.into_any_element()
@@ -1044,7 +1061,7 @@ fn atrium_panel(
                         .child(
                             div()
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .child("Atrium"),
+                                .child(t("Atrium")),
                         )
                         .child(
                             div()
@@ -1095,7 +1112,7 @@ fn doc_view(
                         .child(hint.to_string()),
                 )
                 .child(
-                    Button::new("open-doc", "Edit")
+                    Button::new("open-doc", t("Edit"))
                         .size(ControlSize::Sm)
                         .variant(ButtonVariant::Ghost)
                         .icon(IconName::Pencil)
@@ -1161,24 +1178,17 @@ pub fn stream_bar(workspace: &Entity<Workspace>, cx: &App) -> Option<AnyElement>
                     .text_color(colors.fg)
                     .child(stream.name.clone()),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .child(format!("Goal: {}", project::first_line(&stream.goal))),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .child(project::scope_label(&stream.scope).replace('`', "")),
-            )
+            .child(div().flex_1().min_w_0().truncate().child(tf(
+                "Goal: {goal}",
+                &[("goal", &project::first_line(&stream.goal))],
+            )))
+            .child(div().flex_none().child(scope_text(&stream.scope)))
             .child({
                 let remove = (workspace.clone(), stream.id.clone());
                 ely_gpui_component::buttons::IconButton::new("leave-project", IconName::X)
                     .variant(ButtonVariant::Ghost)
                     .size(ControlSize::Sm)
-                    .tooltip("Take out of the project (the chat stays, under Chats)")
+                    .tooltip(t("Take out of the project (the chat stays, under Chats)"))
                     .on_click(move |_, _, cx| {
                         let (ws, id) = remove.clone();
                         ws.update(cx, |ws, cx| ws.remove_stream(&id, cx))
@@ -1188,10 +1198,11 @@ pub fn stream_bar(workspace: &Entity<Workspace>, cx: &App) -> Option<AnyElement>
                 bar.child(
                     Button::new(
                         "bar-deliver",
-                        format!(
-                            "Hand over {unread} new notice{}",
-                            if unread == 1 { "" } else { "s" }
-                        ),
+                        if unread == 1 {
+                            t("Hand over 1 new notice").to_string()
+                        } else {
+                            tf("Hand over {n} new notices", &[("n", &unread)])
+                        },
                     )
                     .size(ControlSize::Sm)
                     .icon(IconName::Mail)
@@ -1207,14 +1218,15 @@ pub fn stream_bar(workspace: &Entity<Workspace>, cx: &App) -> Option<AnyElement>
 
 impl RootView {
     pub fn open_new_stream(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let name = cx.new(|cx| TextInput::new(window, cx).placeholder("Name, such as Frontend"));
+        let name = cx.new(|cx| TextInput::new(window, cx).placeholder(t("Name, such as Frontend")));
         let goal = cx.new(|cx| {
             TextInput::new(window, cx)
                 .multi_line(3, 6)
-                .placeholder("Its long-term goal: what done looks like")
+                .placeholder(t("Its long-term goal: what done looks like"))
         });
         let scope = cx.new(|cx| {
-            TextInput::new(window, cx).placeholder("Scope: paths it owns, such as web/**, src/ui")
+            TextInput::new(window, cx)
+                .placeholder(t("Scope: paths it owns, such as web/**, src/ui"))
         });
         let ws = self.workspace.read(cx);
         let backend = ws.draft_backend.clone();
@@ -1242,7 +1254,7 @@ impl RootView {
         let pick = cx.entity();
         let mut agents = SegmentedControl::new("stream-agent", backend.to_string())
             .size(ControlSize::Sm)
-            .segment(CODEX, "Codex", None);
+            .segment(CODEX, t("Codex"), None);
         for agent in &ws.agents {
             // Projects are folders on this computer.
             if agent.status == AgentStatus::Ready && agent.remote.is_none() {
@@ -1274,42 +1286,42 @@ impl RootView {
             scope.clone(),
             backend.to_string(),
         );
-        Dialog::new("new-stream", "New workstream", move |window, cx| {
+        Dialog::new("new-stream", t("New workstream"), move |window, cx| {
             close.update(cx, |this, cx| this.close_overlay(window, cx))
         })
-        .detail("A long-running session in this project. It gets its goal, its scope and the atrium's rules, then works on its own.")
+        .detail(t("A long-running session in this project. It gets its goal, its scope and the atrium's rules, then works on its own."))
         .child(
             div()
                 .w_full()
                 .flex()
                 .flex_col()
                 .gap_3()
-                .child(div().flex().flex_col().gap_1().child(label("Name")).child(Input::new(name)))
-                .child(div().flex().flex_col().gap_1().child(label("Agent")).child(agents))
-                .child(div().flex().flex_col().gap_1().child(label("Goal")).child(Input::new(goal)))
+                .child(div().flex().flex_col().gap_1().child(label(t("Name"))).child(Input::new(name)))
+                .child(div().flex().flex_col().gap_1().child(label(t("Agent"))).child(agents))
+                .child(div().flex().flex_col().gap_1().child(label(t("Goal"))).child(Input::new(goal)))
                 .child(
                     div()
                         .flex()
                         .flex_col()
                         .gap_1()
-                        .child(label("Scope"))
+                        .child(label(t("Scope")))
                         .child(Input::new(scope))
                         .child(
                             div()
                                 .text_size(theme.text_size(TextSize::Xs))
                                 .text_color(colors.fg_subtle)
-                                .child("Changes it makes in another workstream's scope are flagged and posted to that workstream."),
+                                .child(t("Changes it makes in another workstream's scope are flagged and posted to that workstream.")),
                         ),
                 ),
         )
         .action(|close| {
-            Button::new("stream-cancel", "Cancel")
+            Button::new("stream-cancel", t("Cancel"))
                 .variant(ButtonVariant::Ghost)
                 .on_click(move |_, window, cx| close(window, cx))
         })
         .action(move |close| {
             let (root, workspace, name, goal, scope, backend) = start;
-            Button::new("stream-start", "Start")
+            Button::new("stream-start", t("Start"))
                 .primary()
                 .on_click(move |_, window, cx| {
                     let title = name.read(cx).text().trim().to_string();
@@ -1318,7 +1330,7 @@ impl RootView {
                         root.update(cx, |root, cx| {
                             root.toast(
                                 &crate::workspace::Notice::Info(
-                                    "Give the workstream a name and a goal.".into(),
+                                    t("Give the workstream a name and a goal.").into(),
                                 ),
                                 cx,
                             )
@@ -1341,6 +1353,15 @@ impl RootView {
                 })
         })
         .into_any_element()
+    }
+}
+
+/// The paths a workstream owns, for reading.
+fn scope_text(scope: &[String]) -> String {
+    if scope.is_empty() {
+        t("the whole repository").to_string()
+    } else {
+        scope.join(", ")
     }
 }
 

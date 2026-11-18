@@ -17,6 +17,7 @@ use gpui::{
 };
 
 use super::{RootView, rows::format_duration};
+use crate::i18n::{t, tf};
 use crate::workspace::Workspace;
 
 /// Context this full or more is worth a warning.
@@ -32,14 +33,18 @@ pub fn format_tokens(tokens: u64) -> String {
 
 /// "52 tok/s", once a turn has written enough to measure.
 pub fn format_speed(pace: &TurnPace) -> Option<String> {
-    pace.tokens_per_sec().map(|rate| format!("{rate:.0} tok/s"))
+    pace.tokens_per_sec()
+        .map(|rate| tf("{rate} tok/s", &[("rate", &format!("{rate:.0}"))]))
 }
 
 /// "640 tokens", or "≈640 tokens" when only estimated from the text.
 pub fn format_out(pace: &TurnPace) -> Option<String> {
     pace.tokens_out().map(|(n, exact)| {
         let approx = if exact { "" } else { "≈" };
-        format!("{approx}{} tokens", format_tokens(n))
+        tf(
+            "{n} tokens",
+            &[("n", &format!("{approx}{}", format_tokens(n)))],
+        )
     })
 }
 
@@ -77,14 +82,19 @@ pub fn quick_view(ws: &Workspace, root: Entity<RootView>, cx: &App) -> Option<An
     let mut tip = Vec::new();
     if let Some(usage) = usage {
         match (usage.context_used, usage.context_window) {
-            (Some(used), Some(window)) => tip.push(format!(
-                "Context: {} of {} tokens",
-                format_tokens(used),
-                format_tokens(window)
+            (Some(used), Some(window)) => tip.push(tf(
+                "Context: {used} of {window} tokens",
+                &[
+                    ("used", &format_tokens(used)),
+                    ("window", &format_tokens(window)),
+                ],
             )),
-            _ => tip.push(format!(
-                "{} tokens used",
-                format_tokens(usage.total.total.max(usage.context_used.unwrap_or(0)))
+            _ => tip.push(tf(
+                "{n} tokens used",
+                &[(
+                    "n",
+                    &format_tokens(usage.total.total.max(usage.context_used.unwrap_or(0))),
+                )],
             )),
         }
     }
@@ -92,9 +102,9 @@ pub fn quick_view(ws: &Workspace, root: Entity<RootView>, cx: &App) -> Option<An
         && let Some(speed) = format_speed(pace)
     {
         tip.push(if pace.done {
-            format!("Last answer: {speed}")
+            tf("Last answer: {speed}", &[("speed", &speed)])
         } else {
-            format!("Writing at {speed}")
+            tf("Writing at {speed}", &[("speed", &speed)])
         });
     }
     let tip = tip.join(" · ");
@@ -128,9 +138,12 @@ pub fn quick_view(ws: &Workspace, root: Entity<RootView>, cx: &App) -> Option<An
             })
             .when(share.is_none(), |pill| {
                 pill.children(usage.map(|u| {
-                    format!(
-                        "{} tokens",
-                        format_tokens(u.total.total.max(u.context_used.unwrap_or(0)))
+                    tf(
+                        "{n} tokens",
+                        &[(
+                            "n",
+                            &format_tokens(u.total.total.max(u.context_used.unwrap_or(0))),
+                        )],
                     )
                 }))
             })
@@ -209,13 +222,13 @@ fn composition(last: &TokenCounts, window: u64, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let colors = &theme.colors;
     let parts: [(&str, u64, Hsla); 3] = [
-        ("Cached input", last.cached_input, colors.chart[0]),
+        (t("Cached input"), last.cached_input, colors.chart[0]),
         (
-            "New input",
+            t("New input"),
             last.input.saturating_sub(last.cached_input),
             colors.chart[1],
         ),
-        ("Output", last.output, colors.chart[2]),
+        (t("Output"), last.output, colors.chart[2]),
     ];
     let mut bar = div()
         .w_full()
@@ -262,34 +275,45 @@ fn breakdown(counts: &TokenCounts, cx: &App) -> Vec<AnyElement> {
     let mut rows = Vec::new();
     if counts.input > 0 {
         let cached = if counts.cached_input > 0 {
-            format!(
-                " ({} cached, {:.0}%)",
-                format_tokens(counts.cached_input),
-                counts.cached_input as f64 * 100. / counts.input as f64
+            tf(
+                " ({n} cached, {share}%)",
+                &[
+                    ("n", &format_tokens(counts.cached_input)),
+                    (
+                        "share",
+                        &format!(
+                            "{:.0}",
+                            counts.cached_input as f64 * 100. / counts.input as f64
+                        ),
+                    ),
+                ],
             )
         } else {
             String::new()
         };
         rows.push(stat(
-            "Input",
+            t("Input"),
             format!("{}{cached}", format_tokens(counts.input)),
             cx,
         ));
     }
     if counts.output > 0 {
         let reasoning = if counts.reasoning > 0 {
-            format!(" ({} reasoning)", format_tokens(counts.reasoning))
+            tf(
+                " ({n} reasoning)",
+                &[("n", &format_tokens(counts.reasoning))],
+            )
         } else {
             String::new()
         };
         rows.push(stat(
-            "Output",
+            t("Output"),
             format!("{}{reasoning}", format_tokens(counts.output)),
             cx,
         ));
     }
     if counts.total > 0 {
-        rows.push(stat("Total", format_tokens(counts.total), cx));
+        rows.push(stat(t("Total"), format_tokens(counts.total), cx));
     }
     rows
 }
@@ -302,7 +326,7 @@ fn turn_label(transcript: &Transcript, turn: &str) -> String {
         .unwrap_or_default();
     let line = text.lines().next().unwrap_or("").trim();
     if line.is_empty() {
-        return "(no message)".into();
+        return t("(no message)").into();
     }
     let mut short: String = line.chars().take(28).collect();
     if line.chars().count() > 28 {
@@ -331,13 +355,13 @@ impl RootView {
                 body = body.child(
                     div()
                         .text_color(cx.theme().colors.fg_muted)
-                        .child("Nothing measured yet: send a message first."),
+                        .child(t("Nothing measured yet: send a message first.")),
                 );
             }
             Some(transcript) => {
                 let usage = transcript.usage();
                 // Context window.
-                body = body.child(section("Context window", cx));
+                body = body.child(section(t("Context window"), cx));
                 match usage.map(|u| (u, u.context_used, u.context_window)) {
                     Some((usage, Some(used), Some(window))) if window > 0 => {
                         let share = usage.context_share().unwrap_or(0.);
@@ -361,7 +385,10 @@ impl RootView {
                                                     .child(format_tokens(used)),
                                             )
                                             .child(div().text_color(theme.colors.fg_muted).child(
-                                                format!("of {} tokens", format_tokens(window)),
+                                                tf(
+                                                    "of {n} tokens",
+                                                    &[("n", &format_tokens(window))],
+                                                ),
                                             )),
                                     )
                                     .child(
@@ -372,10 +399,15 @@ impl RootView {
                                             } else {
                                                 theme.colors.fg_muted
                                             })
-                                            .child(format!(
-                                                "{} used · {} left",
-                                                format_share(share),
-                                                format_tokens(window.saturating_sub(used))
+                                            .child(tf(
+                                                "{share} used · {left} left",
+                                                &[
+                                                    ("share", &format_share(share)),
+                                                    (
+                                                        "left",
+                                                        &format_tokens(window.saturating_sub(used)),
+                                                    ),
+                                                ],
                                             )),
                                     ),
                             )
@@ -390,19 +422,19 @@ impl RootView {
                                     .text_size(cx.theme().text_size(TextSize::Sm))
                                     .text_color(cx.theme().colors.warning)
                                     .child(if codex {
-                                        "The context is nearly full. Compact the conversation to make room; older details get summarized."
+                                        t("The context is nearly full. Compact the conversation to make room; older details get summarized.")
                                     } else {
-                                        "The context is nearly full. Ask the agent to /compact, or start a new chat."
+                                        t("The context is nearly full. Ask the agent to /compact, or start a new chat.")
                                     }),
                             );
                         }
                     }
                     Some((usage, used, _)) => {
                         body = body.child(stat(
-                            "In use",
-                            format!(
-                                "{} tokens (the window size isn't reported)",
-                                format_tokens(used.unwrap_or(usage.last.total))
+                            t("In use"),
+                            tf(
+                                "{n} tokens (the window size isn't reported)",
+                                &[("n", &format_tokens(used.unwrap_or(usage.last.total)))],
                             ),
                             cx,
                         ));
@@ -412,7 +444,10 @@ impl RootView {
                             div()
                                 .text_size(cx.theme().text_size(TextSize::Sm))
                                 .text_color(cx.theme().colors.fg_muted)
-                                .child(format!("{agent} hasn't reported its context yet.")),
+                                .child(tf(
+                                    "{agent} hasn't reported its context yet.",
+                                    &[("agent", &agent)],
+                                )),
                         );
                     }
                 }
@@ -428,30 +463,30 @@ impl RootView {
                         .collect();
                     let average = (!measured.is_empty())
                         .then(|| measured.iter().sum::<f64>() / measured.len() as f64);
-                    body = body.child(section("Speed", cx)).child(
+                    body = body.child(section(t("Speed"), cx)).child(
                         div()
                             .flex()
                             .gap_2()
                             .child(tile(
                                 if last.done {
-                                    "Last answer"
+                                    t("Last answer")
                                 } else {
-                                    "Writing now"
+                                    t("Writing now")
                                 },
                                 format_speed(last).unwrap_or_else(|| "—".into()),
                                 cx,
                             ))
                             .child(tile(
-                                "First token",
+                                t("First token"),
                                 last.first_token
                                     .map(format_wait)
                                     .unwrap_or_else(|| "—".into()),
                                 cx,
                             ))
                             .child(tile(
-                                "Average",
+                                t("Average"),
                                 average
-                                    .map(|r| format!("{r:.0} tok/s"))
+                                    .map(|r| tf("{rate} tok/s", &[("rate", &format!("{r:.0}"))]))
                                     .unwrap_or_else(|| "—".into()),
                                 cx,
                             )),
@@ -462,7 +497,7 @@ impl RootView {
                             .text_size(cx.theme().text_size(TextSize::Xs))
                             .text_color(cx.theme().colors.fg_subtle)
                             .child(
-                                "Speed is measured on the text as it streams in; pauses for tools and new requests don't count. Counts marked ≈ are estimated from the text.",
+                                t("Speed is measured on the text as it streams in; pauses for tools and new requests don't count. Counts marked ≈ are estimated from the text."),
                             )
                             .into_any_element(),
                     );
@@ -473,40 +508,44 @@ impl RootView {
                     if usage.last.has_breakdown() && usage.last != usage.total {
                         body = body
                             .child(section(
-                                if codex { "Last request" } else { "Last turn" },
+                                if codex {
+                                    t("Last request")
+                                } else {
+                                    t("Last turn")
+                                },
                                 cx,
                             ))
                             .children(breakdown(&usage.last, cx));
                     }
                     let total = breakdown(&usage.total, cx);
                     if !total.is_empty() || usage.cost.is_some() {
-                        body = body.child(section("This chat", cx)).children(total);
+                        body = body.child(section(t("This chat"), cx)).children(total);
                         if let Some(cost) = &usage.cost {
                             let amount = if cost.currency == "USD" {
                                 format!("${:.2}", cost.amount)
                             } else {
                                 format!("{:.2} {}", cost.amount, cost.currency)
                             };
-                            body = body.child(stat("Cost", amount, cx));
+                            body = body.child(stat(t("Cost"), amount, cx));
                         }
                     }
                 }
 
                 body = body
-                    .children(table.map(|t| {
+                    .children(table.map(|turns| {
                         div()
                             .flex()
                             .flex_col()
                             .gap_1()
-                            .child(section("Recent turns", cx))
-                            .child(t)
+                            .child(section(t("Recent turns"), cx))
+                            .child(turns)
                     }))
                     .children(note);
             }
         }
 
         let compact = self.workspace.clone();
-        let mut dialog = Dialog::new("context", "Context & speed", move |window, cx| {
+        let mut dialog = Dialog::new("context", t("Context & speed"), move |window, cx| {
             close.update(cx, |this, cx| this.close_overlay(window, cx))
         })
         .child(
@@ -520,7 +559,7 @@ impl RootView {
         if codex && ws.active_thread_id().is_some() {
             dialog = dialog.action(move |close| {
                 let compact = compact.clone();
-                let button = Button::new("context-compact", "Compact conversation")
+                let button = Button::new("context-compact", t("Compact conversation"))
                     .variant(ButtonVariant::Ghost)
                     .on_click(move |_, window, cx| {
                         compact.update(cx, |ws, cx| ws.compact(cx));
@@ -535,7 +574,7 @@ impl RootView {
         }
         dialog
             .action(|close| {
-                Button::new("context-close", "Done")
+                Button::new("context-close", t("Done"))
                     .on_click(move |_, window, cx| close(window, cx))
             })
             .into_any_element()
@@ -554,11 +593,11 @@ fn turn_table(transcript: &Transcript, paces: &[(String, TurnPace)], cx: &App) -
         .pb_1()
         .text_size(small)
         .text_color(colors.fg_subtle)
-        .child(div().flex_1().min_w_0().child("Turn"))
-        .child(cell(76., "Output".into()))
-        .child(cell(64., "Speed".into()))
-        .child(cell(52., "First".into()))
-        .child(cell(52., "Took".into()));
+        .child(div().flex_1().min_w_0().child(t("Turn")))
+        .child(cell(76., t("Output").into()))
+        .child(cell(64., t("Speed").into()))
+        .child(cell(52., t("First").into()))
+        .child(cell(52., t("Took").into()));
     let rows = paces.iter().rev().take(8).map(|(turn, pace)| {
         let dash = || "—".to_string();
         div()

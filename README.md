@@ -121,8 +121,9 @@ script/bundle-macos.sh
 **外观与操作**
 - 新消息上浮淡入；历史加载时显示骨架屏；Toast 通知
 - 命令面板 ⌘K：动作、对话跳转、访问模式、主题
-- 设置 ⌘,：主题（跟随系统 / 浅色 / 深色）、默认访问模式、Codex 路径（保存后重启 Codex）
+- 设置 ⌘,：界面语言（跟随系统 / English / 中文，即时切换）、主题（跟随系统 / 浅色 / 深色）、默认访问模式、Codex 路径（保存后重启 Codex）
 - 设置保存在 `~/Library/Application Support/Atrium/settings.json`
+- 界面语言：默认跟随系统（macOS 读首选语言，其他平台读 `LANG` 等变量），命令面板里也能切换。只翻译界面；agent 用你写给它的语言回答，写进 `.atrium/` 的文件保持英文，方便各家 agent 读
 
 **订阅（ChatGPT Plus / Pro）相关**
 
@@ -171,7 +172,7 @@ crates/
   agent-rpc/        共享传输层：子进程 stdio 上的行分隔 JSON-RPC（可选 JSON-RPC 2.0），查找可执行文件；node：atrium-node 客户端（REST + 断线续传的 WebSocket）；含 mock-node
   codex-client/     codex app-server 客户端与协议翻译；含 mock-codex
   acp-client/       ACP 客户端：握手、会话（new/load/resume/list/prompt/cancel/设置）、权限；把 session/update 翻译成 AgentEvent（为没有 id 的 ACP 合成轮次与条目）；含 mock-acp（可模仿 claude / deepseek / antigravity）
-  atrium-app/    GPUI 应用：Workspace（状态与后端调用；workspace_project 管项目与工作线）、project（中庭文件、公告解析、范围匹配）+ ui/（sidebar、chat、composer、rows、project、调色板与设置）
+  atrium-app/    GPUI 应用：i18n（以英文原文为键的中文表）、Workspace（状态与后端调用；workspace_project 管项目与工作线）、project（中庭文件、公告解析、范围匹配）+ ui/（sidebar、chat、composer、rows、project、调色板与设置）
 ```
 
 数据流只有一个方向：
@@ -183,6 +184,8 @@ ACP agents      ──JSON-RPC 2.0─▶ acp-client::Translator ─┴─AgentEv
         └──────────── turn/start · turn/interrupt · 审批应答 ◀──── Workspace ◀─────────┘
 ```
 
+`third_party/ely-gpui-components/` 是 Ely 的一份内置副本（通过 `[patch]` 替换上游）：Ely 的聊天、审批、工具卡片组件里原本写死英文，这份副本把它们改为走 Ely 自带的 i18n 目录并补齐了中文。改动说明见其中的 `ATRIUM.md`，适合整理成 PR 提给上游，合并后即可删掉这份副本。
+
 UI 只认识 `atrium-core` 的类型，不认识任何后端协议。任何实现了 ACP 的 agent（如 Gemini CLI）都能以同样方式接入：在 `agents.rs` 里加一条配置即可。Codex 协议标注为实验性、每个版本都会加字段，所以翻译层用 `serde_json::Value` 宽松读取：未知字段忽略，未知条目类型显示为普通系统行，不会让整条消息失败。
 
 ## 测试
@@ -191,6 +194,7 @@ UI 只认识 `atrium-core` 的类型，不认识任何后端协议。任何实�
 cargo test --workspace
 ```
 
+- `atrium-app`：每一处 `t("…")` / `tf("…")` 都有中文、占位符一致、运行时才出现的文字（访问模式、目标状态等）也都有译文
 - `agent-rpc`：节点客户端对 mock-node 的端到端测试（进程输入输出、按序号续传、断线自动重连不丢不重、JSON-RPC 走远程连接、文件只限根目录内），以及 `--ignored` 的真实节点验收：`ATRIUM_TEST_NODE=http://127.0.0.1:7381 cargo test -p agent-rpc --test node -- --ignored`
 - `atrium-core`：Transcript 的归并规则（流式拼接、乐观消息去重、审批、失败与断连）；速度测量（首 token、停顿不计时、按轮次的输出数）与用量报告的乱序合并
 - `acp-client`：翻译器单元测试（流式文本与工具交替、历史回放切分轮次、diff 与权限、分组选项与模式），以及四条走真实子进程（mock-acp）的端到端测试：Claude 的完整一轮（计划 + 读文件 + 带审批的命令 + diff）、拒绝命令、Claude 回放历史与 DeepSeek 恢复会话、修改设置与中途取消；另有一条 `--ignored` 测试可对真实 agent 做握手：`ATRIUM_ACP="dsh --profile acp" cargo test -p acp-client -- --ignored real_agent`

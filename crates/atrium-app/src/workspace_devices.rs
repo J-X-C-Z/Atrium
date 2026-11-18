@@ -2,6 +2,7 @@
 //! `atrium-node`. Their agents join the same lists as this machine's, under
 //! backend ids such as `claude@studio`; a Codex there gets its own client.
 
+use crate::i18n::{t, tf};
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
@@ -153,7 +154,7 @@ impl Workspace {
                             Err(error) => Err(error),
                         }
                     } else {
-                        Err("Tailscale discovery is off".into())
+                        Err(t("Tailscale discovery is off").into())
                     };
                     Found { nodes, tailnet }
                 })
@@ -410,7 +411,7 @@ impl Workspace {
                 event
             }
             Incoming::Closed => {
-                let reason = format!("Codex on {device} stopped");
+                let reason = tf("Codex on {device} stopped", &[("device", &device)]);
                 if let Some(d) = self.devices.iter_mut().find(|d| d.id == device) {
                     d.codex = None;
                     d.codex_status = AgentStatus::Failed(reason.clone());

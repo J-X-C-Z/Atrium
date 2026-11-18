@@ -2,12 +2,13 @@
 //! session works on its own; the atrium is where they share and align.
 
 mod agents;
+mod i18n;
 mod project;
 mod settings;
 mod ui;
 mod workspace;
 
-use ely_gpui_component::Assets;
+use ely_gpui_component::{Assets, i18n::I18n};
 use gpui::{
     App, AppContext, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions, WindowBounds,
     WindowOptions, point, px, size,
@@ -29,6 +30,7 @@ fn main() {
         .run(|cx: &mut App| {
             gpui_kit::init(cx);
             ely_gpui_component::init(cx).expect("Ely failed to start");
+            apply_language(settings::Settings::load().language, cx);
 
             cx.bind_keys([
                 KeyBinding::new("cmd-n", NewChat, None),
@@ -51,46 +53,7 @@ fn main() {
             ]);
             cx.on_action(|_: &Quit, cx| cx.quit());
             ui::register_actions(cx);
-            let menu = |name: &str, items| Menu {
-                name: name.to_string().into(),
-                disabled: false,
-                items,
-            };
-            cx.set_menus([
-                menu(
-                    "Atrium",
-                    vec![
-                        MenuItem::action("Settings…", OpenSettings),
-                        MenuItem::separator(),
-                        MenuItem::action("Quit Atrium", Quit),
-                    ],
-                ),
-                menu(
-                    "File",
-                    vec![
-                        MenuItem::action("New Chat", NewChat),
-                        MenuItem::action("Attach Files…", AttachFiles),
-                        MenuItem::separator(),
-                        MenuItem::action("Restart Codex", Reconnect),
-                    ],
-                ),
-                menu(
-                    "Chat",
-                    vec![
-                        MenuItem::action("Command Palette", OpenPalette),
-                        MenuItem::action("Focus Composer", FocusComposer),
-                        MenuItem::action("Stop Answer", StopTurn),
-                        MenuItem::action("Context & Speed", ShowContext),
-                        MenuItem::separator(),
-                        MenuItem::action("Review Uncommitted Changes", ReviewChanges),
-                        MenuItem::action("Compact Conversation", CompactChat),
-                    ],
-                ),
-                menu(
-                    "View",
-                    vec![MenuItem::action("Toggle Sidebar", ToggleSidebar)],
-                ),
-            ]);
+            set_menus(cx);
 
             let bounds = Bounds::centered(None, size(px(1180.), px(800.)), cx);
             let options = WindowOptions {
@@ -110,4 +73,60 @@ fn main() {
             .expect("open the main window");
             cx.activate(true);
         });
+}
+
+/// Shows `language` everywhere: Atrium's strings, Ely's components and the menu bar.
+pub fn apply_language(language: i18n::Language, cx: &mut App) {
+    let tag = i18n::apply(language);
+    if cx.has_global::<I18n>() {
+        I18n::set_locale(tag, cx);
+    } else {
+        cx.set_global(I18n::new(tag).catalog("en-US", &[]).catalog("zh-CN", &[]));
+    }
+    set_menus(cx);
+}
+
+/// The menu bar, in the language shown.
+pub fn set_menus(cx: &mut App) {
+    use i18n::t;
+    let menu = |name: &str, items| Menu {
+        name: name.to_string().into(),
+        disabled: false,
+        items,
+    };
+    cx.set_menus([
+        menu(
+            "Atrium",
+            vec![
+                MenuItem::action(t("Settings…"), OpenSettings),
+                MenuItem::separator(),
+                MenuItem::action(t("Quit Atrium"), Quit),
+            ],
+        ),
+        menu(
+            t("File"),
+            vec![
+                MenuItem::action(t("New Chat"), NewChat),
+                MenuItem::action(t("Attach Files…"), AttachFiles),
+                MenuItem::separator(),
+                MenuItem::action(t("Restart Codex"), Reconnect),
+            ],
+        ),
+        menu(
+            t("Chat"),
+            vec![
+                MenuItem::action(t("Command Palette"), OpenPalette),
+                MenuItem::action(t("Focus Composer"), FocusComposer),
+                MenuItem::action(t("Stop Answer"), StopTurn),
+                MenuItem::action(t("Context & Speed"), ShowContext),
+                MenuItem::separator(),
+                MenuItem::action(t("Review Uncommitted Changes"), ReviewChanges),
+                MenuItem::action(t("Compact Conversation"), CompactChat),
+            ],
+        ),
+        menu(
+            t("View"),
+            vec![MenuItem::action(t("Toggle Sidebar"), ToggleSidebar)],
+        ),
+    ]);
 }

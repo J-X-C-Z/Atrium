@@ -19,6 +19,7 @@ use codex_client::{
 use futures::StreamExt;
 use gpui::{AppContext, Context, EventEmitter, Task};
 
+use crate::i18n::{t, t_any, tf};
 use crate::settings::{Settings, ThemePref};
 
 #[path = "workspace_acp.rs"]
@@ -403,7 +404,7 @@ impl Workspace {
                     None => self.goals.remove(thread_id),
                 };
                 if finished {
-                    cx.emit(Notice::Success("Goal complete".into()));
+                    cx.emit(Notice::Success(t("Goal complete").into()));
                 }
                 return;
             }
@@ -413,7 +414,7 @@ impl Workspace {
                 limits.merge(update.clone());
                 if limits.reached && !was_reached {
                     cx.emit(Notice::Error(
-                        "Usage limit reached. It resets soon; see Usage.".into(),
+                        t("Usage limit reached. It resets soon; see Usage.").into(),
                     ));
                 }
                 return;
@@ -425,12 +426,15 @@ impl Workspace {
             AgentEvent::LoginCompleted { success, error } => {
                 self.login = None;
                 if *success {
-                    cx.emit(Notice::Success("Signed in to ChatGPT".into()));
+                    cx.emit(Notice::Success(t("Signed in to ChatGPT").into()));
                     self.refresh(cx);
                 } else {
-                    cx.emit(Notice::Error(format!(
-                        "Sign-in failed: {}",
-                        error.clone().unwrap_or_else(|| "unknown error".into())
+                    cx.emit(Notice::Error(tf(
+                        "Sign-in failed: {error}",
+                        &[(
+                            "error",
+                            &error.clone().unwrap_or_else(|| t("unknown error").into()),
+                        )],
                     )));
                 }
                 return;
@@ -471,7 +475,7 @@ impl Workspace {
                 item: Item::Other { label, .. },
                 ..
             } if label == "Context compacted" => {
-                cx.emit(Notice::Success("Conversation compacted".into()));
+                cx.emit(Notice::Success(t("Conversation compacted").into()));
             }
             AgentEvent::Warning(message) => log::warn!("codex: {message}"),
             AgentEvent::Disconnected { reason } => {
@@ -489,8 +493,9 @@ impl Workspace {
                         transcript.apply(&event);
                     }
                 }
-                cx.emit(Notice::Error(format!(
-                    "{reason}. Restart it from the sidebar."
+                cx.emit(Notice::Error(tf(
+                    "{reason}. Restart it from the sidebar.",
+                    &[("reason", &t_any(reason))],
                 )));
                 return;
             }
@@ -703,8 +708,10 @@ impl Workspace {
                     }
                     Err(error) => {
                         let mut transcript = Transcript::new();
-                        transcript
-                            .fail_pending_turn(format!("Could not open this chat: {error:#}"));
+                        transcript.fail_pending_turn(tf(
+                            "Could not open this chat: {error}",
+                            &[("error", &format!("{error:#}"))],
+                        ));
                         ws.transcripts.insert(thread_id, transcript);
                     }
                 }
@@ -899,10 +906,13 @@ impl Workspace {
                 Ok(meta) => {
                     let id = meta.id.clone();
                     ws.upsert_thread(ThreadMeta { backend, ..meta });
-                    cx.emit(Notice::Success("Branched into a new chat".into()));
+                    cx.emit(Notice::Success(t("Branched into a new chat").into()));
                     ws.open_thread(id, cx);
                 }
-                Err(error) => cx.emit(Notice::Error(format!("Could not branch: {error:#}"))),
+                Err(error) => cx.emit(Notice::Error(tf(
+                    "Could not branch: {error}",
+                    &[("error", &format!("{error:#}"))],
+                ))),
             });
         })
         .detach();
@@ -921,7 +931,7 @@ impl Workspace {
             .map(str::to_owned)
         else {
             cx.emit(Notice::Info(
-                "Codex is still starting this turn; try again in a moment.".into(),
+                t("Codex is still starting this turn; try again in a moment.").into(),
             ));
             return;
         };
@@ -935,8 +945,9 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             if let Err(error) = client.turn_steer(&thread_id, &turn, request).await {
                 let _ = this.update(cx, |_, cx| {
-                    cx.emit(Notice::Error(format!(
-                        "Could not add that to the running turn: {error:#}"
+                    cx.emit(Notice::Error(tf(
+                        "Could not add that to the running turn: {error}",
+                        &[("error", &format!("{error:#}"))],
                     )))
                 });
             }
@@ -969,8 +980,9 @@ impl Workspace {
                     ws.born.remove(&thread_id);
                     ws.send(composed, cx);
                 }
-                Err(error) => cx.emit(Notice::Error(format!(
-                    "Could not edit the message: {error:#}"
+                Err(error) => cx.emit(Notice::Error(tf(
+                    "Could not edit the message: {error}",
+                    &[("error", &format!("{error:#}"))],
                 ))),
             });
         })
@@ -991,7 +1003,7 @@ impl Workspace {
             self.view_codex(),
         ) else {
             cx.emit(Notice::Info(
-                "Start a chat first, then give it a goal.".into(),
+                t("Start a chat first, then give it a goal.").into(),
             ));
             return;
         };
@@ -1003,12 +1015,15 @@ impl Workspace {
                 Ok(Some(goal)) => {
                     ws.goals.insert(thread, goal);
                     cx.emit(Notice::Success(
-                        "Goal set. Codex keeps working toward it.".into(),
+                        t("Goal set. Codex keeps working toward it.").into(),
                     ));
                     cx.notify();
                 }
                 Ok(None) => {}
-                Err(error) => cx.emit(Notice::Error(format!("Could not set the goal: {error:#}"))),
+                Err(error) => cx.emit(Notice::Error(tf(
+                    "Could not set the goal: {error}",
+                    &[("error", &format!("{error:#}"))],
+                ))),
             });
         })
         .detach();
@@ -1069,9 +1084,9 @@ impl Workspace {
         }
         cx.emit(Notice::Info(
             if enabled {
-                "Memory on for this chat"
+                t("Memory on for this chat")
             } else {
-                "Memory off for this chat"
+                t("Memory off for this chat")
             }
             .into(),
         ));
@@ -1115,10 +1130,13 @@ impl Workspace {
                 Ok((login, url)) => {
                     ws.login = Some(login);
                     cx.open_url(&url);
-                    cx.emit(Notice::Info("Finish signing in in your browser.".into()));
+                    cx.emit(Notice::Info(t("Finish signing in in your browser.").into()));
                     cx.notify();
                 }
-                Err(error) => cx.emit(Notice::Error(format!("Could not start sign-in: {error:#}"))),
+                Err(error) => cx.emit(Notice::Error(tf(
+                    "Could not start sign-in: {error}",
+                    &[("error", &format!("{error:#}"))],
+                ))),
             });
         })
         .detach();
@@ -1145,10 +1163,13 @@ impl Workspace {
                 Ok(()) => {
                     ws.account = None;
                     ws.rate_limits = None;
-                    cx.emit(Notice::Info("Signed out".into()));
+                    cx.emit(Notice::Info(t("Signed out").into()));
                     ws.refresh_account(cx);
                 }
-                Err(error) => cx.emit(Notice::Error(format!("Could not sign out: {error:#}"))),
+                Err(error) => cx.emit(Notice::Error(tf(
+                    "Could not sign out: {error}",
+                    &[("error", &format!("{error:#}"))],
+                ))),
             });
         })
         .detach();
@@ -1209,7 +1230,7 @@ impl Workspace {
             return;
         }
         if self.view_codex().is_none() {
-            cx.emit(Notice::Error("Codex is not running.".into()));
+            cx.emit(Notice::Error(t("Codex is not running.").into()));
             return;
         }
         if let View::Thread(thread_id) = self.view.clone() {
@@ -1246,7 +1267,10 @@ impl Workspace {
                     if let Err(error) = sent {
                         let _ = this.update(cx, |ws, cx| {
                             if let Some(t) = ws.transcripts.get_mut(&thread_id) {
-                                t.fail_pending_turn(format!("Could not send: {error:#}"));
+                                t.fail_pending_turn(tf(
+                                    "Could not send: {error}",
+                                    &[("error", &format!("{error:#}"))],
+                                ));
                             }
                             ws.turn_started.remove(&thread_id);
                             cx.notify();
@@ -1311,8 +1335,9 @@ impl Workspace {
                         }
                         Err(error) => {
                             let _ = this.update(cx, |ws, cx| {
-                                ws.draft.fail_pending_turn(format!(
-                                    "Could not start a chat: {error:#}"
+                                ws.draft.fail_pending_turn(tf(
+                                    "Could not start a chat: {error}",
+                                    &[("error", &format!("{error:#}"))],
                                 ));
                                 ws.turn_started.remove(DRAFT);
                                 cx.notify();
@@ -1323,7 +1348,10 @@ impl Workspace {
                     if let Err(error) = client.turn_start(&thread_id, request).await {
                         let _ = this.update(cx, |ws, cx| {
                             if let Some(t) = ws.transcripts.get_mut(&thread_id) {
-                                t.fail_pending_turn(format!("Could not send: {error:#}"));
+                                t.fail_pending_turn(tf(
+                                    "Could not send: {error}",
+                                    &[("error", &format!("{error:#}"))],
+                                ));
                             }
                             ws.turn_started.remove(&thread_id);
                             cx.notify();
@@ -1408,7 +1436,7 @@ impl Workspace {
                 self.view = View::Draft;
                 self.draft = Transcript::new();
             }
-            cx.emit(Notice::Info("Chat archived".into()));
+            cx.emit(Notice::Info(t("Chat archived").into()));
             cx.notify();
             return;
         }
@@ -1422,13 +1450,16 @@ impl Workspace {
             self.view = View::Draft;
             self.draft = Transcript::new();
         }
-        cx.emit(Notice::Info("Chat archived".into()));
+        cx.emit(Notice::Info(t("Chat archived").into()));
         cx.notify();
         cx.spawn(async move |this, cx| {
             if let Err(error) = client.thread_archive(&thread_id).await {
                 log::warn!("thread/archive failed: {error:#}");
                 let _ = this.update(cx, |ws, cx| {
-                    cx.emit(Notice::Error(format!("Could not archive: {error:#}")));
+                    cx.emit(Notice::Error(tf(
+                        "Could not archive: {error}",
+                        &[("error", &format!("{error:#}"))],
+                    )));
                     ws.refresh(cx);
                 });
             }
@@ -1451,7 +1482,10 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             if let Err(error) = client.thread_set_name(&thread_id, &name).await {
                 let _ = this.update(cx, |_, cx| {
-                    cx.emit(Notice::Error(format!("Could not rename: {error:#}")))
+                    cx.emit(Notice::Error(tf(
+                        "Could not rename: {error}",
+                        &[("error", &format!("{error:#}"))],
+                    )))
                 });
             }
         })
@@ -1470,15 +1504,20 @@ impl Workspace {
             self.active_thread_id().map(str::to_owned),
             self.view_codex(),
         ) else {
-            cx.emit(Notice::Info("Start a chat first, then compact it.".into()));
+            cx.emit(Notice::Info(
+                t("Start a chat first, then compact it.").into(),
+            ));
             return;
         };
-        cx.emit(Notice::Info("Compacting the conversation…".into()));
+        cx.emit(Notice::Info(t("Compacting the conversation…").into()));
         cx.spawn(async move |this, cx| {
             let result = client.thread_compact(&thread_id).await;
             let _ = this.update(cx, |_, cx| match result {
                 Ok(()) => {}
-                Err(error) => cx.emit(Notice::Error(format!("Could not compact: {error:#}"))),
+                Err(error) => cx.emit(Notice::Error(tf(
+                    "Could not compact: {error}",
+                    &[("error", &format!("{error:#}"))],
+                ))),
             });
         })
         .detach();
@@ -1507,14 +1546,15 @@ impl Workspace {
                 cx.spawn(async move |this, cx| {
                     let meta = match client.thread_start(options).await {
                         Ok(mut meta) => {
-                            meta.preview = "Code review".into();
+                            meta.preview = t("Code review").into();
                             meta.backend = backend;
                             meta
                         }
                         Err(error) => {
                             let _ = this.update(cx, |_, cx| {
-                                cx.emit(Notice::Error(format!(
-                                    "Could not start a review: {error:#}"
+                                cx.emit(Notice::Error(tf(
+                                    "Could not start a review: {error}",
+                                    &[("error", &format!("{error:#}"))],
                                 )))
                             });
                             return;
@@ -1530,8 +1570,9 @@ impl Workspace {
                     });
                     if let Err(error) = client.review_start(&id, target).await {
                         let _ = this.update(cx, |_, cx| {
-                            cx.emit(Notice::Error(format!(
-                                "Could not start a review: {error:#}"
+                            cx.emit(Notice::Error(tf(
+                                "Could not start a review: {error}",
+                                &[("error", &format!("{error:#}"))],
                             )))
                         });
                     }
@@ -1549,7 +1590,10 @@ impl Workspace {
             if let Err(error) = client.review_start(&thread_id, target).await {
                 let _ = this.update(cx, |ws, cx| {
                     if let Some(t) = ws.transcripts.get_mut(&thread_id) {
-                        t.fail_pending_turn(format!("Could not start a review: {error:#}"));
+                        t.fail_pending_turn(tf(
+                            "Could not start a review: {error}",
+                            &[("error", &format!("{error:#}"))],
+                        ));
                     }
                     cx.notify();
                 });
@@ -1604,6 +1648,14 @@ impl Workspace {
     pub fn set_mode(&mut self, mode: AccessMode, cx: &mut Context<Self>) {
         self.settings.mode = mode;
         self.settings.save();
+        cx.notify();
+    }
+
+    /// Switches the interface's language; it shows at once.
+    pub fn set_language(&mut self, language: crate::i18n::Language, cx: &mut Context<Self>) {
+        self.settings.language = language;
+        self.settings.save();
+        crate::apply_language(language, cx);
         cx.notify();
     }
 
@@ -1662,7 +1714,7 @@ impl Workspace {
                 .find(|m| m.id == id)
                 .map(|m| m.display_name.clone())
                 .unwrap_or(id),
-            None => "Default model".into(),
+            None => t("Default model").into(),
         }
     }
 

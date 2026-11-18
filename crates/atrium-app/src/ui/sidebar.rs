@@ -20,6 +20,7 @@ use gpui::{
 use jiff::{Timestamp, tz::TimeZone};
 
 use super::{NewChat, OpenPalette, OpenSettings, RootView, TITLE_BAR_HEIGHT, ToggleSidebar};
+use crate::i18n::{t, tf};
 use crate::workspace::{Status, View, Workspace};
 
 /// Room for the macOS traffic lights at the left of the title strip.
@@ -51,15 +52,18 @@ pub fn render(
     let colors = theme.colors.clone();
     let ws = workspace.read(cx);
     let (dot, label) = match &ws.status {
-        Status::Connecting => (colors.warning, "Starting Codex…".to_string()),
+        Status::Connecting => (colors.warning, t("Starting Codex…").to_string()),
         Status::Ready => match ws.signed_in {
             Some(false) => (
                 colors.warning,
-                format!("{} · not signed in", ws.backend_label),
+                tf(
+                    "{backend} · not signed in",
+                    &[("backend", &ws.backend_label)],
+                ),
             ),
             _ => (colors.success, ws.backend_label.clone()),
         },
-        Status::Failed(_) => (colors.danger, "Codex is not running".to_string()),
+        Status::Failed(_) => (colors.danger, t("Codex is not running").to_string()),
     };
     let connecting = ws.status == Status::Connecting;
     let failed = matches!(ws.status, Status::Failed(_));
@@ -74,18 +78,18 @@ pub fn render(
                     .items_center()
                     .gap_1()
                     .child(
-                        rail_button("rail-expand", IconName::PanelLeft, "Show sidebar (⌘B)")
+                        rail_button("rail-expand", IconName::PanelLeft, t("Show sidebar (⌘B)"))
                             .on_click(|_, window, cx| {
                                 window.dispatch_action(Box::new(ToggleSidebar), cx)
                             }),
                     )
                     .child(
-                        rail_button("rail-new", IconName::SquarePen, "New chat (⌘N)").on_click(
+                        rail_button("rail-new", IconName::SquarePen, t("New chat (⌘N)")).on_click(
                             |_, window, cx| window.dispatch_action(Box::new(NewChat), cx),
                         ),
                     )
                     .child(
-                        rail_button("rail-search", IconName::Search, "Search (⌘K)").on_click(
+                        rail_button("rail-search", IconName::Search, t("Search (⌘K)")).on_click(
                             |_, window, cx| window.dispatch_action(Box::new(OpenPalette), cx),
                         ),
                     ),
@@ -99,9 +103,10 @@ pub fn render(
                     .gap_2()
                     .pb_3()
                     .child(
-                        rail_button("rail-settings", IconName::Settings, "Settings (⌘,)").on_click(
-                            |_, window, cx| window.dispatch_action(Box::new(OpenSettings), cx),
-                        ),
+                        rail_button("rail-settings", IconName::Settings, t("Settings (⌘,)"))
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(OpenSettings), cx)
+                            }),
                     )
                     .child(div().size(px(8.)).rounded_full().bg(dot)),
             )
@@ -204,7 +209,7 @@ pub fn render(
                     IconButton::new("open-palette", IconName::Search)
                         .variant(ButtonVariant::Ghost)
                         .size(ControlSize::Sm)
-                        .tooltip("Search (⌘K)")
+                        .tooltip(t("Search (⌘K)"))
                         .on_click(|_, window, cx| {
                             window.dispatch_action(Box::new(OpenPalette), cx)
                         }),
@@ -213,7 +218,7 @@ pub fn render(
                     IconButton::new("hide-sidebar", IconName::PanelLeft)
                         .variant(ButtonVariant::Ghost)
                         .size(ControlSize::Sm)
-                        .tooltip("Hide sidebar (⌘B)")
+                        .tooltip(t("Hide sidebar (⌘B)"))
                         .on_click(|_, window, cx| {
                             window.dispatch_action(Box::new(ToggleSidebar), cx)
                         }),
@@ -223,8 +228,8 @@ pub fn render(
             let switch = workspace.clone();
             div().flex_none().px_3().pb_2().child(
                 SegmentedControl::new("room", if in_project { "projects" } else { "chats" })
-                    .segment("chats", "Chats", Some(IconName::MessageSquare))
-                    .segment("projects", "Projects", Some(IconName::Layers))
+                    .segment("chats", t("Chats"), Some(IconName::MessageSquare))
+                    .segment("projects", t("Projects"), Some(IconName::Layers))
                     .size(ControlSize::Sm)
                     .on_change(move |value, _, cx| {
                         let projects = value.as_ref() == "projects";
@@ -257,7 +262,7 @@ pub fn render(
             sidebar
                 .child(
                     div().flex_none().px_3().pb_2().child(
-                        Button::new("open-project", "Open a folder as a project")
+                        Button::new("open-project", t("Open a folder as a project"))
                             .icon(IconName::FolderPlus)
                             .variant(ButtonVariant::Outline)
                             .full_width()
@@ -311,15 +316,15 @@ pub fn render(
                                     .text_size(theme.text_size(TextSize::Sm))
                                     .text_color(colors.fg_muted)
                                     .child(if connecting {
-                                        "Loading chats…"
+                                        t("Loading chats…")
                                     } else {
-                                        "No chats yet."
+                                        t("No chats yet.")
                                     })
                                     .child(
                                         div()
                                             .text_size(theme.text_size(TextSize::Xs))
                                             .text_color(colors.fg_subtle)
-                                            .child("Your Codex conversations show here."),
+                                            .child(t("Your Codex conversations show here.")),
                                     ),
                             )
                         })
@@ -336,7 +341,7 @@ pub fn render(
                                         .pb_1()
                                         .text_size(theme.text_size(TextSize::Xs))
                                         .text_color(colors.fg_subtle)
-                                        .child("In messages"),
+                                        .child(t("In messages")),
                                 )
                                 .children(hits.into_iter().map(|(id, title, snippet)| {
                                     let open = workspace.clone();
@@ -406,7 +411,7 @@ pub fn render(
                     .text_size(theme.text_size(TextSize::Sm))
                     .text_color(colors.fg_muted)
                     .child(Icon::new(IconName::Lock).size(IconSize::Sm))
-                    .child("API key")
+                    .child(t("API key"))
                     .into_any_element(),
                 Some(Account::Other(kind)) => row
                     .text_size(theme.text_size(TextSize::Sm))
@@ -421,9 +426,9 @@ pub fn render(
                             .color(colors.accent),
                     )
                     .child(if signing_in {
-                        "Finish signing in in your browser…"
+                        t("Finish signing in in your browser…")
                     } else {
-                        "Sign in with ChatGPT"
+                        t("Sign in with ChatGPT")
                     })
                     .into_any_element(),
             }
@@ -456,7 +461,7 @@ pub fn render(
                         IconButton::new("reconnect", IconName::RefreshCw)
                             .variant(ButtonVariant::Ghost)
                             .size(ControlSize::Sm)
-                            .tooltip("Restart Codex")
+                            .tooltip(t("Restart Codex"))
                             .on_click(move |_, _, cx| retry.update(cx, |ws, cx| ws.connect(cx))),
                     )
                 })
@@ -464,7 +469,7 @@ pub fn render(
                     IconButton::new("open-settings", IconName::Settings)
                         .variant(ButtonVariant::Ghost)
                         .size(ControlSize::Sm)
-                        .tooltip("Settings (⌘,)")
+                        .tooltip(t("Settings (⌘,)"))
                         .on_click(|_, window, cx| {
                             window.dispatch_action(Box::new(OpenSettings), cx)
                         }),

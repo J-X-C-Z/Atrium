@@ -58,6 +58,8 @@ pub struct Settings {
     pub node_token: Option<String>,
     /// Names this install to nodes, so it finds its own processes.
     pub install_id: String,
+    /// The interface's language.
+    pub language: crate::i18n::Language,
     /// Where new chats run on each device, by device id.
     pub device_folders: std::collections::HashMap<String, String>,
 }

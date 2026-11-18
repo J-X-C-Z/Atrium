@@ -8,6 +8,7 @@ use codex_client::StartThread;
 use gpui::Context;
 
 use super::{CODEX, Composed, Notice, View, Workspace};
+use crate::i18n::{t, tf};
 use crate::{
     agents,
     project::{self, ATRIUM, Project, Workstream},
@@ -161,8 +162,9 @@ impl Workspace {
                     self.settings.save();
                 }
                 Err(error) => {
-                    cx.emit(Notice::Error(format!(
-                        "Could not open the project: {error:#}"
+                    cx.emit(Notice::Error(tf(
+                        "Could not open the project: {error}",
+                        &[("error", &format!("{error:#}"))],
                     )));
                     return;
                 }
@@ -271,9 +273,9 @@ impl Workspace {
                 .is_some_and(|a| a.status == super::AgentStatus::Ready),
         };
         if !ready {
-            cx.emit(Notice::Error(format!(
-                "{} is not running.",
-                agents::backend_name(&backend)
+            cx.emit(Notice::Error(tf(
+                "{agent} is not running.",
+                &[("agent", &agents::backend_label(&backend))],
             )));
             return;
         }
@@ -405,8 +407,9 @@ impl Workspace {
             project.file.streams.retain(|s| s.id != stream);
             let _ = project.save();
         }
-        cx.emit(Notice::Error(format!(
-            "Could not start the workstream: {error:#}"
+        cx.emit(Notice::Error(tf(
+            "Could not start the workstream: {error}",
+            &[("error", &format!("{error:#}"))],
         )));
         cx.notify();
     }
@@ -471,7 +474,7 @@ impl Workspace {
             .is_some_and(Transcript::is_running);
         if running && !crate::agents::is_codex(self.backend_of(&thread)) {
             cx.emit(Notice::Info(
-                "It is working; the notices go with its next message.".into(),
+                t("It is working; the notices go with its next message.").into(),
             ));
             return;
         }
@@ -556,11 +559,13 @@ impl Workspace {
                         name(&crossing.stream),
                         crossing.path
                     );
-                    cx.emit(Notice::Info(format!(
-                        "{} changed {} in {}'s scope",
-                        name(&crossing.stream),
-                        crossing.path,
-                        name(&crossing.owner)
+                    cx.emit(Notice::Info(tf(
+                        "{stream} changed {path} in {owner}'s scope",
+                        &[
+                            ("stream", &name(&crossing.stream)),
+                            ("path", &crossing.path),
+                            ("owner", &name(&crossing.owner)),
+                        ],
                     )));
                     let owner = crossing.owner.clone();
                     project.crossings.push(crossing);
@@ -580,7 +585,7 @@ impl Workspace {
                         .find(|p| p.root == root)
                         .and_then(|p| p.stream(&stream))
                         .map_or(stream.clone(), |s| s.name.clone());
-                    cx.emit(Notice::Error(format!("{name} hit an error")));
+                    cx.emit(Notice::Error(tf("{name} hit an error", &[("name", &name)])));
                 }
             }
             _ => {}

@@ -29,6 +29,7 @@ use gpui::{
 };
 use gpui_kit::component::theme::{Theme as KitTheme, ThemeMode};
 
+use crate::i18n::{t, tf};
 use crate::{
     settings::ThemePref,
     workspace::{Fill, Notice, Workspace},
@@ -173,6 +174,8 @@ pub struct RootView {
     notice_to: String,
     /// The theme last applied, so a change of preference or system appearance re-applies.
     applied: Option<(ThemePref, bool)>,
+    /// Whether the long-lived inputs show Chinese placeholders.
+    placeholders_chinese: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -180,16 +183,17 @@ impl RootView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let workspace = cx.new(Workspace::new);
         let composer = cx.new(|cx| Composer::new(workspace.clone(), window, cx));
-        let search = cx.new(|cx| TextInput::new(window, cx).placeholder("Search chats"));
+        let search = cx.new(|cx| TextInput::new(window, cx).placeholder(t("Search chats")));
         let toaster = cx.new(|_| Toaster::default());
         let notice_input = cx.new(|cx| {
             TextInput::new(window, cx)
                 .multi_line(2, 5)
-                .placeholder("Tell the workstreams something…")
+                .placeholder(t("Tell the workstreams something…"))
         });
         let subscriptions = vec![
             cx.observe_in(&workspace, window, |this, _, window, cx| {
                 this.apply_theme(window, cx);
+                this.refresh_placeholders(cx);
                 cx.notify();
             }),
             cx.observe(&search, |this, search, cx| {
@@ -221,11 +225,26 @@ impl RootView {
             notice_input,
             notice_to: "all".into(),
             applied: None,
+            placeholders_chinese: crate::i18n::chinese(),
             _subscriptions: subscriptions,
         };
         view.apply_theme(window, cx);
         Composer::focus_entity(&view.composer, window, cx);
         view
+    }
+
+    /// Re-translates the placeholders of inputs that outlive a language switch.
+    fn refresh_placeholders(&mut self, cx: &mut Context<Self>) {
+        let chinese = crate::i18n::chinese();
+        if chinese == self.placeholders_chinese {
+            return;
+        }
+        self.placeholders_chinese = chinese;
+        self.search
+            .update(cx, |input, cx| input.set_placeholder(t("Search chats"), cx));
+        self.notice_input.update(cx, |input, cx| {
+            input.set_placeholder(t("Tell the workstreams something…"), cx)
+        });
     }
 
     fn toast(&mut self, notice: &Notice, cx: &mut Context<Self>) {
@@ -288,7 +307,7 @@ impl RootView {
             .find(|t| t.id == thread_id)
             .map(|t| t.title())
             .unwrap_or_default();
-        let field = cx.new(|cx| TextInput::new(window, cx).placeholder("Chat name"));
+        let field = cx.new(|cx| TextInput::new(window, cx).placeholder(t("Chat name")));
         field.update(cx, |input, cx| input.set_text(title, cx));
         self.overlay = Some(Overlay::Rename { thread_id, field });
         cx.notify();
@@ -305,11 +324,11 @@ impl RootView {
         let objective = cx.new(|cx| {
             TextInput::new(window, cx)
                 .multi_line(2, 5)
-                .placeholder("What should Codex keep working toward?")
+                .placeholder(t("What should Codex keep working toward?"))
         });
         let budget = cx.new(|cx| {
             TextInput::new(window, cx)
-                .placeholder("Token budget (optional), such as 500000")
+                .placeholder(t("Token budget (optional), such as 500000"))
                 .filter(|c| c.is_ascii_digit())
         });
         if let Some(goal) = current {
@@ -337,10 +356,10 @@ impl RootView {
             objective.clone(),
             budget.clone(),
         );
-        Dialog::new("goal", "Set a goal", move |window, cx| {
+        Dialog::new("goal", t("Set a goal"), move |window, cx| {
             close.update(cx, |this, cx| this.close_overlay(window, cx))
         })
-        .detail("Codex keeps working toward the goal across turns until it is done, blocked, or out of budget.")
+        .detail(t("Codex keeps working toward the goal across turns until it is done, blocked, or out of budget."))
         .child(
             div()
                 .w_full()
@@ -353,17 +372,17 @@ impl RootView {
                     div()
                         .text_size(theme.text_size(TextSize::Xs))
                         .text_color(colors.fg_muted)
-                        .child("Long goals use your plan's usage. Pause or clear the goal from the banner at any time."),
+                        .child(t("Long goals use your plan's usage. Pause or clear the goal from the banner at any time.")),
                 ),
         )
         .action(|close| {
-            Button::new("goal-cancel", "Cancel")
+            Button::new("goal-cancel", t("Cancel"))
                 .variant(ButtonVariant::Ghost)
                 .on_click(move |_, window, cx| close(window, cx))
         })
         .action(move |close| {
             let (root, workspace, objective, budget) = start;
-            Button::new("goal-start", "Start working")
+            Button::new("goal-start", t("Start working"))
                 .primary()
                 .on_click(move |_, window, cx| {
                     let text = objective.read(cx).text().trim().to_string();
@@ -392,7 +411,7 @@ impl RootView {
                 plan,
                 workspace,
             }) => {
-                let who = email.clone().unwrap_or_else(|| "ChatGPT account".into());
+                let who = email.clone().unwrap_or_else(|| t("ChatGPT account").into());
                 body = body.child(
                     div()
                         .flex()
@@ -417,18 +436,17 @@ impl RootView {
                 );
             }
             Some(Account::ApiKey) => {
-                body = body.child(div().child(
+                body = body.child(div().child(t(
                     "Signed in with an API key: usage is billed per token, with no plan limits.",
-                ));
+                )));
             }
             Some(Account::Other(kind)) => {
-                body = body.child(div().child(format!("Signed in through {kind}.")));
+                body = body.child(div().child(tf("Signed in through {kind}.", &[("kind", kind)])));
             }
             None => {
-                body =
-                    body.child(div().text_color(colors.fg_muted).child(
-                        "Sign in with ChatGPT to use your Plus or Pro subscription in Codex.",
-                    ));
+                body = body.child(div().text_color(colors.fg_muted).child(t(
+                    "Sign in with ChatGPT to use your Plus or Pro subscription in Codex.",
+                )));
             }
         }
         if let Some(limits) = &ws.rate_limits {
@@ -449,12 +467,14 @@ impl RootView {
                                 .flex()
                                 .justify_between()
                                 .text_size(theme.text_size(TextSize::Sm))
-                                .child(window.label())
-                                .child(
-                                    div()
-                                        .text_color(colors.fg_muted)
-                                        .child(format!("{:.0}% used{reset}", window.used_percent)),
-                                ),
+                                .child(window_label(&window))
+                                .child(div().text_color(colors.fg_muted).child(tf(
+                                    "{percent}% used{reset}",
+                                    &[
+                                        ("percent", &format!("{:.0}", window.used_percent)),
+                                        ("reset", &reset),
+                                    ],
+                                ))),
                         )
                         .child(ProgressBar::new(
                             ("usage-bar", ix),
@@ -464,12 +484,12 @@ impl RootView {
             }
             if let Some(credits) = &limits.credits {
                 let said = if credits.unlimited {
-                    "Unlimited credits".to_string()
+                    t("Unlimited credits").to_string()
                 } else {
                     match &credits.balance {
-                        Some(balance) => format!("{balance} credits left"),
-                        None if credits.has_credits => "Credits available".into(),
-                        None => "No credits".into(),
+                        Some(balance) => tf("{balance} credits left", &[("balance", balance)]),
+                        None if credits.has_credits => t("Credits available").into(),
+                        None => t("No credits").into(),
                     }
                 };
                 usage = usage.child(
@@ -484,7 +504,7 @@ impl RootView {
                     div()
                         .text_size(theme.text_size(TextSize::Sm))
                         .text_color(colors.danger)
-                        .child("A usage limit is reached; Codex waits until it resets."),
+                        .child(t("A usage limit is reached; Codex waits until it resets.")),
                 );
             }
             body = body.child(usage);
@@ -495,37 +515,37 @@ impl RootView {
                     .text_size(theme.text_size(TextSize::Sm))
                     .text_color(colors.fg_muted)
                     .child(if ready {
-                        format!("Memory: {remembered} chats remembered. Turn it off per chat from the chat menu.")
+                        tf("Memory: {remembered} chats remembered. Turn it off per chat from the chat menu.", &[("remembered", &remembered)])
                     } else {
-                        "Memory is getting ready.".to_string()
+                        t("Memory is getting ready.").to_string()
                     }),
             );
         }
         let pending = ws.login.is_some();
         let workspace = self.workspace.clone();
-        Dialog::new("account", "Account & usage", move |window, cx| {
+        Dialog::new("account", t("Account & usage"), move |window, cx| {
             close.update(cx, |this, cx| this.close_overlay(window, cx))
         })
         .child(body)
         .action(move |close| {
             let workspace = workspace.clone();
             match (signed_in, pending) {
-                (true, _) => Button::new("sign-out", "Sign out")
+                (true, _) => Button::new("sign-out", t("Sign out"))
                     .variant(ButtonVariant::Ghost)
                     .on_click(move |_, window, cx| {
                         workspace.update(cx, |ws, cx| ws.sign_out(cx));
                         close(window, cx);
                     }),
-                (false, true) => Button::new("cancel-sign-in", "Cancel sign-in")
+                (false, true) => Button::new("cancel-sign-in", t("Cancel sign-in"))
                     .variant(ButtonVariant::Ghost)
                     .on_click(move |_, _, cx| workspace.update(cx, |ws, cx| ws.cancel_sign_in(cx))),
-                (false, false) => Button::new("sign-in", "Sign in with ChatGPT")
+                (false, false) => Button::new("sign-in", t("Sign in with ChatGPT"))
                     .primary()
                     .on_click(move |_, _, cx| workspace.update(cx, |ws, cx| ws.sign_in(cx))),
             }
         })
         .action(|close| {
-            Button::new("account-close", "Done").on_click(move |_, window, cx| close(window, cx))
+            Button::new("account-close", t("Done")).on_click(move |_, window, cx| close(window, cx))
         })
         .into_any_element()
     }
@@ -561,7 +581,7 @@ impl RootView {
         };
         let codex = match &ws.status {
             Status::Ready => (colors.success, ws.backend_label.clone()),
-            Status::Connecting => (colors.warning, "Starting…".into()),
+            Status::Connecting => (colors.warning, t("Starting…").into()),
             Status::Failed(reason) => (colors.danger, reason.clone()),
         };
         let mut list =
@@ -589,9 +609,9 @@ impl RootView {
                                 i.version
                             )
                         })
-                        .unwrap_or_else(|| "Ready".into()),
+                        .unwrap_or_else(|| t("Ready").into()),
                 ),
-                AgentStatus::Starting => (colors.warning, "Starting…".into()),
+                AgentStatus::Starting => (colors.warning, t("Starting…").into()),
                 AgentStatus::NotInstalled => (colors.fg_subtle, agent.profile.install.to_string()),
                 AgentStatus::Failed(reason) => (colors.danger, reason.clone()),
             };
@@ -610,10 +630,10 @@ impl RootView {
             .map(|path| path.display().to_string())
             .unwrap_or_default();
         let codex_path =
-            cx.new(|cx| TextInput::new(window, cx).placeholder("Found on PATH (leave empty)"));
+            cx.new(|cx| TextInput::new(window, cx).placeholder(t("Found on PATH (leave empty)")));
         codex_path.update(cx, |input, cx| input.set_text(current, cx));
         let node_address = cx.new(|cx| {
-            TextInput::new(window, cx).placeholder("Add a node by address, such as studio:7381")
+            TextInput::new(window, cx).placeholder(t("Add a node by address, such as studio:7381"))
         });
         self.overlay = Some(Overlay::Settings {
             codex_path,
@@ -625,42 +645,52 @@ impl RootView {
     fn palette(&self, cx: &mut Context<Self>) -> AnyElement {
         let ws = self.workspace.read(cx);
         let actions = [
-            ("new", "New chat", IconName::SquarePen, "⌘N"),
-            ("review", "Review uncommitted changes", IconName::Eye, ""),
-            ("compact", "Compact conversation", IconName::Minimize2, ""),
-            ("attach", "Attach files…", IconName::Paperclip, ""),
-            ("folder", "Choose working folder…", IconName::FolderOpen, ""),
-            ("sidebar", "Toggle sidebar", IconName::PanelLeft, "⌘B"),
-            ("settings", "Settings", IconName::Settings, "⌘,"),
-            ("restart", "Restart Codex", IconName::RefreshCw, ""),
+            ("new", t("New chat"), IconName::SquarePen, "⌘N"),
+            ("review", t("Review uncommitted changes"), IconName::Eye, ""),
             (
-                "goal",
-                "Set a goal for this chat…",
-                IconName::ListChecks,
+                "compact",
+                t("Compact conversation"),
+                IconName::Minimize2,
                 "",
             ),
-            ("branch", "Branch this chat", IconName::GitBranch, ""),
+            ("attach", t("Attach files…"), IconName::Paperclip, ""),
             (
-                "memory",
-                "Toggle memory for this chat",
-                IconName::History,
-                "",
-            ),
-            ("usage", "Account & usage", IconName::Gauge, ""),
-            ("context", "Context & speed", IconName::Zap, "⌘I"),
-            (
-                "project",
-                "Open a folder as a project…",
+                "folder",
+                t("Choose working folder…"),
                 IconName::FolderOpen,
                 "",
             ),
-            ("stream", "New workstream…", IconName::Layers, ""),
-            ("chats", "Go to chats", IconName::MessageSquare, ""),
-            ("fast", "Toggle Fast mode", IconName::Zap, ""),
-            ("plan", "Toggle Plan mode", IconName::ListChecks, ""),
+            ("sidebar", t("Toggle sidebar"), IconName::PanelLeft, "⌘B"),
+            ("settings", t("Settings"), IconName::Settings, "⌘,"),
+            ("restart", t("Restart Codex"), IconName::RefreshCw, ""),
+            (
+                "goal",
+                t("Set a goal for this chat…"),
+                IconName::ListChecks,
+                "",
+            ),
+            ("branch", t("Branch this chat"), IconName::GitBranch, ""),
+            (
+                "memory",
+                t("Toggle memory for this chat"),
+                IconName::History,
+                "",
+            ),
+            ("usage", t("Account & usage"), IconName::Gauge, ""),
+            ("context", t("Context & speed"), IconName::Zap, "⌘I"),
+            (
+                "project",
+                t("Open a folder as a project…"),
+                IconName::FolderOpen,
+                "",
+            ),
+            ("stream", t("New workstream…"), IconName::Layers, ""),
+            ("chats", t("Go to chats"), IconName::MessageSquare, ""),
+            ("fast", t("Toggle Fast mode"), IconName::Zap, ""),
+            ("plan", t("Toggle Plan mode"), IconName::ListChecks, ""),
             (
                 "predict",
-                "Toggle next-message predictions",
+                t("Toggle next-message predictions"),
                 IconName::Sparkles,
                 "",
             ),
@@ -676,7 +706,7 @@ impl RootView {
         let modes = AccessMode::ALL.map(|mode| {
             Command::new(
                 format!("mode:{}", mode.sandbox_mode()),
-                format!("Access: {}", mode.label()),
+                tf("Access: {mode}", &[("mode", &t(mode.label()))]),
             )
             .icon(match mode {
                 AccessMode::ReadOnly => IconName::Lock,
@@ -685,9 +715,11 @@ impl RootView {
             })
         });
         let themes = [
-            ("theme:system", "Theme: match system", IconName::Monitor),
-            ("theme:light", "Theme: light", IconName::Sun),
-            ("theme:dark", "Theme: dark", IconName::Moon),
+            ("theme:system", t("Theme: match system"), IconName::Monitor),
+            ("theme:light", t("Theme: light"), IconName::Sun),
+            ("theme:dark", t("Theme: dark"), IconName::Moon),
+            ("lang:zh", "界面语言：中文", IconName::Languages),
+            ("lang:en", "Language: English", IconName::Languages),
         ]
         .map(|(value, label, icon)| Command::new(value, label).icon(icon));
         let agents: Vec<Command> = std::iter::once(("codex".to_string(), "Codex".to_string()))
@@ -708,8 +740,11 @@ impl RootView {
                 (id, label)
             }))
             .map(|(id, name)| {
-                Command::new(format!("agent:{id}"), format!("New chat with {name}"))
-                    .icon(IconName::Bot)
+                Command::new(
+                    format!("agent:{id}"),
+                    tf("New chat with {name}", &[("name", &name)]),
+                )
+                .icon(IconName::Bot)
             })
             .collect();
         let chats: Vec<Command> = ws
@@ -726,11 +761,11 @@ impl RootView {
         CommandPalette::new("palette", move |window, cx| {
             close.update(cx, |this, cx| this.close_overlay(window, cx))
         })
-        .group("Actions", actions)
-        .group("Agents", agents)
-        .group("Chats", chats)
-        .group("Access", modes)
-        .group("Appearance", themes)
+        .group(t("Actions"), actions)
+        .group(t("Agents"), agents)
+        .group(t("Chats"), chats)
+        .group(t("Access"), modes)
+        .group(t("Appearance"), themes)
         .on_run(move |value, window, cx| {
             let value = value.to_string();
             run.update(cx, |this, cx| this.run_command(&value, window, cx))
@@ -797,6 +832,13 @@ impl RootView {
                         _ => ThemePref::System,
                     };
                     workspace.update(cx, |ws, cx| ws.set_theme(pref, cx));
+                } else if let Some(language) = other.strip_prefix("lang:") {
+                    let language = if language == "zh" {
+                        crate::i18n::Language::Chinese
+                    } else {
+                        crate::i18n::Language::English
+                    };
+                    workspace.update(cx, |ws, cx| ws.set_language(language, cx));
                 }
             }
         }
@@ -844,9 +886,9 @@ impl RootView {
                 ThemePref::Dark => "dark",
             };
             SegmentedControl::new("theme", selected)
-                .segment("system", "System", Some(IconName::Monitor))
-                .segment("light", "Light", Some(IconName::Sun))
-                .segment("dark", "Dark", Some(IconName::Moon))
+                .segment("system", t("System"), Some(IconName::Monitor))
+                .segment("light", t("Light"), Some(IconName::Sun))
+                .segment("dark", t("Dark"), Some(IconName::Moon))
                 .size(ControlSize::Sm)
                 .on_change(move |value, _, cx| {
                     let pref = match value.as_ref() {
@@ -857,12 +899,34 @@ impl RootView {
                     workspace.update(cx, |ws, cx| ws.set_theme(pref, cx));
                 })
         };
+        let language = {
+            use crate::i18n::Language;
+            let workspace = self.workspace.clone();
+            let selected = match ws.settings.language {
+                Language::System => "system",
+                Language::English => "en",
+                Language::Chinese => "zh",
+            };
+            SegmentedControl::new("language", selected)
+                .segment("system", t("Match system"), Some(IconName::Monitor))
+                .segment("en", "English", None)
+                .segment("zh", "中文", None)
+                .size(ControlSize::Sm)
+                .on_change(move |value, _, cx| {
+                    let language = match value.as_ref() {
+                        "en" => Language::English,
+                        "zh" => Language::Chinese,
+                        _ => Language::System,
+                    };
+                    workspace.update(cx, |ws, cx| ws.set_language(language, cx));
+                })
+        };
         let access = {
             let workspace = self.workspace.clone();
             let mut control = SegmentedControl::new("access", ws.settings.mode.sandbox_mode())
                 .size(ControlSize::Sm);
             for mode in AccessMode::ALL {
-                control = control.segment(mode.sandbox_mode(), mode.label(), None);
+                control = control.segment(mode.sandbox_mode(), t(mode.label()), None);
             }
             control.on_change(move |value, _, cx| {
                 if let Some(mode) = AccessMode::ALL
@@ -873,16 +937,21 @@ impl RootView {
                 }
             })
         };
-        let about = format!(
-            "{} · settings in {}",
-            ws.backend_label,
-            dirs::config_dir()
-                .map(|dir| composer::short_path(&dir.join("Atrium")))
-                .unwrap_or_default()
+        let about = tf(
+            "{agent} · settings in {path}",
+            &[
+                ("agent", &ws.backend_label),
+                (
+                    "path",
+                    &dirs::config_dir()
+                        .map(|dir| composer::short_path(&dir.join("Atrium")))
+                        .unwrap_or_default(),
+                ),
+            ],
         );
         let close = cx.entity();
         let save = (cx.entity(), self.workspace.clone(), codex_path.clone());
-        Dialog::new("settings", "Settings", move |window, cx| {
+        Dialog::new("settings", t("Settings"), move |window, cx| {
             close.update(cx, |this, cx| this.close_overlay(window, cx))
         })
         .detail(about)
@@ -897,20 +966,25 @@ impl RootView {
                 .gap_5()
                 .w_full()
                 .child(section(
-                    "Appearance",
-                    "Follow macOS, or keep one look.",
+                    t("Language"),
+                    t("The interface's language. Agents answer in whatever language you write to them."),
+                    language.into_any_element(),
+                ))
+                .child(section(
+                    t("Appearance"),
+                    t("Follow macOS, or keep one look."),
                     appearance.into_any_element(),
                 ))
                 .child(section(
-                    "Default access for new chats",
-                    ws.settings.mode.description(),
+                    t("Default access for new chats"),
+                    t(ws.settings.mode.description()),
                     access.into_any_element(),
                 ))
                 .child(section(
-                    "Suggestions",
-                    "After each answer Codex guesses your next message; Tab takes it. Each guess uses a little of your plan.",
+                    t("Suggestions"),
+                    t("After each answer Codex guesses your next message; Tab takes it. Each guess uses a little of your plan."),
                     Switch::new("predict", !ws.settings.no_predictions)
-                        .label("Predict my next message")
+                        .label(t("Predict my next message"))
                         .on_change({
                             let workspace = self.workspace.clone();
                             move |on, _, cx| {
@@ -924,29 +998,29 @@ impl RootView {
                         .into_any_element(),
                 ))
                 .child(section(
-                    "Agents",
-                    "Claude Code, DeepSeek Harness and Antigravity run over the Agent Client Protocol. Set a command per agent with `agent_commands` in settings.json.",
+                    t("Agents"),
+                    t("Claude Code, DeepSeek Harness and Antigravity run over the Agent Client Protocol. Set a command per agent with `agent_commands` in settings.json."),
                     agents,
                 ))
                 .child(section(
-                    "Devices",
-                    "Agents on your other computers, through atrium-node over Tailscale. Their chats show the device's name.",
+                    t("Devices"),
+                    t("Agents on your other computers, through atrium-node over Tailscale. Their chats show the device's name."),
                     devices,
                 ))
                 .child(section(
                     "Codex CLI",
-                    "Path to the codex binary. Saving restarts Codex.",
+                    t("Path to the codex binary. Saving restarts Codex."),
                     Input::new(codex_path).into_any_element(),
                 )),
         )
         .action(|close| {
-            Button::new("settings-cancel", "Close")
+            Button::new("settings-cancel", t("Close"))
                 .variant(ButtonVariant::Ghost)
                 .on_click(move |_, window, cx| close(window, cx))
         })
         .action(move |close| {
             let (root, workspace, field) = save;
-            Button::new("settings-save", "Save")
+            Button::new("settings-save", t("Save"))
                 .primary()
                 .on_click(move |_, window, cx| {
                     let text = field.read(cx).text().trim().to_string();
@@ -1028,13 +1102,13 @@ impl Render for RootView {
                 let (close, submit) = (cx.entity(), cx.entity());
                 let (thread_id, workspace) = (thread_id.clone(), self.workspace.clone());
                 Some(
-                    PromptDialog::new("rename", "Rename chat", field, move |window, cx| {
+                    PromptDialog::new("rename", t("Rename chat"), field, move |window, cx| {
                         close.update(cx, |this, cx| this.close_overlay(window, cx))
                     })
-                    .submit("Rename")
+                    .submit(t("Rename"))
                     .check(|text| {
                         if text.trim().is_empty() {
-                            Err("A chat needs a name.".into())
+                            Err(t("A chat needs a name.").into())
                         } else {
                             Ok(())
                         }
@@ -1065,16 +1139,28 @@ impl Render for RootView {
     }
 }
 
+/// "5-hour limit", "Weekly limit", in the language shown.
+fn window_label(window: &atrium_core::RateWindow) -> String {
+    match window.window_mins {
+        Some(300) => t("5-hour limit").into(),
+        Some(10080) => t("Weekly limit").into(),
+        Some(mins) if mins % 1440 == 0 => tf("{n}-day limit", &[("n", &(mins / 1440))]),
+        Some(mins) if mins % 60 == 0 => tf("{n}-hour limit", &[("n", &(mins / 60))]),
+        Some(mins) => tf("{n}-minute limit", &[("n", &mins)]),
+        None => t("Usage limit").into(),
+    }
+}
+
 /// " · resets in 2h 17m" for a reset time in Unix seconds.
 fn resets_in(at: i64) -> String {
     let left = at - jiff::Timestamp::now().as_second();
     if left <= 0 {
-        return " · resets now".into();
+        return t(" · resets now").into();
     }
     let (days, hours, mins) = (left / 86400, left % 86400 / 3600, left % 3600 / 60);
     match (days, hours) {
-        (0, 0) => format!(" · resets in {mins}m"),
-        (0, h) => format!(" · resets in {h}h {mins}m"),
-        (d, h) => format!(" · resets in {d}d {h}h"),
+        (0, 0) => tf(" · resets in {mins}m", &[("mins", &mins)]),
+        (0, h) => tf(" · resets in {h}h {mins}m", &[("h", &h), ("mins", &mins)]),
+        (d, h) => tf(" · resets in {d}d {h}h", &[("d", &d), ("h", &h)]),
     }
 }

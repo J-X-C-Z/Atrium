@@ -2,6 +2,7 @@
 //! each its own process and event pump, their sessions mixed into the same
 //! thread list and transcripts as Codex's.
 
+use crate::i18n::tf;
 use std::time::Instant;
 
 use acp_client::{AcpClient, AcpConfig, AgentInfo};
@@ -335,9 +336,10 @@ impl Workspace {
                             cx.notify();
                         }
                         Ok(None) => {}
-                        Err(error) => {
-                            cx.emit(Notice::Error(format!("Could not change that: {error:#}")))
-                        }
+                        Err(error) => cx.emit(Notice::Error(tf(
+                            "Could not change that: {error}",
+                            &[("error", &format!("{error:#}"))],
+                        ))),
                     });
                 })
                 .detach();
@@ -420,16 +422,16 @@ impl Workspace {
     pub(super) fn acp_send(&mut self, composed: Composed, cx: &mut Context<Self>) {
         let backend = self.view_backend().to_string();
         let Some(client) = self.acp(&backend) else {
-            cx.emit(Notice::Error(format!(
-                "{} is not running.",
-                agents::backend_name(&backend)
+            cx.emit(Notice::Error(tf(
+                "{agent} is not running.",
+                &[("agent", &agents::backend_label(&backend))],
             )));
             return;
         };
         if self.is_running() {
-            cx.emit(Notice::Info(format!(
-                "{} is still working; wait for it, or stop it first.",
-                agents::backend_name(&backend)
+            cx.emit(Notice::Info(tf(
+                "{agent} is still working; wait for it, or stop it first.",
+                &[("agent", &agents::backend_label(&backend))],
             )));
             return;
         }
@@ -613,9 +615,9 @@ impl Workspace {
         let Some(meta) = meta else { return };
         let Some(client) = self.acp(&meta.backend) else {
             let mut transcript = Transcript::new();
-            transcript.fail_pending_turn(format!(
-                "{} is not running, so this chat cannot open yet.",
-                agents::backend_name(&meta.backend)
+            transcript.fail_pending_turn(tf(
+                "{agent} is not running, so this chat cannot open yet.",
+                &[("agent", &agents::backend_label(&meta.backend))],
             ));
             self.transcripts.insert(session, transcript);
             return;
@@ -638,9 +640,9 @@ impl Workspace {
                                 turn_id: String::new(),
                                 item: Item::Other {
                                     id: format!("{session}#resumed"),
-                                    label: format!(
-                                        "{} does not send past messages; the chat continues from here",
-                                        agents::backend_name(&meta.backend)
+                                    label: tf(
+                                        "{agent} does not send past messages; the chat continues from here",
+                                        &[("agent", &agents::backend_name(&meta.backend))],
                                     ),
                                 },
                             });
@@ -648,7 +650,8 @@ impl Workspace {
                     }
                     Err(error) => {
                         let transcript = ws.transcripts.entry(session.clone()).or_default();
-                        transcript.fail_pending_turn(format!("Could not open this chat: {error:#}"));
+                        transcript.fail_pending_turn(tf(
+"Could not open this chat: {error}", &[("error", &format!("{error:#}"))]));
                     }
                 }
                 // Rows replayed from history do not animate in.

@@ -20,6 +20,7 @@ use gpui::{
 };
 
 use super::{NewChat, OpenSettings, ToggleSidebar};
+use crate::i18n::{t, tf};
 use crate::workspace::{Composed, Status, Workspace, is_image};
 
 pub struct Composer {
@@ -39,7 +40,12 @@ pub struct Composer {
 
 actions!(atrium, [AcceptPrediction]);
 
-const DEFAULT_PLACEHOLDER: &str = "Ask Codex anything. @ to add files, / for commands";
+fn default_placeholder() -> String {
+    tf(
+        "Ask {agent} anything. @ to add files, / for commands",
+        &[("agent", &"Codex")],
+    )
+}
 
 /// Slash commands: value, label, icon, what it says.
 const COMMANDS: [(&str, &str, IconName, &str); 6] = [
@@ -81,7 +87,7 @@ impl Composer {
         let draft = cx.new(|cx| {
             TextInput::new(window, cx)
                 .multi_line(1, 12)
-                .placeholder(DEFAULT_PLACEHOLDER)
+                .placeholder(default_placeholder())
         });
         let subscriptions = vec![
             cx.observe(&draft, |this, _, cx| this.watch_mention(cx)),
@@ -94,7 +100,7 @@ impl Composer {
             mentions: Vec::new(),
             found: Vec::new(),
             searched: None,
-            placeholder: DEFAULT_PLACEHOLDER.into(),
+            placeholder: default_placeholder().into(),
             _search: None,
             _subscriptions: subscriptions,
         }
@@ -203,25 +209,25 @@ impl Composer {
         let wanted: SharedString = if let Some(prediction) = ws.prediction() {
             format!("{prediction}   ⇥ Tab").into()
         } else if ws.is_running() && ws.is_codex_view() {
-            "Add to what Codex is doing: it reads this at its next step".into()
+            t("Add to what Codex is doing: it reads this at its next step").into()
         } else if ws.is_running() {
-            format!(
-                "{} is working. Wait for it, or stop it to change course",
-                crate::agents::backend_name(ws.view_backend())
+            tf(
+                "{agent} is working. Wait for it, or stop it to change course",
+                &[("agent", &crate::agents::backend_name(ws.view_backend()))],
             )
             .into()
         } else if ws.editing.is_some() {
-            "Edit your message".into()
+            t("Edit your message").into()
         } else if ws.settings.plan_mode {
-            "Describe the change: Codex plans first and waits for you".into()
+            t("Describe the change: Codex plans first and waits for you").into()
         } else if !ws.is_codex_view() {
-            format!(
-                "Ask {} anything. @ to add files, / for commands",
-                crate::agents::backend_name(ws.view_backend())
+            tf(
+                "Ask {agent} anything. @ to add files, / for commands",
+                &[("agent", &crate::agents::backend_name(ws.view_backend()))],
             )
             .into()
         } else {
-            DEFAULT_PLACEHOLDER.into()
+            default_placeholder().into()
         };
         if wanted != self.placeholder {
             self.placeholder = wanted.clone();
@@ -250,7 +256,7 @@ impl Composer {
             files: true,
             directories: false,
             multiple: true,
-            prompt: Some("Attach".into()),
+            prompt: Some(t("Attach").into()),
         });
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(paths))) = picked.await {
@@ -292,9 +298,11 @@ impl Composer {
             ToggleButton::new(
                 "plan-mode",
                 ToggleItem::new("plan")
-                    .label("Plan")
+                    .label(t("Plan"))
                     .icon(IconName::ListChecks)
-                    .tooltip("Plan mode: Codex proposes a plan and waits before changing anything"),
+                    .tooltip(t(
+                        "Plan mode: Codex proposes a plan and waits before changing anything",
+                    )),
                 ws.settings.plan_mode,
             )
             .size(ControlSize::Sm)
@@ -313,9 +321,9 @@ impl Composer {
                 ToggleButton::new(
                     "fast",
                     ToggleItem::new("fast")
-                        .label("Fast")
+                        .label(t("Fast"))
                         .icon(IconName::Zap)
-                        .tooltip("About twice the speed; uses more of your plan's usage"),
+                        .tooltip(t("About twice the speed; uses more of your plan's usage")),
                     ws.settings.fast,
                 )
                 .size(ControlSize::Sm)
@@ -337,7 +345,7 @@ impl Composer {
             let workspace = self.workspace.clone();
             menu = menu.item(
                 MenuItem::radio(
-                    format!("{} — {}", mode.label(), mode.description()),
+                    format!("{} — {}", t(mode.label()), t(mode.description())),
                     mode == current,
                 )
                 .on_click(move |_, cx| workspace.update(cx, |ws, cx| ws.set_mode(mode, cx))),
@@ -349,7 +357,7 @@ impl Composer {
             AccessMode::FullAccess => IconName::LockOpen,
         };
         tools.push(
-            DropdownMenu::new("mode", current.label(), menu)
+            DropdownMenu::new("mode", t(current.label()), menu)
                 .icon(icon)
                 .variant(ButtonVariant::Ghost)
                 .into_any_element(),
@@ -373,7 +381,7 @@ impl Composer {
             let label = effort
                 .as_deref()
                 .map(title_case)
-                .unwrap_or_else(|| "Effort".into());
+                .unwrap_or_else(|| t("Effort").into());
             tools.push(
                 DropdownMenu::new("effort", label, menu)
                     .icon(IconName::Gauge)
@@ -427,7 +435,7 @@ impl Composer {
                 ));
             }
             tools.push(
-                DropdownMenu::new("agent-options", "Options", menu)
+                DropdownMenu::new("agent-options", t("Options"), menu)
                     .icon(IconName::SlidersHorizontal)
                     .variant(ButtonVariant::Ghost)
                     .into_any_element(),
@@ -486,7 +494,7 @@ impl Composer {
             IconButton::new("attach", IconName::Paperclip)
                 .variant(ButtonVariant::Ghost)
                 .size(ControlSize::Sm)
-                .tooltip("Attach images or files")
+                .tooltip(t("Attach images or files"))
                 .on_click(move |_, _, cx| this.update(cx, |this, cx| this.pick_files(cx)))
                 .into_any_element(),
         );
@@ -527,7 +535,7 @@ impl Composer {
                         pick(root.clone(), label, IconName::House, *root == folder)
                     })
                     .collect();
-                menu = menu.group("Roots", roots);
+                menu = menu.group(t("Roots"), roots);
             }
             let parent = std::path::Path::new(&folder)
                 .parent()
@@ -540,7 +548,7 @@ impl Composer {
             if let Some(parent) = parent.filter(|p| inside_roots(p)) {
                 here.push(pick(
                     parent,
-                    "Up one level".into(),
+                    t("Up one level").into(),
                     IconName::ChevronLeft,
                     false,
                 ));
@@ -550,9 +558,15 @@ impl Composer {
                     let path = format!("{}/{name}", folder.trim_end_matches('/'));
                     pick(path, name.clone(), IconName::Folder, false)
                 })),
-                None => here.push(MenuItem::new("Loading…").disabled(true)),
+                None => here.push(MenuItem::new(t("Loading…")).disabled(true)),
             }
-            menu = menu.group(format!("In {}", folder_name(Path::new(&folder))), here);
+            menu = menu.group(
+                tf(
+                    "In {folder}",
+                    &[("folder", &folder_name(Path::new(&folder)))],
+                ),
+                here,
+            );
             tools.push(
                 DropdownMenu::new(
                     "folder",
@@ -582,7 +596,7 @@ impl Composer {
             }
             let workspace = self.workspace.clone();
             menu = menu.separator().item(
-                MenuItem::new("Choose a folder…")
+                MenuItem::new(t("Choose a folder…"))
                     .icon(IconName::FolderOpen)
                     .on_click(move |_, cx| choose_folder(workspace.clone(), cx)),
             );
@@ -602,7 +616,7 @@ pub fn choose_folder(workspace: Entity<Workspace>, cx: &mut App) {
         files: false,
         directories: true,
         multiple: false,
-        prompt: Some("Use this folder".into()),
+        prompt: Some(t("Use this folder").into()),
     });
     cx.spawn(async move |cx| {
         if let Ok(Ok(Some(paths))) = picked.await
@@ -631,6 +645,9 @@ pub fn short_path(path: &Path) -> String {
 }
 
 fn title_case(word: &str) -> String {
+    if crate::i18n::chinese() {
+        return crate::i18n::t_any(word);
+    }
     match word {
         "xhigh" => "Extra high".into(),
         _ => {
@@ -654,15 +671,17 @@ impl Render for Composer {
         let ws = self.workspace.read(cx);
         let running = ws.is_running();
         let notice: Option<SharedString> = match &ws.status {
-            Status::Connecting => Some("Starting Codex…".into()),
-            Status::Failed(_) => Some("Codex is not running. Restart it from the sidebar.".into()),
+            Status::Connecting => Some(t("Starting Codex…").into()),
+            Status::Failed(_) => {
+                Some(t("Codex is not running. Restart it from the sidebar.").into())
+            }
             Status::Ready => ws
                 .transcript()
                 .and_then(|t| t.notice())
                 .map(|notice| SharedString::from(notice.to_string()))
                 .or_else(|| {
                     (ws.signed_in == Some(false)).then(|| {
-                        "Not signed in: sign in with ChatGPT from the sidebar to use your plan."
+                        t("Not signed in: sign in with ChatGPT from the sidebar to use your plan.")
                             .into()
                     })
                 }),
@@ -680,7 +699,7 @@ impl Render for Composer {
                 IconButton::new("stop", IconName::Square)
                     .variant(ButtonVariant::Outline)
                     .size(ControlSize::Sm)
-                    .tooltip("Stop (⌘.)")
+                    .tooltip(t("Stop (⌘.)"))
                     .on_click(move |_, _, cx| workspace.update(cx, |ws, cx| ws.stop(cx))),
             );
         }
@@ -700,10 +719,12 @@ impl Render for Composer {
                             .size(IconSize::Xs)
                             .color(colors.accent),
                     )
-                    .child("Editing a message: sending replaces it and everything after")
+                    .child(t(
+                        "Editing a message: sending replaces it and everything after",
+                    ))
                     .child(div().flex_1())
                     .child(
-                        Button::new("cancel-edit", "Cancel")
+                        Button::new("cancel-edit", t("Cancel"))
                             .variant(ButtonVariant::Ghost)
                             .size(ControlSize::Sm)
                             .on_click(move |_, _, cx| {
@@ -746,7 +767,7 @@ impl Render for Composer {
         let mut commands: Vec<Choice> = COMMANDS
             .iter()
             .filter(|(value, ..)| codex || !matches!(*value, "review" | "compact"))
-            .map(|(value, label, icon, note)| Choice::new(*value, *label).icon(*icon).note(*note))
+            .map(|(value, label, icon, note)| Choice::new(*value, *label).icon(*icon).note(t(note)))
             .collect();
         for command in self.workspace.read(cx).agent_slash_commands() {
             commands.push(
@@ -811,9 +832,14 @@ impl Render for Composer {
                     .text_size(theme.text_size(TextSize::Xs))
                     .text_color(colors.fg_subtle)
                     .child(notice.unwrap_or_else(|| {
-                        format!(
-                            "{} can make mistakes. Review its changes before you ship them.",
-                            crate::agents::backend_name(self.workspace.read(cx).view_backend())
+                        tf(
+                            "{agent} can make mistakes. Review its changes before you ship them.",
+                            &[(
+                                "agent",
+                                &crate::agents::backend_name(
+                                    self.workspace.read(cx).view_backend(),
+                                ),
+                            )],
                         )
                         .into()
                     })),
