@@ -1,5 +1,5 @@
-//! AgentDesk: a native desktop front end for coding agents, built on GPUI.
-//! This first cut drives the Codex CLI (`codex app-server`).
+//! Atrium: a native desktop home for coding agents, built on GPUI. Each
+//! session works on its own; the atrium is where they share and align.
 
 mod agents;
 mod settings;
@@ -57,11 +57,11 @@ fn main() {
             };
             cx.set_menus([
                 menu(
-                    "AgentDesk",
+                    "Atrium",
                     vec![
                         MenuItem::action("Settings…", OpenSettings),
                         MenuItem::separator(),
-                        MenuItem::action("Quit AgentDesk", Quit),
+                        MenuItem::action("Quit Atrium", Quit),
                     ],
                 ),
                 menu(
@@ -95,12 +95,12 @@ fn main() {
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
-                    title: Some("AgentDesk".into()),
+                    title: Some("Atrium".into()),
                     appears_transparent: true,
                     traffic_light_position: Some(point(px(14.), px(15.))),
                 }),
                 window_min_size: Some(size(px(640.), px(480.))),
-                app_id: Some("dev.agentdesk".into()),
+                app_id: Some("dev.atrium".into()),
                 ..Default::default()
             };
             gpui_kit::open_window(options, cx, |window, cx| {

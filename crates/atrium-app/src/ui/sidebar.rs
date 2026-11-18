@@ -1,7 +1,7 @@
 //! Left column: new chat, search, conversations by day, and the backend's
 //! state. Folds into an icon rail, its width animated.
 
-use agentdesk_core::{Account, plan_label};
+use atrium_core::{Account, plan_label};
 use ely_gpui_component::{
     buttons::{ButtonVariant, IconButton},
     chat::{Conversation, ConversationList, new_chat_button},

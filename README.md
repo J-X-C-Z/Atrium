@@ -1,4 +1,6 @@
-# AgentDesk
+# Atrium
+
+> 每个会话是一个独立的房间，各自朝长期目标推进；中庭是它们共享、对齐信息的地方。
 
 基于 Rust + [GPUI](https://www.gpui.rs) 的原生 Agent 桌面前端：类 ChatGPT 的对话界面，后端对接 **Codex CLI**（`codex app-server`），以及通过 Agent Client Protocol（ACP）对接的 **Claude Code**、**DeepSeek Harness**、**Antigravity**。
 
@@ -9,14 +11,14 @@ UI 组件：[Ely GPUI Components](https://github.com/ZacharyZhang-NY/Ely-GPUI-Co
 前置：Rust 1.95+；已安装并登录 Codex CLI（`npm i -g @openai/codex` 或 `brew install codex`，然后 `codex login`）。不需要完整 Xcode（GPUI 运行时编译 Metal shader）。
 
 ```bash
-cargo run -p agentdesk-app
+cargo run -p atrium-app
 ```
 
 没有 Codex 账号也能开发 UI：用自带的 mock 后端（同一套协议、脚本化的回答；消息里带 "run" 会触发命令审批，带 "edit" 会产生文件修改）：
 
 ```bash
 cargo build -p codex-client --bin mock-codex
-CODEX_BIN=target/debug/mock-codex cargo run -p agentdesk-app
+CODEX_BIN=target/debug/mock-codex cargo run -p atrium-app
 ```
 
 打包 `.app`：
@@ -34,13 +36,13 @@ script/bundle-macos.sh
 | DeepSeek Harness | `dsh --profile acp` | `dsh`（`npm i -g @deepseek-ai/dsh`） |
 | Antigravity | `agy acp`（agy 1.5+） | Antigravity CLI，首次运行 `agy acp --login` |
 
-启动时自动在 `PATH`（以及登录 shell 的 `PATH`）里查找；找不到的 agent 在选择器里显示为未安装，设置里给出安装命令。可以按 agent 覆盖启动命令：设置文件里的 `agent_commands`（如 `{"deepseek": "/opt/dsh --profile acp"}`），或环境变量 `AGENTDESK_CLAUDE_ACP` / `AGENTDESK_DEEPSEEK_ACP` / `AGENTDESK_ANTIGRAVITY_ACP`。
+启动时自动在 `PATH`（以及登录 shell 的 `PATH`）里查找；找不到的 agent 在选择器里显示为未安装，设置里给出安装命令。可以按 agent 覆盖启动命令：设置文件里的 `agent_commands`（如 `{"deepseek": "/opt/dsh --profile acp"}`），或环境变量 `ATRIUM_CLAUDE_ACP` / `ATRIUM_DEEPSEEK_ACP` / `ATRIUM_ANTIGRAVITY_ACP`。
 
 - **新对话**：顶栏选 agent（记住上次的选择）。选中后会提前建好一个会话，于是输入框立即显示该 agent 自己的设置（模式、模型、推理强度……，其余收在 "Options" 里），第一条消息也更快。
 - **对话中**：流式回答、思考过程、工具调用（命令、文件读写、diff）、计划、权限审批、token 用量、该 agent 的斜杠命令，与 Codex 用同一套界面。
 - **历史**：侧边栏合并显示所有 agent 的会话（标注来源）。能回放历史的 agent（Claude、Antigravity）打开时重放；只能恢复的（DeepSeek）继续会话并注明没有历史。
 - **Codex 专属**：预测下一句、长期目标、记忆、编辑重发、分支、代码审查、压缩、全文搜索、账号与用量。这些在其他 agent 的对话里不显示。
-- AgentDesk 不向 agent 提供文件系统和终端能力：读写文件、运行命令都由 agent 自己完成，需要时通过权限请求来问你。
+- Atrium 不向 agent 提供文件系统和终端能力：读写文件、运行命令都由 agent 自己完成，需要时通过权限请求来问你。
 
 ## 已实现
 
@@ -79,11 +81,11 @@ script/bundle-macos.sh
 - 新消息上浮淡入；历史加载时显示骨架屏；Toast 通知
 - 命令面板 ⌘K：动作、对话跳转、访问模式、主题
 - 设置 ⌘,：主题（跟随系统 / 浅色 / 深色）、默认访问模式、Codex 路径（保存后重启 Codex）
-- 设置保存在 `~/Library/Application Support/AgentDesk/settings.json`
+- 设置保存在 `~/Library/Application Support/Atrium/settings.json`
 
 **订阅（ChatGPT Plus / Pro）相关**
 
-AgentDesk 以 `experimentalApi` 连接 Codex app-server，下面这些都走的是 Codex 自己的协议，用的就是你在 Codex 里登录的 ChatGPT 订阅，不需要另配 API key。
+Atrium 以 `experimentalApi` 连接 Codex app-server，下面这些都走的是 Codex 自己的协议，用的就是你在 Codex 里登录的 ChatGPT 订阅，不需要另配 API key。
 
 | 功能 | 做法 |
 |---|---|
@@ -124,11 +126,11 @@ mock 后端的触发词：消息里带 `run`（命令 + 审批）、`edit`（文
 
 ```
 crates/
-  agentdesk-core/   与后端无关的模型：ThreadMeta / Item / AgentEvent / ConfigOption，以及把事件折叠成扁平行列表的 Transcript
+  atrium-core/   与后端无关的模型：ThreadMeta / Item / AgentEvent / ConfigOption，以及把事件折叠成扁平行列表的 Transcript
   agent-rpc/        共享传输层：子进程 stdio 上的行分隔 JSON-RPC（可选 JSON-RPC 2.0），查找可执行文件
   codex-client/     codex app-server 客户端与协议翻译；含 mock-codex
   acp-client/       ACP 客户端：握手、会话（new/load/resume/list/prompt/cancel/设置）、权限；把 session/update 翻译成 AgentEvent（为没有 id 的 ACP 合成轮次与条目）；含 mock-acp（可模仿 claude / deepseek / antigravity）
-  agentdesk-app/    GPUI 应用：Workspace（状态与后端调用）+ ui/（sidebar、chat、composer、rows、调色板与设置）
+  atrium-app/    GPUI 应用：Workspace（状态与后端调用）+ ui/（sidebar、chat、composer、rows、调色板与设置）
 ```
 
 数据流只有一个方向：
@@ -140,7 +142,7 @@ ACP agents      ──JSON-RPC 2.0─▶ acp-client::Translator ─┴─AgentEv
         └──────────── turn/start · turn/interrupt · 审批应答 ◀──── Workspace ◀─────────┘
 ```
 
-UI 只认识 `agentdesk-core` 的类型，不认识任何后端协议。任何实现了 ACP 的 agent（如 Gemini CLI）都能以同样方式接入：在 `agents.rs` 里加一条配置即可。Codex 协议标注为实验性、每个版本都会加字段，所以翻译层用 `serde_json::Value` 宽松读取：未知字段忽略，未知条目类型显示为普通系统行，不会让整条消息失败。
+UI 只认识 `atrium-core` 的类型，不认识任何后端协议。任何实现了 ACP 的 agent（如 Gemini CLI）都能以同样方式接入：在 `agents.rs` 里加一条配置即可。Codex 协议标注为实验性、每个版本都会加字段，所以翻译层用 `serde_json::Value` 宽松读取：未知字段忽略，未知条目类型显示为普通系统行，不会让整条消息失败。
 
 ## 测试
 
@@ -148,8 +150,8 @@ UI 只认识 `agentdesk-core` 的类型，不认识任何后端协议。任何�
 cargo test --workspace
 ```
 
-- `agentdesk-core`：Transcript 的归并规则（流式拼接、乐观消息去重、审批、失败与断连）；速度测量（首 token、停顿不计时、按轮次的输出数）与用量报告的乱序合并
-- `acp-client`：翻译器单元测试（流式文本与工具交替、历史回放切分轮次、diff 与权限、分组选项与模式），以及四条走真实子进程（mock-acp）的端到端测试：Claude 的完整一轮（计划 + 读文件 + 带审批的命令 + diff）、拒绝命令、Claude 回放历史与 DeepSeek 恢复会话、修改设置与中途取消；另有一条 `--ignored` 测试可对真实 agent 做握手：`AGENTDESK_ACP="dsh --profile acp" cargo test -p acp-client -- --ignored real_agent`
+- `atrium-core`：Transcript 的归并规则（流式拼接、乐观消息去重、审批、失败与断连）；速度测量（首 token、停顿不计时、按轮次的输出数）与用量报告的乱序合并
+- `acp-client`：翻译器单元测试（流式文本与工具交替、历史回放切分轮次、diff 与权限、分组选项与模式），以及四条走真实子进程（mock-acp）的端到端测试：Claude 的完整一轮（计划 + 读文件 + 带审批的命令 + diff）、拒绝命令、Claude 回放历史与 DeepSeek 恢复会话、修改设置与中途取消；另有一条 `--ignored` 测试可对真实 agent 做握手：`ATRIUM_ACP="dsh --profile acp" cargo test -p acp-client -- --ignored real_agent`
 - `codex-client`：JSON-RPC 请求/响应匹配、协议翻译，以及九条走真实子进程的端到端测试：带审批的完整一轮、中断、附件 + 计划 + 用时、重命名 + 压缩 + 审查 + 文件搜索、预测（fork 回退）、插话、编辑/分支/全文搜索、目标 + 账号 + 用量 + 登录登出 + 记忆、提问 + 图片 + Plan 模式 + Fast
 
 ## 下一步

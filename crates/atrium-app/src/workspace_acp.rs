@@ -5,7 +5,7 @@
 use std::time::Instant;
 
 use acp_client::{AcpClient, AcpConfig, AgentInfo};
-use agentdesk_core::{
+use atrium_core::{
     AgentCommand, AgentEvent, ApprovalDecision, ConfigOption, Item, RequestId, ThreadMeta,
     Transcript,
 };

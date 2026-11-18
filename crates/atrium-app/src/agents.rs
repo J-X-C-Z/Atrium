@@ -1,11 +1,11 @@
-//! The agents AgentDesk can drive besides Codex, all over the Agent Client
+//! The agents Atrium can drive besides Codex, all over the Agent Client
 //! Protocol, and how to find each on this machine.
 
 use std::path::PathBuf;
 
 use agent_rpc::process;
 
-/// An ACP agent AgentDesk knows how to start.
+/// An ACP agent Atrium knows how to start.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentProfile {
     /// Tags its threads: `claude`, `deepseek`, `antigravity`.
@@ -21,12 +21,12 @@ pub struct AgentProfile {
 
 /// The ACP agents, with the command each would run here.
 ///
-/// A command can be forced per agent with `AGENTDESK_<ID>_ACP` (such as
-/// `AGENTDESK_CLAUDE_ACP="claude-agent-acp"`), or `agent_commands` in the
+/// A command can be forced per agent with `ATRIUM_<ID>_ACP` (such as
+/// `ATRIUM_CLAUDE_ACP="claude-agent-acp"`), or `agent_commands` in the
 /// settings file; otherwise the usual binaries are looked up on `PATH`.
 pub fn detect(overrides: &std::collections::HashMap<String, String>) -> Vec<AgentProfile> {
     let forced = |id: &str| -> Option<(PathBuf, Vec<String>)> {
-        let text = std::env::var(format!("AGENTDESK_{}_ACP", id.to_uppercase()))
+        let text = std::env::var(format!("ATRIUM_{}_ACP", id.to_uppercase()))
             .ok()
             .or_else(|| overrides.get(id).cloned())?;
         let mut parts = shell_words(&text).into_iter();

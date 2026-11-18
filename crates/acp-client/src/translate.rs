@@ -1,8 +1,8 @@
-//! ACP `session/update`s to AgentDesk events.
+//! ACP `session/update`s to Atrium events.
 
 use std::collections::HashMap;
 
-use agentdesk_core::{
+use atrium_core::{
     AgentCommand, AgentEvent, ApprovalKind, ApprovalRequest, ChangeKind, ConfigChoice,
     ConfigOption, Cost, FileChange, Item, ItemStatus, PlanStep, ThreadMeta, TokenCounts,
     TokenUsage, TurnStatus,
@@ -82,7 +82,7 @@ pub fn config_options(result: &Value) -> Vec<ConfigOption> {
     options
 }
 
-/// The id AgentDesk gives an agent's session modes when it has no mode option.
+/// The id Atrium gives an agent's session modes when it has no mode option.
 pub const MODE_OPTION: &str = "__mode";
 
 fn config_option(option: &Value) -> Option<ConfigOption> {
@@ -758,7 +758,7 @@ fn tool_item(session: &str, call: &Value) -> Item {
 
 #[cfg(test)]
 mod tests {
-    use agentdesk_core::{EntryKind, Transcript};
+    use atrium_core::{EntryKind, Transcript};
     use serde_json::json;
 
     use super::*;

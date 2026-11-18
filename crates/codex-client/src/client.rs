@@ -6,7 +6,7 @@ use std::{
     thread,
 };
 
-use agentdesk_core::{
+use atrium_core::{
     Account, ApprovalDecision, Goal, GoalStatus, Item, RateLimits, RequestId, ThreadMeta,
     TurnStatus,
 };
@@ -244,8 +244,8 @@ impl CodexClient {
                 "initialize",
                 json!({
                     "clientInfo": {
-                        "name": "agentdesk",
-                        "title": "AgentDesk",
+                        "name": "atrium",
+                        "title": "Atrium",
                         "version": env!("CARGO_PKG_VERSION"),
                     },
                     "capabilities": {
@@ -759,7 +759,7 @@ impl CodexClient {
         self.connection.respond_error(
             request_id,
             -32601,
-            &format!("AgentDesk does not support {method} yet"),
+            &format!("Atrium does not support {method} yet"),
         )?;
         Ok(())
     }

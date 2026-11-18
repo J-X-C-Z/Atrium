@@ -4,10 +4,10 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Drives Agent Client Protocol agents (Claude Code, DeepSeek Harness, Antigravity, …) and translates ACP into AgentDesk events."
+description = "Drives Agent Client Protocol agents (Claude Code, DeepSeek Harness, Antigravity, …) and translates ACP into Atrium events."
 
 [dependencies]
-agentdesk-core.workspace = true
+atrium-core.workspace = true
 agent-rpc.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true

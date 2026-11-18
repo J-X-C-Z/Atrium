@@ -3,7 +3,7 @@
 //! without a Codex account:
 //!
 //! ```sh
-//! CODEX_BIN=target/debug/mock-codex cargo run -p agentdesk-app
+//! CODEX_BIN=target/debug/mock-codex cargo run -p atrium-app
 //! ```
 //!
 //! Every message gets a streamed, reasoned answer. A message containing
@@ -840,7 +840,7 @@ fn run_turn(
         if decision.starts_with("accept") {
             let mut output = String::new();
             for line in [
-                "   Compiling agentdesk-core v0.1.0\n",
+                "   Compiling atrium-core v0.1.0\n",
                 "    Finished test profile in 2.31s\n",
                 "running 6 tests\n",
                 "test result: ok. 6 passed; 0 failed\n",

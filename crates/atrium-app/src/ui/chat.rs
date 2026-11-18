@@ -22,7 +22,7 @@ use super::{
     context::format_tokens,
     rows::{self, COLUMN},
 };
-use agentdesk_core::GoalStatus;
+use atrium_core::GoalStatus;
 
 use crate::workspace::{AgentStatus, CODEX, Status, View, Workspace};
 

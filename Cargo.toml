@@ -1,11 +1,11 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/agentdesk-core",
+    "crates/atrium-core",
     "crates/agent-rpc",
     "crates/codex-client",
     "crates/acp-client",
-    "crates/agentdesk-app",
+    "crates/atrium-app",
 ]
 
 [workspace.package]
@@ -26,7 +26,7 @@ jiff = "0.2"
 dirs = "6"
 base64 = "0.22"
 
-agentdesk-core = { path = "crates/agentdesk-core" }
+atrium-core = { path = "crates/atrium-core" }
 codex-client = { path = "crates/codex-client" }
 agent-rpc = { path = "crates/agent-rpc" }
 acp-client = { path = "crates/acp-client" }

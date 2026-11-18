@@ -9,7 +9,7 @@
 //!   from Finder with a bare `PATH`) and spawns it.
 //! * [`CodexClient`] is the typed API the app calls.
 //! * [`translate`] turns Codex notifications and requests into
-//!   [`agentdesk_core::AgentEvent`]s.
+//!   [`atrium_core::AgentEvent`]s.
 
 pub mod translate;
 

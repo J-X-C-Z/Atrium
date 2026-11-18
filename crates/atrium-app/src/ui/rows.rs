@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use std::collections::HashMap;
 
-use agentdesk_core::{
+use atrium_core::{
     ApprovalDecision, ApprovalKind, ChangeKind, Entry, EntryKind, FileChange, Item, ItemStatus,
     PlanStep, Transcript, TurnStatus, UserInputRequest,
 };

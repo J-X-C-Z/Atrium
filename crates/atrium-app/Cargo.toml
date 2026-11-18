@@ -1,16 +1,16 @@
 [package]
-name = "agentdesk-app"
+name = "atrium-app"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "agentdesk"
+name = "atrium"
 path = "src/main.rs"
 
 [dependencies]
-agentdesk-core.workspace = true
+atrium-core.workspace = true
 codex-client.workspace = true
 acp-client.workspace = true
 agent-rpc.workspace = true

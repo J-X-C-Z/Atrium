@@ -1,5 +1,5 @@
 //! A stand-in ACP agent with a scripted brain, for developing and testing
-//! AgentDesk without accounts. `--name` picks whose capabilities it mimics,
+//! Atrium without accounts. `--name` picks whose capabilities it mimics,
 //! as their real handshakes report them:
 //!
 //! * `claude`: loads sessions with history, lists them, steers, five modes

@@ -7,7 +7,7 @@ mod context;
 mod rows;
 mod sidebar;
 
-use agentdesk_core::{Account, plan_label};
+use atrium_core::{Account, plan_label};
 use codex_client::AccessMode;
 use ely_gpui_component::{
     buttons::{Button, ButtonVariant, SegmentedControl},
@@ -35,7 +35,7 @@ pub use composer::AcceptPrediction;
 use composer::Composer;
 
 actions!(
-    agentdesk,
+    atrium,
     [
         NewChat,
         ToggleSidebar,
@@ -817,7 +817,7 @@ impl RootView {
             "{} · settings in {}",
             ws.backend_label,
             dirs::config_dir()
-                .map(|dir| composer::short_path(&dir.join("AgentDesk")))
+                .map(|dir| composer::short_path(&dir.join("Atrium")))
                 .unwrap_or_default()
         );
         let close = cx.entity();
@@ -959,7 +959,7 @@ impl Render for RootView {
         };
         FocusScope::new(&self.focus).root().size_full().child(
             div()
-                .key_context("AgentDesk")
+                .key_context("Atrium")
                 .relative()
                 .size_full()
                 .flex()

@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use agentdesk_core::ConfigOption;
+use atrium_core::ConfigOption;
 use codex_client::AccessMode;
 use ely_gpui_component::{
     buttons::{Button, ButtonVariant, IconButton, ToggleButton, ToggleItem},
@@ -37,7 +37,7 @@ pub struct Composer {
     _subscriptions: Vec<Subscription>,
 }
 
-actions!(agentdesk, [AcceptPrediction]);
+actions!(atrium, [AcceptPrediction]);
 
 const DEFAULT_PLACEHOLDER: &str = "Ask Codex anything. @ to add files, / for commands";
 

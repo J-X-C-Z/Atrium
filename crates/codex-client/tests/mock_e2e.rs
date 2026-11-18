@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use agentdesk_core::{AgentEvent, ApprovalDecision, EntryKind, Item, ItemStatus, Transcript};
+use atrium_core::{AgentEvent, ApprovalDecision, EntryKind, Item, ItemStatus, Transcript};
 use codex_client::{
     AccessMode, CodexClient, CodexConfig, Incoming, StartThread, TurnRequest, translate,
 };
@@ -138,7 +138,7 @@ fn an_interrupted_turn_ends_as_interrupted() {
                 interrupted = true;
             }
             if let AgentEvent::TurnCompleted { status, .. } = event {
-                assert_eq!(status, agentdesk_core::TurnStatus::Interrupted);
+                assert_eq!(status, atrium_core::TurnStatus::Interrupted);
                 break;
             }
         }

@@ -62,7 +62,7 @@ fn login_shell_path() -> Option<OsString> {
         return None;
     }
     let shell = env::var_os("SHELL").unwrap_or_else(|| "/bin/zsh".into());
-    const MARK: &str = "__AGENTDESK_PATH__";
+    const MARK: &str = "__ATRIUM_PATH__";
     let mut child = Command::new(&shell)
         .args(["-l", "-c", &format!("printf '{MARK}%s{MARK}' \"$PATH\"")])
         .stdin(Stdio::null())

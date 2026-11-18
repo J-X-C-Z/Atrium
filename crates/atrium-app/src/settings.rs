@@ -1,5 +1,5 @@
-//! What AgentDesk remembers between launches. Kept small and human-editable:
-//! `~/Library/Application Support/AgentDesk/settings.json` on macOS.
+//! What Atrium remembers between launches. Kept small and human-editable:
+//! `~/Library/Application Support/Atrium/settings.json` on macOS.
 
 use std::path::PathBuf;
 
@@ -52,7 +52,7 @@ pub struct Settings {
 
 impl Settings {
     fn path() -> Option<PathBuf> {
-        Some(dirs::config_dir()?.join("AgentDesk").join("settings.json"))
+        Some(dirs::config_dir()?.join("Atrium").join("settings.json"))
     }
 
     pub fn load() -> Self {

@@ -5,7 +5,7 @@
 //! * [`AcpClient`] starts the agent, runs the handshake and offers typed
 //!   session calls.
 //! * [`Translator`] turns ACP's stream of `session/update`s into
-//!   [`agentdesk_core::AgentEvent`]s. ACP has no turn or item ids, so it
+//!   [`atrium_core::AgentEvent`]s. ACP has no turn or item ids, so it
 //!   makes them: a turn per prompt, a message per run of text chunks, an
 //!   item per tool call; when history is replayed, user messages split turns.
 

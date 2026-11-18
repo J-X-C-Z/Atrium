@@ -8,7 +8,7 @@ use std::{
 };
 
 use agent_rpc::{Connection, Incoming, RpcError, process};
-use agentdesk_core::{AgentEvent, ApprovalDecision, ConfigOption, RequestId, ThreadMeta};
+use atrium_core::{AgentEvent, ApprovalDecision, ConfigOption, RequestId, ThreadMeta};
 use anyhow::{Context as _, Result, anyhow};
 use base64::Engine as _;
 use futures::channel::mpsc;
@@ -17,12 +17,12 @@ use serde_json::{Value, json};
 use crate::translate::{self, MODE_OPTION, Translator};
 
 /// A local marker queued after a session's replayed history.
-const REPLAY_DONE: &str = "_agentdesk/replay_done";
+const REPLAY_DONE: &str = "_atrium/replay_done";
 
 /// How to start an ACP agent.
 #[derive(Clone, Debug)]
 pub struct AcpConfig {
-    /// AgentDesk's id for the agent, such as `claude`; tags its threads.
+    /// Atrium's id for the agent, such as `claude`; tags its threads.
     pub backend: String,
     pub program: PathBuf,
     pub args: Vec<String>,
@@ -130,7 +130,7 @@ impl AcpClient {
                         "fs": { "readTextFile": false, "writeTextFile": false },
                         "terminal": false,
                     },
-                    "clientInfo": { "name": "agentdesk", "title": "AgentDesk", "version": env!("CARGO_PKG_VERSION") },
+                    "clientInfo": { "name": "atrium", "title": "Atrium", "version": env!("CARGO_PKG_VERSION") },
                 }),
             )
             .await
@@ -211,7 +211,7 @@ impl AcpClient {
                 let _ = self.connection.respond_error(
                     id,
                     -32601,
-                    &format!("AgentDesk does not offer {method}"),
+                    &format!("Atrium does not offer {method}"),
                 );
                 Vec::new()
             }

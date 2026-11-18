@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use agentdesk_core::{
+use atrium_core::{
     Account, AgentCommand, AgentEvent, ApprovalDecision, ConfigOption, Goal, GoalStatus, Item,
     RateLimits, RequestId, ThreadMeta, Transcript, TurnStatus,
 };
@@ -601,7 +601,7 @@ impl Workspace {
             && transcript.entries().last().is_some_and(|entry| {
                 matches!(
                     entry.kind,
-                    agentdesk_core::EntryKind::Item(Item::User { .. })
+                    atrium_core::EntryKind::Item(Item::User { .. })
                 )
             })
     }
@@ -1610,7 +1610,7 @@ fn clean_prediction(text: &str) -> String {
         .to_string()
 }
 
-/// `codex_cli_rs/0.169.0 (...)` or `agentdesk/0.169.0 (...)` to `Codex 0.169.0`.
+/// `codex_cli_rs/0.169.0 (...)` or `atrium/0.169.0 (...)` to `Codex 0.169.0`.
 fn backend_label(user_agent: &str) -> String {
     let version = user_agent
         .split_whitespace()
@@ -1629,7 +1629,7 @@ mod tests {
     #[test]
     fn the_backend_label_names_the_version() {
         assert_eq!(
-            backend_label("agentdesk/0.169.0 (Mac OS 15.1; arm64) x"),
+            backend_label("atrium/0.169.0 (Mac OS 15.1; arm64) x"),
             "Codex 0.169.0"
         );
         assert_eq!(backend_label(""), "Codex");

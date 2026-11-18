@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use acp_client::{AcpClient, AcpConfig};
 use agent_rpc::Incoming;
-use agentdesk_core::{AgentEvent, ApprovalDecision, EntryKind, Item, ItemStatus, Transcript};
+use atrium_core::{AgentEvent, ApprovalDecision, EntryKind, Item, ItemStatus, Transcript};
 use futures::{StreamExt, channel::mpsc::UnboundedReceiver, executor::block_on, future};
 
 async fn start(name: &str) -> (AcpClient, UnboundedReceiver<Incoming>) {
@@ -256,17 +256,17 @@ fn settings_change_and_a_long_turn_can_be_cancelled() {
         let last = transcript.entries().last().unwrap().turn_id.clone();
         assert_eq!(
             transcript.turn_summary(&last).unwrap().status,
-            agentdesk_core::TurnStatus::Interrupted
+            atrium_core::TurnStatus::Interrupted
         );
     });
 }
 
 /// Handshake with a real agent, without sending a prompt:
-/// `AGENTDESK_ACP="dsh --profile acp" cargo test -p acp-client -- --ignored real_agent`
+/// `ATRIUM_ACP="dsh --profile acp" cargo test -p acp-client -- --ignored real_agent`
 #[test]
 #[ignore = "needs a real ACP agent on this machine"]
 fn real_agent_handshake_and_session() {
-    let command = std::env::var("AGENTDESK_ACP").expect("set AGENTDESK_ACP to the agent's command");
+    let command = std::env::var("ATRIUM_ACP").expect("set ATRIUM_ACP to the agent's command");
     let mut parts = command.split_whitespace().map(str::to_owned);
     let program = PathBuf::from(parts.next().expect("a program"));
     block_on(async {

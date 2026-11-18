@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use agentdesk_core::{TokenCounts, TokenUsage, Transcript, TurnPace};
+use atrium_core::{TokenCounts, TokenUsage, Transcript, TurnPace};
 use ely_gpui_component::{
     buttons::{Button, ButtonVariant},
     motion::{ProgressBar, ProgressRing},

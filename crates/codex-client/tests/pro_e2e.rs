@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use agentdesk_core::{AgentEvent, EntryKind, GoalStatus, Item, ItemStatus, Transcript};
+use atrium_core::{AgentEvent, EntryKind, GoalStatus, Item, ItemStatus, Transcript};
 use codex_client::{
     CodexClient, CodexConfig, Incoming, Prediction, StartThread, TurnRequest, translate,
 };

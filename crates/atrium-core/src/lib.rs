@@ -1,4 +1,4 @@
-//! The backend-agnostic heart of AgentDesk.
+//! The backend-agnostic heart of Atrium.
 //!
 //! Every backend (Codex today; Claude Code, DeepSeek Harness and ACP agents
 //! later) translates its own wire protocol into [`AgentEvent`]s. The UI never

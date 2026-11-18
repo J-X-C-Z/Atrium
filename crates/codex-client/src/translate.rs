@@ -1,11 +1,11 @@
-//! Codex app-server protocol (v2) to AgentDesk's model.
+//! Codex app-server protocol (v2) to Atrium's model.
 //!
 //! The protocol is marked experimental and grows fields every release, so we
 //! read it leniently from `serde_json::Value`: unknown fields are ignored,
 //! missing ones default, and unknown item types still show up as
 //! [`Item::Other`] instead of failing the whole message.
 
-use agentdesk_core::{
+use atrium_core::{
     Account, AgentEvent, ApprovalKind, ApprovalRequest, ChangeKind, Credits, FileChange, Goal,
     GoalStatus, Item, ItemStatus, PlanStep, Question, RateLimits, RateWindow, ThreadMeta,
     TokenCounts, TokenUsage, TurnStatus, UserInputRequest,

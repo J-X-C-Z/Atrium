@@ -4,10 +4,10 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Drives `codex app-server` over stdio JSON-RPC and translates its protocol into AgentDesk events."
+description = "Drives `codex app-server` over stdio JSON-RPC and translates its protocol into Atrium events."
 
 [dependencies]
-agentdesk-core.workspace = true
+atrium-core.workspace = true
 agent-rpc.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true

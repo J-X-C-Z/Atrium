@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Newline-delimited JSON-RPC over a child process's stdio, shared by AgentDesk's backends."
+description = "Newline-delimited JSON-RPC over a child process's stdio, shared by Atrium's backends."
 
 [dependencies]
 thiserror.workspace = true

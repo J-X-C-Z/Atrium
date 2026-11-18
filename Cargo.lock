@@ -87,8 +87,8 @@ name = "acp-client"
 version = "0.1.0"
 dependencies = [
  "agent-rpc",
- "agentdesk-core",
  "anyhow",
+ "atrium-core",
  "base64 0.22.1",
  "futures",
  "jiff",
@@ -133,35 +133,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
-]
-
-[[package]]
-name = "agentdesk-app"
-version = "0.1.0"
-dependencies = [
- "acp-client",
- "agent-rpc",
- "agentdesk-core",
- "anyhow",
- "codex-client",
- "dirs 6.0.0",
- "ely-gpui-component",
- "env_logger",
- "futures",
- "gpui-kit",
- "gpui-pre",
- "jiff",
- "log",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "agentdesk-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -581,6 +552,35 @@ name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
+
+[[package]]
+name = "atrium-app"
+version = "0.1.0"
+dependencies = [
+ "acp-client",
+ "agent-rpc",
+ "anyhow",
+ "atrium-core",
+ "codex-client",
+ "dirs 6.0.0",
+ "ely-gpui-component",
+ "env_logger",
+ "futures",
+ "gpui-kit",
+ "gpui-pre",
+ "jiff",
+ "log",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "atrium-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "atspi"
@@ -1139,8 +1139,8 @@ name = "codex-client"
 version = "0.1.0"
 dependencies = [
  "agent-rpc",
- "agentdesk-core",
  "anyhow",
+ "atrium-core",
  "dirs 6.0.0",
  "futures",
  "log",
