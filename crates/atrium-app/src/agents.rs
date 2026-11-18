@@ -8,15 +8,16 @@ use agent_rpc::process;
 /// An ACP agent Atrium knows how to start.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentProfile {
-    /// Tags its threads: `claude`, `deepseek`, `antigravity`.
-    pub id: &'static str,
-    pub name: &'static str,
+    /// Tags its threads: `claude`, `deepseek`, `antigravity`; on another
+    /// device, `claude@studio`.
+    pub id: String,
+    pub name: String,
     /// A few letters for tight places, such as the sidebar.
-    pub short: &'static str,
-    /// What to run, when found.
+    pub short: String,
+    /// What to run, when found here.
     pub command: Option<(PathBuf, Vec<String>)>,
     /// How to get it when it is missing.
-    pub install: &'static str,
+    pub install: String,
 }
 
 /// The ACP agents, with the command each would run here.
@@ -40,9 +41,9 @@ pub fn detect(overrides: &std::collections::HashMap<String, String>) -> Vec<Agen
     };
     vec![
         AgentProfile {
-            id: "claude",
-            name: "Claude Code",
-            short: "Claude",
+            id: "claude".into(),
+            name: "Claude Code".into(),
+            short: "Claude".into(),
             command: forced("claude").or_else(|| {
                 // The official ACP adapter; with only Claude Code installed,
                 // npx fetches the adapter on first use.
@@ -57,24 +58,25 @@ pub fn detect(overrides: &std::collections::HashMap<String, String>) -> Vec<Agen
                         ))
                     })
             }),
-            install: "npm install -g @anthropic-ai/claude-code @agentclientprotocol/claude-agent-acp",
+            install: "npm install -g @anthropic-ai/claude-code @agentclientprotocol/claude-agent-acp"
+                .into(),
         },
         AgentProfile {
-            id: "deepseek",
-            name: "DeepSeek Harness",
-            short: "DeepSeek",
+            id: "deepseek".into(),
+            name: "DeepSeek Harness".into(),
+            short: "DeepSeek".into(),
             command: forced("deepseek").or_else(|| {
                 process::which("dsh").map(|path| (path, vec!["--profile".into(), "acp".into()]))
             }),
-            install: "npm install -g @deepseek-ai/dsh",
+            install: "npm install -g @deepseek-ai/dsh".into(),
         },
         AgentProfile {
-            id: "antigravity",
-            name: "Antigravity",
-            short: "Antigravity",
+            id: "antigravity".into(),
+            name: "Antigravity".into(),
+            short: "Antigravity".into(),
             command: forced("antigravity")
                 .or_else(|| process::which("agy").map(|path| (path, vec!["acp".into()]))),
-            install: "Install the Antigravity CLI (agy 1.5 or later) from antigravity.google, then run `agy acp --login`",
+            install: "Install the Antigravity CLI (agy 1.5 or later) from antigravity.google, then run `agy acp --login`".into(),
         },
     ]
 }
@@ -101,9 +103,39 @@ fn shell_words(text: &str) -> Vec<String> {
     words
 }
 
-/// The display name for a backend id.
+/// A backend id's agent and, for another device's agent, the device:
+/// `claude@studio` is `("claude", Some("studio"))`.
+pub fn split_backend(id: &str) -> (&str, Option<&str>) {
+    match id.split_once('@') {
+        Some((agent, device)) => (agent, Some(device)),
+        None => (id, None),
+    }
+}
+
+/// The backend id of `agent` on `device` (this one when `None`).
+pub fn backend_id(agent: &str, device: Option<&str>) -> String {
+    match device {
+        Some(device) => format!("{agent}@{device}"),
+        None => agent.to_string(),
+    }
+}
+
+/// Whether a backend is Codex, here or on another device.
+pub fn is_codex(id: &str) -> bool {
+    split_backend(id).0 == "codex"
+}
+
+/// "Claude Code", or "Claude Code · studio" on another device.
+pub fn backend_label(id: &str) -> String {
+    match split_backend(id) {
+        (agent, Some(device)) => format!("{} · {device}", backend_name(agent)),
+        (agent, None) => backend_name(agent).to_string(),
+    }
+}
+
+/// The display name for a backend id's agent.
 pub fn backend_name(id: &str) -> &'static str {
-    match id {
+    match split_backend(id).0 {
         "codex" => "Codex",
         "claude" => "Claude Code",
         "deepseek" => "DeepSeek Harness",
@@ -126,6 +158,15 @@ mod tests {
             shell_words(r#""/Apps/My Agent/agy" acp"#),
             vec!["/Apps/My Agent/agy", "acp"]
         );
+    }
+
+    #[test]
+    fn backend_ids_name_the_device() {
+        assert_eq!(split_backend("claude@studio"), ("claude", Some("studio")));
+        assert_eq!(split_backend("codex"), ("codex", None));
+        assert!(is_codex("codex@nas") && !is_codex("claude"));
+        assert_eq!(backend_label("deepseek@nas"), "DeepSeek Harness · nas");
+        assert_eq!(backend_id("codex", Some("nas")), "codex@nas");
     }
 
     #[test]

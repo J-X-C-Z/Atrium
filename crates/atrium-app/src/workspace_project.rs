@@ -469,7 +469,7 @@ impl Workspace {
             .transcripts
             .get(&thread)
             .is_some_and(Transcript::is_running);
-        if running && self.backend_of(&thread) != CODEX {
+        if running && !crate::agents::is_codex(self.backend_of(&thread)) {
             cx.emit(Notice::Info(
                 "It is working; the notices go with its next message.".into(),
             ));

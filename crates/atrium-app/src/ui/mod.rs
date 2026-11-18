@@ -4,6 +4,7 @@
 mod chat;
 mod composer;
 mod context;
+mod devices;
 mod project;
 mod rows;
 mod sidebar;
@@ -145,6 +146,7 @@ enum Overlay {
     },
     Settings {
         codex_path: Entity<TextInput>,
+        node_address: Entity<TextInput>,
     },
     Rename {
         thread_id: String,
@@ -569,7 +571,7 @@ impl RootView {
                 .flex_col()
                 .gap_1p5()
                 .child(row("Codex".into(), codex.0, codex.1));
-        for agent in &ws.agents {
+        for agent in ws.agents.iter().filter(|a| a.remote.is_none()) {
             let (dot, said) = match &agent.status {
                 AgentStatus::Ready => (
                     colors.success,
@@ -610,7 +612,13 @@ impl RootView {
         let codex_path =
             cx.new(|cx| TextInput::new(window, cx).placeholder("Found on PATH (leave empty)"));
         codex_path.update(cx, |input, cx| input.set_text(current, cx));
-        self.overlay = Some(Overlay::Settings { codex_path });
+        let node_address = cx.new(|cx| {
+            TextInput::new(window, cx).placeholder("Add a node by address, such as studio:7381")
+        });
+        self.overlay = Some(Overlay::Settings {
+            codex_path,
+            node_address,
+        });
         cx.notify();
     }
 
@@ -682,13 +690,23 @@ impl RootView {
             ("theme:dark", "Theme: dark", IconName::Moon),
         ]
         .map(|(value, label, icon)| Command::new(value, label).icon(icon));
-        let agents: Vec<Command> = std::iter::once(("codex", "Codex"))
+        let agents: Vec<Command> = std::iter::once(("codex".to_string(), "Codex".to_string()))
             .chain(
                 ws.agents
                     .iter()
                     .filter(|a| a.status != crate::workspace::AgentStatus::NotInstalled)
-                    .map(|a| (a.profile.id, a.profile.name)),
+                    .map(|a| {
+                        (
+                            a.profile.id.clone(),
+                            crate::agents::backend_label(&a.profile.id),
+                        )
+                    }),
             )
+            .chain(ws.devices.iter().filter(|d| d.codex.is_some()).map(|d| {
+                let id = crate::agents::backend_id("codex", Some(&d.id));
+                let label = crate::agents::backend_label(&id);
+                (id, label)
+            }))
             .map(|(id, name)| {
                 Command::new(format!("agent:{id}"), format!("New chat with {name}"))
                     .icon(IconName::Bot)
@@ -791,9 +809,11 @@ impl RootView {
     fn settings_dialog(
         &self,
         codex_path: &Entity<TextInput>,
+        node_address: &Entity<TextInput>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let agents = self.agents_list(cx);
+        let devices = devices::section(&self.workspace, node_address, cx);
         let theme = cx.theme();
         let colors = theme.colors.clone();
         let ws = self.workspace.read(cx);
@@ -909,6 +929,11 @@ impl RootView {
                     agents,
                 ))
                 .child(section(
+                    "Devices",
+                    "Agents on your other computers, through atrium-node over Tailscale. Their chats show the device's name.",
+                    devices,
+                ))
+                .child(section(
                     "Codex CLI",
                     "Path to the codex binary. Saving restarts Codex.",
                     Input::new(codex_path).into_any_element(),
@@ -982,9 +1007,12 @@ impl Render for RootView {
                 let (objective, budget) = (objective.clone(), budget.clone());
                 Some(self.goal_dialog(&objective, &budget, cx))
             }
-            Some(Overlay::Settings { codex_path }) => {
-                let codex_path = codex_path.clone();
-                Some(self.settings_dialog(&codex_path, cx))
+            Some(Overlay::Settings {
+                codex_path,
+                node_address,
+            }) => {
+                let (codex_path, node_address) = (codex_path.clone(), node_address.clone());
+                Some(self.settings_dialog(&codex_path, &node_address, cx))
             }
             Some(Overlay::NewStream {
                 name,

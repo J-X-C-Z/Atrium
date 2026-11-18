@@ -491,15 +491,82 @@ impl Composer {
                 .into_any_element(),
         );
 
-        if ws.is_codex_view() {
+        // A device's Codex keeps its own model settings.
+        if ws.is_codex_view() && !ws.is_remote_view() {
             self.codex_tools(&mut tools, cx);
-        } else {
+        } else if !ws.is_codex_view() {
             self.agent_tools(&mut tools, cx);
         }
         let ws = self.workspace.read(cx);
 
+        // On another device: its folders, browsed through its node.
+        if ws.active_thread().is_none() && ws.is_remote_view() {
+            let backend = ws.view_backend().to_string();
+            let device = crate::agents::split_backend(&backend)
+                .1
+                .unwrap_or_default()
+                .to_string();
+            let folder = ws.folder_for(&backend);
+            let pick = |path: String, label: String, icon: IconName, selected: bool| {
+                let (workspace, device) = (self.workspace.clone(), device.clone());
+                MenuItem::radio(label, selected)
+                    .icon(icon)
+                    .on_click(move |_, cx| {
+                        let (device, path) = (device.clone(), path.clone());
+                        workspace.update(cx, |ws, cx| ws.set_device_folder(&device, path, cx))
+                    })
+            };
+            let mut menu = Menu::new();
+            if let Some(device) = ws.device(&device) {
+                let roots: Vec<MenuItem> = device
+                    .info
+                    .roots
+                    .iter()
+                    .map(|root| {
+                        let label = folder_name(Path::new(root));
+                        pick(root.clone(), label, IconName::House, *root == folder)
+                    })
+                    .collect();
+                menu = menu.group("Roots", roots);
+            }
+            let parent = std::path::Path::new(&folder)
+                .parent()
+                .map(|p| p.display().to_string());
+            let inside_roots = |path: &str| {
+                ws.device(&device)
+                    .is_some_and(|d| d.info.roots.iter().any(|r| path.starts_with(r.as_str())))
+            };
+            let mut here = Vec::new();
+            if let Some(parent) = parent.filter(|p| inside_roots(p)) {
+                here.push(pick(
+                    parent,
+                    "Up one level".into(),
+                    IconName::ChevronLeft,
+                    false,
+                ));
+            }
+            match ws.remote_children(&device, &folder) {
+                Some(children) => here.extend(children.iter().map(|name| {
+                    let path = format!("{}/{name}", folder.trim_end_matches('/'));
+                    pick(path, name.clone(), IconName::Folder, false)
+                })),
+                None => here.push(MenuItem::new("Loading…").disabled(true)),
+            }
+            menu = menu.group(format!("In {}", folder_name(Path::new(&folder))), here);
+            tools.push(
+                DropdownMenu::new(
+                    "folder",
+                    format!("{device}:{}", folder_name(Path::new(&folder))),
+                    menu,
+                )
+                .icon(IconName::Monitor)
+                .variant(ButtonVariant::Ghost)
+                .into_any_element(),
+            );
+        }
+
         // Folder: chosen for a new chat; fixed once the chat exists.
-        if ws.active_thread().is_none() {
+        if ws.active_thread().is_none() && !ws.is_remote_view() {
             let folder = ws.settings.working_dir();
             let mut menu = Menu::new();
             for recent in ws.settings.recent_folders.iter().filter(|dir| dir.is_dir()) {

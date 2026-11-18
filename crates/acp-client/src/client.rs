@@ -72,7 +72,9 @@ impl Drop for ProcessGuard {
 #[derive(Clone)]
 pub struct AcpClient {
     connection: Connection,
-    _process: Option<Arc<ProcessGuard>>,
+    /// Keeps the agent alive while a clone remains: the child process, or
+    /// a process on another device.
+    _process: Option<Arc<dyn std::any::Any + Send + Sync>>,
     pub backend: String,
     pub info: AgentInfo,
     translator: Arc<Mutex<Translator>>,
@@ -104,14 +106,31 @@ impl AcpClient {
                     log::debug!("{backend} stderr: {line}");
                 }
             })?;
-        let peer: &'static str = Box::leak(config.backend.clone().into_boxed_str());
-        let (connection, events) = Connection::jsonrpc2(BufReader::new(stdout), stdin, peer);
+        Self::over(
+            config.backend,
+            BufReader::new(stdout),
+            stdin,
+            Some(Arc::new(ProcessGuard(Mutex::new(Some(child))))),
+        )
+        .await
+    }
+
+    /// An agent reached through other pipes, such as a process an
+    /// `atrium-node` runs on another device; `keep` lives as long as the client.
+    pub async fn over(
+        backend: String,
+        reader: impl std::io::BufRead + Send + 'static,
+        writer: impl std::io::Write + Send + 'static,
+        keep: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    ) -> Result<(Self, mpsc::UnboundedReceiver<Incoming>)> {
+        let peer: &'static str = Box::leak(backend.clone().into_boxed_str());
+        let (connection, events) = Connection::jsonrpc2(reader, writer, peer);
         let mut client = Self {
             connection,
-            _process: Some(Arc::new(ProcessGuard(Mutex::new(Some(child))))),
-            backend: config.backend.clone(),
+            _process: keep,
+            backend: backend.clone(),
             info: AgentInfo::default(),
-            translator: Arc::new(Mutex::new(Translator::new(config.backend))),
+            translator: Arc::new(Mutex::new(Translator::new(backend))),
             permissions: Arc::default(),
         };
         client.initialize().await?;

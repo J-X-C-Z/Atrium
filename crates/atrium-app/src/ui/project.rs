@@ -1244,8 +1244,10 @@ impl RootView {
             .size(ControlSize::Sm)
             .segment(CODEX, "Codex", None);
         for agent in &ws.agents {
-            if agent.status == AgentStatus::Ready {
-                agents = agents.segment(agent.profile.id, agent.profile.short, None);
+            // Projects are folders on this computer.
+            if agent.status == AgentStatus::Ready && agent.remote.is_none() {
+                agents =
+                    agents.segment(agent.profile.id.clone(), agent.profile.short.clone(), None);
             }
         }
         let agents = agents.on_change(move |value, _, cx| {

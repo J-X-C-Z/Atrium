@@ -31,6 +31,10 @@ pub struct AcpAgent {
     pub status: AgentStatus,
     pub info: Option<AgentInfo>,
     pub(super) client: Option<AcpClient>,
+    /// Set for an agent on another device.
+    pub remote: Option<super::devices::RemoteAgent>,
+    /// The link to its device, while it runs there.
+    pub link: Option<std::sync::Arc<std::sync::Mutex<agent_rpc::node::LinkState>>>,
     pub(super) _pump: Option<Task<()>>,
 }
 
@@ -48,6 +52,8 @@ impl Workspace {
                 profile,
                 info: None,
                 client: None,
+                remote: None,
+                link: None,
                 _pump: None,
             })
             .collect();
@@ -84,31 +90,67 @@ impl Workspace {
     }
 
     pub fn is_codex_view(&self) -> bool {
-        self.view_backend() == CODEX
+        agents::is_codex(self.view_backend())
     }
 
     /// Starts (or restarts) one ACP agent and pumps its events.
     pub fn start_agent(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let owner = self.settings.install_id.clone();
         let agent = &mut self.agents[ix];
-        let Some((program, args)) = agent.profile.command.clone() else {
+        let backend = agent.profile.id.to_string();
+        let remote = agent.remote.clone();
+        let local = agent.profile.command.clone();
+        if remote.is_none() && local.is_none() {
             return;
-        };
+        }
         agent.status = AgentStatus::Starting;
         agent.client = None;
-        let backend = agent.profile.id.to_string();
-        let config = AcpConfig {
-            backend: backend.clone(),
-            program,
-            args,
-            env: Vec::new(),
-        };
+        agent.link = None;
         cx.notify();
+        let starting = backend.clone();
         agent._pump = Some(cx.spawn(async move |this, cx| {
+            let backend = starting;
+            let named = backend.clone();
             let started = cx
                 .background_executor()
-                .spawn(async move { AcpClient::start(config).await })
+                .spawn(async move {
+                    let backend = named;
+                    match (remote, local) {
+                        // On another device: the node runs it, and its
+                        // stdio comes over the link.
+                        (Some(remote), _) => {
+                            let proc = remote
+                                .node
+                                .spawn(&remote.agent, &remote.cwd, &owner)
+                                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                            let attachment = remote.node.attach(&proc.id, 0);
+                            let link = attachment.state.clone();
+                            let keep = std::sync::Arc::new(agent_rpc::node::RemoteProc {
+                                client: remote.node.clone(),
+                                id: proc.id,
+                            });
+                            AcpClient::over(
+                                backend.clone(),
+                                attachment.reader,
+                                attachment.writer,
+                                Some(keep),
+                            )
+                            .await
+                            .map(|(client, events)| (client, events, Some(link)))
+                        }
+                        (None, Some((program, args))) => AcpClient::start(AcpConfig {
+                            backend: backend.clone(),
+                            program,
+                            args,
+                            env: Vec::new(),
+                        })
+                        .await
+                        .map(|(client, events)| (client, events, None)),
+                        (None, None) => Err(anyhow::anyhow!("nothing to start")),
+                    }
+                })
                 .await;
-            let (client, mut events) = match started {
+            let (client, mut events, link) = match started {
                 Ok(started) => started,
                 Err(error) => {
                     log::warn!("{backend} failed to start: {error:#}");
@@ -129,6 +171,7 @@ impl Workspace {
                     agent.info = Some(client.info.clone());
                     agent.client = Some(client.clone());
                     agent.status = AgentStatus::Ready;
+                    agent.link = link;
                 }
                 if ws.draft_backend == backend {
                     ws.warm_draft(cx);
@@ -306,10 +349,10 @@ impl Workspace {
     /// settings show before the first message and the first answer starts sooner.
     pub(super) fn warm_draft(&mut self, cx: &mut Context<Self>) {
         let backend = self.draft_backend.clone();
-        if backend == CODEX {
+        if agents::is_codex(&backend) {
             return;
         }
-        let cwd = self.settings.working_dir();
+        let cwd = std::path::PathBuf::from(self.folder_for(&backend));
         if self.warm.get(&backend).is_some_and(|(_, dir)| *dir == cwd) {
             return;
         }
@@ -345,6 +388,18 @@ impl Workspace {
         self.settings.default_agent = Some(backend.to_string());
         self.settings.save();
         self.warm_draft(cx);
+        if let (_, Some(device)) = agents::split_backend(backend) {
+            let folder = self.folder_for(backend);
+            self.fetch_children(device, folder, cx);
+            if agents::is_codex(backend)
+                && self
+                    .device(device)
+                    .is_some_and(|d| matches!(d.codex_status, AgentStatus::Failed(_)))
+            {
+                let device = device.to_string();
+                self.start_remote_codex(&device, cx);
+            }
+        }
         if let Some(ix) = self.agents.iter().position(|a| a.profile.id == backend)
             && matches!(self.agents[ix].status, AgentStatus::Failed(_))
         {
@@ -357,9 +412,7 @@ impl Workspace {
     pub(super) fn view_agent_ready(&self) -> bool {
         match self.view_backend() {
             CODEX => self.status == super::Status::Ready,
-            backend => self
-                .agent(backend)
-                .is_some_and(|a| a.status == AgentStatus::Ready),
+            backend => self.backend_ready(backend),
         }
     }
 
@@ -400,7 +453,7 @@ impl Workspace {
                 self.note_births(DRAFT, 0);
                 self.turn_started.insert(DRAFT.into(), Instant::now());
                 cx.notify();
-                let cwd = self.settings.working_dir();
+                let cwd = std::path::PathBuf::from(self.folder_for(&backend));
                 let choices = self
                     .draft_choices
                     .get(&backend)

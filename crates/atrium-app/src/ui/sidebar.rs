@@ -119,9 +119,16 @@ pub fn render(
         .map(|thread| Conversation {
             key: thread.id.clone().into(),
             // Other agents' chats say whose they are.
-            title: match ws.agent(&thread.backend) {
-                Some(agent) => format!("{} · {}", agent.profile.short, thread.title()).into(),
-                None => thread.title().into(),
+            title: match (
+                ws.agent(&thread.backend),
+                crate::agents::split_backend(&thread.backend),
+            ) {
+                (Some(agent), (_, Some(device))) => {
+                    format!("{}@{device} · {}", agent.profile.short, thread.title()).into()
+                }
+                (Some(agent), _) => format!("{} · {}", agent.profile.short, thread.title()).into(),
+                (None, (_, Some(device))) => format!("Codex@{device} · {}", thread.title()).into(),
+                (None, _) => thread.title().into(),
             },
             at: Timestamp::from_second(thread.updated_at).unwrap_or(now),
             pinned: ws.settings.is_pinned(&thread.id),

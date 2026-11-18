@@ -181,7 +181,7 @@ impl Drop for ProcessGuard {
 #[derive(Clone)]
 pub struct CodexClient {
     connection: Connection,
-    _process: Option<Arc<ProcessGuard>>,
+    _process: Option<Arc<dyn std::any::Any + Send + Sync>>,
     pub user_agent: String,
     pub codex_home: String,
     pub binary: PathBuf,
@@ -221,6 +221,25 @@ impl CodexClient {
             user_agent: String::new(),
             codex_home: String::new(),
             binary,
+        };
+        client.initialize().await?;
+        Ok((client, events))
+    }
+
+    /// A server reached through other pipes, such as `codex app-server` run
+    /// by an `atrium-node` on another device; `keep` lives as long as the client.
+    pub async fn remote(
+        reader: impl std::io::BufRead + Send + 'static,
+        writer: impl std::io::Write + Send + 'static,
+        keep: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Result<(Self, mpsc::UnboundedReceiver<Incoming>)> {
+        let (connection, events) = Connection::new(reader, writer);
+        let mut client = Self {
+            connection,
+            _process: Some(keep),
+            user_agent: String::new(),
+            codex_home: String::new(),
+            binary: PathBuf::new(),
         };
         client.initialize().await?;
         Ok((client, events))

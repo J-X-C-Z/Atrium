@@ -47,7 +47,12 @@ fn pause(ms: u64) {
 
 static SEQ: AtomicU64 = AtomicU64::new(1);
 fn next(prefix: &str) -> String {
-    format!("{prefix}-{}", SEQ.fetch_add(1, Ordering::Relaxed))
+    // Unique across mock processes, as real session ids are.
+    format!(
+        "{prefix}-{:x}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 #[derive(Clone)]

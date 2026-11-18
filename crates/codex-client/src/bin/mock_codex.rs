@@ -45,7 +45,13 @@ fn now() -> i64 {
 
 static SEQ: AtomicU64 = AtomicU64::new(1);
 fn next_id(prefix: &str) -> String {
-    format!("{prefix}-{:04}", SEQ.fetch_add(1, Ordering::Relaxed))
+    // Unique across mock processes too, as real ids are: two devices'
+    // mocks must not hand out the same thread id.
+    format!(
+        "{prefix}-{:x}-{:04}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 #[derive(Clone)]

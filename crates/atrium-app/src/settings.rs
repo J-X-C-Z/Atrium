@@ -52,6 +52,14 @@ pub struct Settings {
     pub projects: Vec<PathBuf>,
     /// The project the user was in, to come back to it.
     pub active_project: Option<PathBuf>,
+    /// Nodes added by address, besides those found on the tailnet.
+    pub nodes: Vec<String>,
+    /// The bearer token nodes ask for, when they are set to.
+    pub node_token: Option<String>,
+    /// Names this install to nodes, so it finds its own processes.
+    pub install_id: String,
+    /// Where new chats run on each device, by device id.
+    pub device_folders: std::collections::HashMap<String, String>,
 }
 
 impl Settings {

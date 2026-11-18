@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Newline-delimited JSON-RPC over a child process's stdio, shared by Atrium's backends."
+description = "Newline-delimited JSON-RPC over a child process's stdio or an atrium-node, shared by Atrium's backends."
 
 [dependencies]
 thiserror.workspace = true
@@ -13,6 +13,13 @@ serde_json.workspace = true
 futures.workspace = true
 log.workspace = true
 dirs.workspace = true
+ureq.workspace = true
+tungstenite.workspace = true
 
 [dev-dependencies]
+ureq.workspace = true
 futures = { workspace = true, features = ["executor"] }
+
+[[bin]]
+name = "mock-node"
+path = "src/bin/mock_node.rs"

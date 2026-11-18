@@ -23,9 +23,12 @@ use crate::settings::{Settings, ThemePref};
 
 #[path = "workspace_acp.rs"]
 mod acp;
+#[path = "workspace_devices.rs"]
+mod devices;
 #[path = "workspace_project.rs"]
 mod projects;
 pub use acp::{AcpAgent, AgentStatus, CODEX};
+pub use devices::{Device, DeviceStatus};
 pub use projects::{Room, StreamState, StreamView};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -167,6 +170,14 @@ pub struct Workspace {
     pub projects: Vec<crate::project::Project>,
     pub room: Room,
     _atrium_poll: Option<Task<()>>,
+    /// Other devices of the tailnet that run `atrium-node`.
+    pub devices: Vec<Device>,
+    pub discovering: bool,
+    /// Folders on devices, by `device:path`, for the folder menu.
+    remote_dirs: HashMap<String, Vec<String>>,
+    /// How many tailnet devices are online, or why the tailnet could not be read.
+    pub tailnet: Option<Result<usize, String>>,
+    _discovery: Option<Task<()>>,
     _pump: Option<Task<()>>,
 }
 
@@ -217,11 +228,17 @@ impl Workspace {
             projects: Vec::new(),
             room: Room::Chats,
             _atrium_poll: None,
+            devices: Vec::new(),
+            discovering: false,
+            remote_dirs: HashMap::new(),
+            tailnet: None,
+            _discovery: None,
             _pump: None,
         };
         workspace.connect(cx);
         workspace.init_agents(cx);
         workspace.init_projects(cx);
+        workspace.init_devices(cx);
         if let Some(agent) = workspace.settings.default_agent.clone()
             && (agent == CODEX
                 || workspace
@@ -436,7 +453,9 @@ impl Workspace {
                 ..
             } => {
                 self.turn_started.remove(thread_id);
-                if *status == TurnStatus::Completed && self.backend_of(thread_id) == CODEX {
+                if *status == TurnStatus::Completed
+                    && crate::agents::is_codex(self.backend_of(thread_id))
+                {
                     self.predict(thread_id.clone(), turn_id.clone(), cx);
                 }
                 // A replayed history is not new activity.
@@ -569,6 +588,11 @@ impl Workspace {
                 if meta.name.is_none() {
                     meta.name = existing.name.take();
                 }
+                // Codex reports its own threads as plain `codex`; one on
+                // another device keeps its device.
+                if meta.backend == CODEX && crate::agents::is_codex(&existing.backend) {
+                    meta.backend = std::mem::take(&mut existing.backend);
+                }
                 *existing = meta;
             }
             None => self.threads.insert(0, meta),
@@ -622,11 +646,18 @@ impl Workspace {
             })
     }
 
+    /// Whether the shown chat's agent runs on another device.
+    pub fn is_remote_view(&self) -> bool {
+        crate::agents::split_backend(self.view_backend())
+            .1
+            .is_some()
+    }
+
     /// The folder the shown chat runs in.
     pub fn folder(&self) -> PathBuf {
         match self.active_thread() {
             Some(thread) if !thread.cwd.is_empty() => PathBuf::from(&thread.cwd),
-            _ => self.settings.working_dir(),
+            _ => PathBuf::from(self.folder_for(self.view_backend())),
         }
     }
 
@@ -651,11 +682,11 @@ impl Workspace {
         if self.transcripts.contains_key(&thread_id) || self.loading.contains(&thread_id) {
             return;
         }
-        if self.backend_of(&thread_id) != CODEX {
+        if !crate::agents::is_codex(self.backend_of(&thread_id)) {
             self.acp_open(thread_id, cx);
             return;
         }
-        let Some(client) = self.client.clone() else {
+        let Some(client) = self.thread_codex(&thread_id) else {
             return;
         };
         self.loading.insert(thread_id.clone());
@@ -684,7 +715,7 @@ impl Workspace {
     }
 
     fn load_goal(&mut self, thread_id: String, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else {
+        let Some(client) = self.thread_codex(&thread_id) else {
             return;
         };
         cx.spawn(async move |this, cx| {
@@ -699,6 +730,20 @@ impl Workspace {
     }
 
     fn turn_request(&self, composed: &Composed) -> TurnRequest {
+        // A device's Codex keeps its own model settings: the models listed
+        // here are this machine's.
+        if self.is_remote_view() {
+            return TurnRequest {
+                text: composed.text.clone(),
+                images: composed.images.clone(),
+                mentions: composed.mentions.clone(),
+                model: None,
+                effort: None,
+                mode: Some(self.settings.mode),
+                service_tier: None,
+                plan_mode: false,
+            };
+        }
         // Plan mode names its model, so resolve the default when none is chosen.
         let model = match self.settings.plan_mode {
             true => self.model_id(),
@@ -754,7 +799,7 @@ impl Workspace {
         {
             return;
         }
-        let Some(client) = self.client.clone() else {
+        let Some(client) = self.thread_codex(&thread_id) else {
             return;
         };
         cx.spawn(async move |this, cx| {
@@ -791,6 +836,11 @@ impl Workspace {
             | AgentEvent::Error {
                 will_retry: false, ..
             } => {
+                let source = self
+                    .prediction_forks
+                    .get(fork)
+                    .map(|(thread, _)| self.backend_of(thread).to_string())
+                    .unwrap_or_else(|| CODEX.to_string());
                 if let Some((thread, text)) = self.prediction_forks.remove(fork) {
                     // Only if the user has not moved on in the meantime.
                     if !self
@@ -802,7 +852,7 @@ impl Workspace {
                         cx.notify();
                     }
                 }
-                if let Some(client) = self.client.clone() {
+                if let Some(client) = self.codex_for(&source) {
                     let fork = fork.to_string();
                     cx.background_spawn(async move {
                         let _ = client.thread_unsubscribe(&fork).await;
@@ -838,16 +888,17 @@ impl Workspace {
     pub fn branch(&mut self, turn_id: Option<String>, cx: &mut Context<Self>) {
         let (Some(thread), Some(client)) = (
             self.active_thread_id().map(str::to_owned),
-            self.client.clone(),
+            self.view_codex(),
         ) else {
             return;
         };
+        let backend = self.view_backend().to_string();
         cx.spawn(async move |this, cx| {
             let forked = client.thread_fork(&thread, turn_id.as_deref()).await;
             let _ = this.update(cx, |ws, cx| match forked {
                 Ok(meta) => {
                     let id = meta.id.clone();
-                    ws.upsert_thread(meta);
+                    ws.upsert_thread(ThreadMeta { backend, ..meta });
                     cx.emit(Notice::Success("Branched into a new chat".into()));
                     ws.open_thread(id, cx);
                 }
@@ -859,7 +910,7 @@ impl Workspace {
 
     /// Adds a message to the running turn.
     fn steer(&mut self, thread_id: String, composed: Composed, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else {
+        let Some(client) = self.thread_codex(&thread_id) else {
             return;
         };
         let Some(turn) = self
@@ -901,7 +952,7 @@ impl Workspace {
         composed: Composed,
         cx: &mut Context<Self>,
     ) {
-        let Some(client) = self.client.clone() else {
+        let Some(client) = self.thread_codex(&thread_id) else {
             return;
         };
         self.editing = None;
@@ -937,7 +988,7 @@ impl Workspace {
     pub fn set_goal(&mut self, objective: String, budget: Option<u64>, cx: &mut Context<Self>) {
         let (Some(thread), Some(client)) = (
             self.active_thread_id().map(str::to_owned),
-            self.client.clone(),
+            self.view_codex(),
         ) else {
             cx.emit(Notice::Info(
                 "Start a chat first, then give it a goal.".into(),
@@ -966,7 +1017,7 @@ impl Workspace {
     pub fn set_goal_status(&mut self, status: GoalStatus, cx: &mut Context<Self>) {
         let (Some(thread), Some(client)) = (
             self.active_thread_id().map(str::to_owned),
-            self.client.clone(),
+            self.view_codex(),
         ) else {
             return;
         };
@@ -985,7 +1036,7 @@ impl Workspace {
     pub fn clear_goal(&mut self, cx: &mut Context<Self>) {
         let (Some(thread), Some(client)) = (
             self.active_thread_id().map(str::to_owned),
-            self.client.clone(),
+            self.view_codex(),
         ) else {
             return;
         };
@@ -1006,7 +1057,7 @@ impl Workspace {
     pub fn toggle_memory(&mut self, cx: &mut Context<Self>) {
         let (Some(thread), Some(client)) = (
             self.active_thread_id().map(str::to_owned),
-            self.client.clone(),
+            self.view_codex(),
         ) else {
             return;
         };
@@ -1038,7 +1089,9 @@ impl Workspace {
         answers: Answers,
         cx: &mut Context<Self>,
     ) {
-        let Some(client) = &self.client else { return };
+        let Some(client) = self.thread_codex(thread_id) else {
+            return;
+        };
         if let Err(error) = client.answer_user_input(request_id.clone(), answers.clone()) {
             log::warn!("answering questions failed: {error:#}");
             return;
@@ -1155,7 +1208,7 @@ impl Workspace {
             self.acp_send(composed, cx);
             return;
         }
-        if self.client.is_none() {
+        if self.view_codex().is_none() {
             cx.emit(Notice::Error("Codex is not running.".into()));
             return;
         }
@@ -1175,7 +1228,7 @@ impl Workspace {
         } else if self.is_running() {
             return;
         }
-        let Some(client) = self.client.clone() else {
+        let Some(client) = self.view_codex() else {
             return;
         };
         let request = self.turn_request(&composed);
@@ -1211,9 +1264,16 @@ impl Workspace {
                 self.note_births(DRAFT, 0);
                 self.turn_started.insert(DRAFT.into(), Instant::now());
                 cx.notify();
+                let backend = self.view_backend().to_string();
+                let remote = crate::agents::split_backend(&backend).1.is_some();
                 let options = StartThread {
-                    cwd: Some(self.settings.working_dir().display().to_string()),
-                    model: self.settings.model.clone(),
+                    cwd: Some(self.folder_for(&backend)),
+                    // Models listed here are this machine's Codex's.
+                    model: if remote {
+                        None
+                    } else {
+                        self.settings.model.clone()
+                    },
                     approval_policy: Some(self.settings.mode.approval_policy().into()),
                     sandbox: Some(self.settings.mode.sandbox_mode().into()),
                 };
@@ -1222,6 +1282,7 @@ impl Workspace {
                     let started = client.thread_start(options).await;
                     let thread_id = match started {
                         Ok(mut meta) => {
+                            meta.backend = backend;
                             // Title the chat by its first message until Codex names it.
                             if meta.preview.trim().is_empty() {
                                 meta.preview = title;
@@ -1289,7 +1350,7 @@ impl Workspace {
         let View::Thread(thread_id) = self.view.clone() else {
             return;
         };
-        if self.backend_of(&thread_id) != CODEX {
+        if !crate::agents::is_codex(self.backend_of(&thread_id)) {
             self.acp_stop(&thread_id);
             return;
         }
@@ -1302,7 +1363,7 @@ impl Workspace {
         else {
             return;
         };
-        let Some(client) = self.client.clone() else {
+        let Some(client) = self.thread_codex(&thread_id) else {
             return;
         };
         cx.spawn(async move |_, _| {
@@ -1320,11 +1381,13 @@ impl Workspace {
         decision: ApprovalDecision,
         cx: &mut Context<Self>,
     ) {
-        if self.backend_of(thread_id) != CODEX {
+        if !crate::agents::is_codex(self.backend_of(thread_id)) {
             self.acp_answer(thread_id, request_id, decision, cx);
             return;
         }
-        let Some(client) = &self.client else { return };
+        let Some(client) = self.thread_codex(thread_id) else {
+            return;
+        };
         if let Err(error) = client.answer_approval(request_id.clone(), decision) {
             log::warn!("answering approval failed: {error:#}");
             return;
@@ -1336,7 +1399,7 @@ impl Workspace {
     }
 
     pub fn archive(&mut self, thread_id: String, cx: &mut Context<Self>) {
-        if self.backend_of(&thread_id) != CODEX {
+        if !crate::agents::is_codex(self.backend_of(&thread_id)) {
             self.acp_archive(thread_id.clone(), cx);
             self.threads.retain(|t| t.id != thread_id);
             self.transcripts.remove(&thread_id);
@@ -1349,7 +1412,7 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let Some(client) = self.client.clone() else {
+        let Some(client) = self.thread_codex(&thread_id) else {
             return;
         };
         self.threads.retain(|t| t.id != thread_id);
@@ -1375,7 +1438,7 @@ impl Workspace {
 
     pub fn rename(&mut self, thread_id: String, name: String, cx: &mut Context<Self>) {
         let name = name.trim().to_string();
-        let Some(client) = self.client.clone() else {
+        let Some(client) = self.thread_codex(&thread_id) else {
             return;
         };
         if name.is_empty() {
@@ -1405,7 +1468,7 @@ impl Workspace {
     pub fn compact(&mut self, cx: &mut Context<Self>) {
         let (Some(thread_id), Some(client)) = (
             self.active_thread_id().map(str::to_owned),
-            self.client.clone(),
+            self.view_codex(),
         ) else {
             cx.emit(Notice::Info("Start a chat first, then compact it.".into()));
             return;
@@ -1423,7 +1486,7 @@ impl Workspace {
 
     /// Asks Codex to review the uncommitted changes in the chat's folder.
     pub fn review(&mut self, instructions: Option<String>, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else {
+        let Some(client) = self.view_codex() else {
             return;
         };
         let target = match instructions {
@@ -1434,8 +1497,9 @@ impl Workspace {
             Some(id) => id.to_string(),
             None => {
                 // A review needs a thread: start one in the working folder.
+                let backend = self.view_backend().to_string();
                 let options = StartThread {
-                    cwd: Some(self.settings.working_dir().display().to_string()),
+                    cwd: Some(self.folder_for(&backend)),
                     model: self.settings.model.clone(),
                     approval_policy: Some(AccessMode::ReadOnly.approval_policy().into()),
                     sandbox: Some(AccessMode::ReadOnly.sandbox_mode().into()),
@@ -1444,6 +1508,7 @@ impl Workspace {
                     let meta = match client.thread_start(options).await {
                         Ok(mut meta) => {
                             meta.preview = "Code review".into();
+                            meta.backend = backend;
                             meta
                         }
                         Err(error) => {
@@ -1495,7 +1560,7 @@ impl Workspace {
 
     /// Files in the shown chat's folder matching `query`, as absolute paths.
     pub fn search_files(&self, query: String, cx: &mut Context<Self>) -> Task<Vec<PathBuf>> {
-        let Some(client) = self.client.clone() else {
+        let Some(client) = self.view_codex() else {
             return Task::ready(Vec::new());
         };
         let root = self.folder();

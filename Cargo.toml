@@ -25,6 +25,8 @@ env_logger = "0.11"
 jiff = "0.2"
 dirs = "6"
 base64 = "0.22"
+ureq = { version = "2", default-features = false, features = ["json"] }
+tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
 
 atrium-core = { path = "crates/atrium-core" }
 codex-client = { path = "crates/codex-client" }

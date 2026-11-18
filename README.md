@@ -55,6 +55,19 @@ script/bundle-macos.sh
 
 当前限制：工作线共用一个代码目录（还没有每条线独立 worktree）；越界提醒只针对 agent 报告的文件修改，不包括它在命令里直接写的文件。
 
+## 多设备：tailnet 里其他电脑上的 agent
+
+在别的电脑上运行 `atrium-node`（后端，按 [`docs/node-protocol.md`](docs/node-protocol.md) 和 [`docs/node-implementation.md`](docs/node-implementation.md) 实现），它们的 agent 就出现在 Atrium 里：
+
+- **发现**：读本机 `tailscale status`，探测每台在线设备的 7381 端口；也可以在设置 → Devices 里按地址添加（`ATRIUM_NODES=host:port` 同样可以）
+- **选择**：顶栏的 agent 选择器按设备分组（"This computer"、"studio"……）；远端会话在侧边栏标为 `Claude@studio`、`Codex@studio`
+- **文件夹**：远端新对话的文件夹从那台设备的根目录里逐级选择（通过节点列目录）
+- **原样转接**：节点只负责启动 agent 并把它的标准输入输出转到 WebSocket，Codex 和 ACP 协议端到端不变，所以审批、计划、diff、用量、速度在远端会话里都一样可用
+- **断线不丢**：笔记本合盖、换网络时，进程在那台设备上继续跑；Atrium 自动重连，并按序号补回错过的输出，断线期间写出的消息等连上再发。顶栏显示"Reconnecting to studio…"
+- 远端 Codex 用它自己的模型设置（本机的模型列表、Fast、Plan、推理强度对它不生效）；账号与用量只显示本机 Codex 的
+
+当前限制：项目（工作线 + 中庭）只支持本机文件夹；远端项目需要通过节点读写 `.atrium/`，协议里已经定义（`/v1/fs/*`），界面还没接。Atrium 重启后不会接回之前在远端启动的进程，而是新起一个（agent 自己保存的会话照常可以打开）。
+
 ## 支持的 Agent
 
 | Agent | 接入方式 | 本机需要 |
@@ -155,7 +168,7 @@ mock 后端的触发词：消息里带 `run`（命令 + 审批）、`edit`（文
 ```
 crates/
   atrium-core/   与后端无关的模型：ThreadMeta / Item / AgentEvent / ConfigOption，以及把事件折叠成扁平行列表的 Transcript
-  agent-rpc/        共享传输层：子进程 stdio 上的行分隔 JSON-RPC（可选 JSON-RPC 2.0），查找可执行文件
+  agent-rpc/        共享传输层：子进程 stdio 上的行分隔 JSON-RPC（可选 JSON-RPC 2.0），查找可执行文件；node：atrium-node 客户端（REST + 断线续传的 WebSocket）；含 mock-node
   codex-client/     codex app-server 客户端与协议翻译；含 mock-codex
   acp-client/       ACP 客户端：握手、会话（new/load/resume/list/prompt/cancel/设置）、权限；把 session/update 翻译成 AgentEvent（为没有 id 的 ACP 合成轮次与条目）；含 mock-acp（可模仿 claude / deepseek / antigravity）
   atrium-app/    GPUI 应用：Workspace（状态与后端调用；workspace_project 管项目与工作线）、project（中庭文件、公告解析、范围匹配）+ ui/（sidebar、chat、composer、rows、project、调色板与设置）
@@ -178,6 +191,7 @@ UI 只认识 `atrium-core` 的类型，不认识任何后端协议。任何实�
 cargo test --workspace
 ```
 
+- `agent-rpc`：节点客户端对 mock-node 的端到端测试（进程输入输出、按序号续传、断线自动重连不丢不重、JSON-RPC 走远程连接、文件只限根目录内），以及 `--ignored` 的真实节点验收：`ATRIUM_TEST_NODE=http://127.0.0.1:7381 cargo test -p agent-rpc --test node -- --ignored`
 - `atrium-core`：Transcript 的归并规则（流式拼接、乐观消息去重、审批、失败与断连）；速度测量（首 token、停顿不计时、按轮次的输出数）与用量报告的乱序合并
 - `acp-client`：翻译器单元测试（流式文本与工具交替、历史回放切分轮次、diff 与权限、分组选项与模式），以及四条走真实子进程（mock-acp）的端到端测试：Claude 的完整一轮（计划 + 读文件 + 带审批的命令 + diff）、拒绝命令、Claude 回放历史与 DeepSeek 恢复会话、修改设置与中途取消；另有一条 `--ignored` 测试可对真实 agent 做握手：`ATRIUM_ACP="dsh --profile acp" cargo test -p acp-client -- --ignored real_agent`
 - `codex-client`：JSON-RPC 请求/响应匹配、协议翻译，以及九条走真实子进程的端到端测试：带审批的完整一轮、中断、附件 + 计划 + 用时、重命名 + 压缩 + 审查 + 文件搜索、预测（fork 回退）、插话、编辑/分支/全文搜索、目标 + 账号 + 用量 + 登录登出 + 记忆、提问 + 图片 + Plan 模式 + Fast

@@ -226,36 +226,63 @@ fn header(
         OverflowMenu::new("chat-menu", menu)
     });
 
-    // Which agent: chosen for a new chat, fixed once the chat exists.
+    // Which agent, and on which device: chosen for a new chat, fixed once
+    // the chat exists.
     let agent_picker = {
         let backend = ws.view_backend().to_string();
-        let label = crate::agents::backend_name(&backend);
+        let label = crate::agents::backend_label(&backend);
         if thread_id.is_none() {
-            let mut menu = Menu::new().item(
-                MenuItem::radio(agent_label("Codex", codex_status(ws)), backend == CODEX).on_click(
-                    {
-                        let workspace = workspace.clone();
-                        move |_, cx| workspace.update(cx, |ws, cx| ws.set_draft_backend(CODEX, cx))
-                    },
-                ),
-            );
-            for agent in &ws.agents {
-                let id = agent.profile.id;
-                let installed = agent.status != AgentStatus::NotInstalled;
+            let item = |id: String, name: String| {
                 let workspace = workspace.clone();
-                menu = menu.item(
-                    MenuItem::radio(
-                        agent_label(agent.profile.name, agent_status_text(&agent.status)),
-                        backend == id,
-                    )
-                    .disabled(!installed)
+                let state = backend_status(ws, &id);
+                MenuItem::radio(agent_label(&name, state), backend == id)
+                    .disabled(state == Some("not installed"))
                     .on_click(move |_, cx| {
-                        workspace.update(cx, |ws, cx| ws.set_draft_backend(id, cx))
-                    }),
+                        workspace.update(cx, |ws, cx| ws.set_draft_backend(&id, cx))
+                    })
+            };
+            let here: Vec<MenuItem> = std::iter::once(item(CODEX.into(), "Codex".into()))
+                .chain(
+                    ws.agents
+                        .iter()
+                        .filter(|a| a.remote.is_none())
+                        .map(|a| item(a.profile.id.clone(), a.profile.name.clone())),
+                )
+                .collect();
+            let mut menu = if ws.devices.is_empty() {
+                here.into_iter().fold(Menu::new(), |menu, i| menu.item(i))
+            } else {
+                Menu::new().group("This computer", here)
+            };
+            for device in &ws.devices {
+                let mut items = Vec::new();
+                let codex = crate::agents::backend_id(CODEX, Some(&device.id));
+                if device.codex_status != AgentStatus::NotInstalled {
+                    items.push(item(codex, "Codex".into()));
+                }
+                items.extend(
+                    ws.agents
+                        .iter()
+                        .filter(|a| a.remote.as_ref().is_some_and(|r| r.device == device.id))
+                        .map(|a| item(a.profile.id.clone(), a.profile.name.clone())),
                 );
+                let title = match &device.status {
+                    crate::workspace::DeviceStatus::Online => device.id.clone(),
+                    crate::workspace::DeviceStatus::Offline(_) => {
+                        format!("{} · offline", device.id)
+                    }
+                };
+                if items.is_empty() {
+                    items.push(MenuItem::new("No agents there").disabled(true));
+                }
+                menu = menu.group(title, items);
             }
             DropdownMenu::new("agent", label, menu)
-                .icon(IconName::Bot)
+                .icon(if ws.is_remote_view() {
+                    IconName::Monitor
+                } else {
+                    IconName::Bot
+                })
                 .variant(ButtonVariant::Ghost)
                 .into_any_element()
         } else {
@@ -267,14 +294,56 @@ fn header(
                 .px_2()
                 .text_size(theme.text_size(TextSize::Sm))
                 .child(
-                    Icon::new(IconName::Bot)
-                        .size(IconSize::Sm)
-                        .color(colors.fg_muted),
+                    Icon::new(if ws.is_remote_view() {
+                        IconName::Monitor
+                    } else {
+                        IconName::Bot
+                    })
+                    .size(IconSize::Sm)
+                    .color(colors.fg_muted),
                 )
                 .child(label)
                 .into_any_element()
         }
     };
+
+    // The link to the device a remote chat runs on, when it is not well.
+    let link = ws
+        .link_state(ws.view_backend())
+        .and_then(|state| {
+            let device = crate::agents::split_backend(ws.view_backend())
+                .1
+                .unwrap_or_default()
+                .to_string();
+            match state {
+                agent_rpc::node::LinkState::Reconnecting { attempt, .. } => Some((
+                    colors.warning,
+                    format!("Reconnecting to {device}… ({attempt})"),
+                )),
+                agent_rpc::node::LinkState::Gone(why) => {
+                    Some((colors.danger, format!("{device}: {why}")))
+                }
+                agent_rpc::node::LinkState::Ended { .. } => {
+                    Some((colors.danger, format!("The agent on {device} stopped")))
+                }
+                _ => None,
+            }
+        })
+        .map(|(color, text)| {
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .py_0p5()
+                .rounded_full()
+                .bg(colors.sunken)
+                .text_size(theme.text_size(TextSize::Xs))
+                .text_color(color)
+                .child(Icon::new(IconName::Monitor).size(IconSize::Xs).color(color))
+                .child(text)
+        });
 
     let left_room = if sidebar_collapsed && cfg!(target_os = "macos") {
         px(28.)
@@ -289,7 +358,8 @@ fn header(
         .items_center()
         .gap_2()
         .child(agent_picker)
-        .when(codex, |bar| {
+        .children(link)
+        .when(codex && !ws.is_remote_view(), |bar| {
             bar.child(
                 DropdownMenu::new("model", ws.model_label(), models)
                     .icon(IconName::Sparkles)
@@ -428,7 +498,7 @@ fn body(
             .to_zoned(TimeZone::try_system().unwrap_or(TimeZone::UTC))
             .hour() as u8;
         let fill = composer.clone();
-        let folder = short_path(&ws.settings.working_dir());
+        let folder = short_path(&ws.folder());
         return WelcomeScreen::new("welcome", hour)
             .child(
                 div()
@@ -625,22 +695,36 @@ fn agent_status_text(status: &AgentStatus) -> Option<&'static str> {
     }
 }
 
+/// Why a backend cannot take a message, when it cannot.
+fn backend_status(ws: &Workspace, backend: &str) -> Option<&'static str> {
+    match crate::agents::split_backend(backend) {
+        (CODEX, None) => codex_status(ws),
+        (CODEX, Some(device)) => match ws.device(device) {
+            Some(device) if device.status != crate::workspace::DeviceStatus::Online => {
+                Some("offline")
+            }
+            Some(device) => agent_status_text(&device.codex_status),
+            None => Some("not running"),
+        },
+        _ => match ws.agent(backend) {
+            Some(agent) => agent_status_text(&agent.status),
+            None => Some("not running"),
+        },
+    }
+}
+
 /// "Claude Code is ready in ~/app", or why it is not.
 fn readiness(ws: &Workspace, folder: &str) -> String {
     let backend = ws.view_backend();
-    let name = crate::agents::backend_name(backend);
-    let state = if backend == CODEX {
-        codex_status(ws)
-    } else {
-        ws.agent(backend).and_then(|a| agent_status_text(&a.status))
-    };
-    match state {
+    let name = crate::agents::backend_label(backend);
+    match backend_status(ws, backend) {
         None => format!("{name} is ready in {folder}"),
         Some("starting") => format!("Starting {name}…"),
+        Some("offline") => format!("{name}: the device is offline."),
         Some("not installed") => {
             let install = ws
                 .agent(backend)
-                .map(|a| a.profile.install)
+                .map(|a| a.profile.install.clone())
                 .unwrap_or_default();
             format!("{name} is not installed. {install}")
         }
