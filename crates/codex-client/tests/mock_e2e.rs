@@ -87,7 +87,17 @@ fn a_turn_with_an_approved_command_runs_to_completion() {
             EntryKind::Item(Item::Agent { text, .. }) if text.contains("hello from mock-codex")
         )));
         assert!(entries.iter().all(|e| !e.live));
-        assert!(transcript.usage().is_some());
+        // Context and speed: the breakdown, and the turn timed as it streamed.
+        let usage = transcript.usage().expect("usage reported");
+        assert_eq!(usage.context_window, Some(272_000));
+        assert!(usage.context_used.unwrap() > 0 && usage.total.cached_input > 0);
+        let turn = entries.last().unwrap().turn_id.clone();
+        let pace = transcript
+            .turn_pace(&turn, std::time::Instant::now())
+            .expect("the turn was timed");
+        assert!(pace.done && pace.first_token.is_some());
+        assert!(pace.tokens_per_sec().unwrap() > 0.);
+        assert_eq!(pace.output_tokens, Some(usage.total.output));
 
         let (_, history) = client.thread_resume(&thread.id).await.unwrap();
         assert_eq!(history.len(), 1);

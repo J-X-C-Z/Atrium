@@ -5,7 +5,7 @@ use ely_gpui_component::{
     buttons::{Button, ButtonVariant, IconButton},
     chat::{ChatContainer, ErrorMessage, MessageList, SuggestionChips, WelcomeScreen},
     menus::{DropdownMenu, Menu, MenuItem, OverflowMenu},
-    motion::{ProgressBar, ProgressRing, Skeleton, SkeletonText, Spinner, SpinnerStyle},
+    motion::{ProgressBar, Skeleton, SkeletonText, Spinner, SpinnerStyle},
     primitives::{Icon, IconName},
     shell::drag_region,
     theme::{ActiveTheme, ControlSize, IconSize, Radius, TextSize},
@@ -19,6 +19,7 @@ use jiff::{Timestamp, tz::TimeZone};
 use super::{
     NewChat, RootView, TITLE_BAR_HEIGHT,
     composer::{Composer, short_path},
+    context::format_tokens,
     rows::{self, COLUMN},
 };
 use agentdesk_core::GoalStatus;
@@ -70,20 +71,7 @@ fn header(
     let ws = workspace.read(cx);
     let title = ws.active_thread().map(|thread| thread.title());
     let thread_id = ws.active_thread_id().map(str::to_owned);
-    let usage = ws.transcript().and_then(|t| t.usage()).map(|usage| {
-        let tokens = format_tokens(usage.total_tokens);
-        match usage.context_window {
-            Some(window) if window > 0 => {
-                let share = usage.last_turn_tokens as f64 * 100. / window as f64;
-                if share < 1. {
-                    format!("{tokens} tokens · <1% context")
-                } else {
-                    format!("{tokens} tokens · {share:.0}% context")
-                }
-            }
-            _ => format!("{tokens} tokens"),
-        }
-    });
+    let quick_view = super::context::quick_view(ws, root.clone(), cx);
     let running = ws.running_for();
 
     let mut models = Menu::new().item(
@@ -111,9 +99,11 @@ fn header(
 
     let memory = ws.memory_enabled();
     // How much of the plan's usage is spent: a ring that opens the details.
+    // Codex's plan usage, shown in Codex chats only.
     let usage_meter = ws
         .rate_limits
         .as_ref()
+        .filter(|_| ws.is_codex_view())
         .and_then(|l| l.highest_used())
         .map(|used| {
             let open = root.clone();
@@ -130,7 +120,14 @@ fn header(
                 .cursor_pointer()
                 .hover(|meter| meter.bg(colors.hover))
                 .on_click(move |_, _, cx| open.update(cx, |root, cx| root.open_account(cx)))
-                .child(ProgressRing::new("usage-ring", (used / 100.) as f32).size(gpui::rems(0.9)))
+                .tooltip(ely_gpui_component::primitives::Tooltip::text(format!(
+                    "Plan usage: {used:.0}% of the closest limit"
+                )))
+                .child(
+                    Icon::new(IconName::Gauge)
+                        .size(IconSize::Xs)
+                        .color(colors.fg_subtle),
+                )
                 .child(
                     div()
                         .text_size(theme.text_size(TextSize::Xs))
@@ -207,7 +204,15 @@ fn header(
                 }));
         }
         let archive = (workspace.clone(), id.clone());
+        let details = root.clone();
         menu = menu
+            .separator()
+            .item(
+                MenuItem::new("Context & speed")
+                    .icon(IconName::Zap)
+                    .keys("⌘I")
+                    .on_click(move |_, cx| details.update(cx, |root, cx| root.open_context(cx))),
+            )
             .separator()
             .item(
                 MenuItem::new("Archive")
@@ -320,13 +325,7 @@ fn header(
                 )
                 .child(format!("Working · {}s", took.as_secs()))
         }))
-        .children(usage.filter(|_| running.is_none()).map(|usage| {
-            div()
-                .flex_none()
-                .text_size(theme.text_size(TextSize::Xs))
-                .text_color(colors.fg_subtle)
-                .child(usage)
-        }))
+        .children(quick_view)
         .children(usage_meter)
         .children(chat_menu)
         .when(thread_id.is_some(), |bar| {
@@ -466,14 +465,6 @@ fn body(
     ChatContainer::new(messages)
         .composer(composer_column(composer))
         .into_any_element()
-}
-
-fn format_tokens(tokens: u64) -> String {
-    match tokens {
-        0..1_000 => tokens.to_string(),
-        1_000..1_000_000 => format!("{:.1}k", tokens as f64 / 1_000.),
-        _ => format!("{:.1}M", tokens as f64 / 1_000_000.),
-    }
 }
 
 /// The chat's goal under the title bar: what, how far, and its controls.

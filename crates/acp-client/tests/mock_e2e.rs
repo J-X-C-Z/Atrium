@@ -111,7 +111,22 @@ fn claude_runs_a_turn_with_permission_diff_and_plan() {
                 .iter()
                 .any(|e| matches!(&e.kind, EntryKind::Item(Item::Reasoning { .. })))
         );
-        assert!(transcript.usage().is_some());
+        // Context from usage_update, the turn's counts from the prompt's response.
+        let usage = transcript.usage().expect("usage reported");
+        assert_eq!(
+            (usage.context_used, usage.context_window),
+            (Some(18_400), Some(200_000))
+        );
+        assert_eq!(usage.last.output, 640);
+        assert_eq!(usage.last.input, 1_200 + 14_800 + 900);
+        assert_eq!(usage.last.cached_input, 14_800);
+        assert_eq!(usage.cost.as_ref().unwrap().currency, "USD");
+        let turn = transcript.entries().last().unwrap().turn_id.clone();
+        let pace = transcript
+            .turn_pace(&turn, std::time::Instant::now())
+            .expect("the turn was timed");
+        assert_eq!(pace.tokens_out(), Some((640, true)));
+        assert!(pace.streamed_tokens > 0.);
     });
 }
 

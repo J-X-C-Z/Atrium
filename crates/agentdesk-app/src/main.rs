@@ -14,7 +14,7 @@ use gpui::{
 
 use ui::{
     AttachFiles, CompactChat, FocusComposer, NewChat, OpenPalette, OpenSettings, Quit, Reconnect,
-    ReviewChanges, RootView, StopTurn, ToggleSidebar,
+    ReviewChanges, RootView, ShowContext, StopTurn, ToggleSidebar,
 };
 
 fn main() {
@@ -41,6 +41,8 @@ fn main() {
                 KeyBinding::new("cmd-l", FocusComposer, None),
                 KeyBinding::new("ctrl-l", FocusComposer, None),
                 KeyBinding::new("cmd-shift-a", AttachFiles, None),
+                KeyBinding::new("cmd-i", ShowContext, None),
+                KeyBinding::new("ctrl-i", ShowContext, None),
                 KeyBinding::new("cmd-.", StopTurn, None),
                 KeyBinding::new("ctrl-.", StopTurn, None),
                 KeyBinding::new("cmd-q", Quit, None),
@@ -77,6 +79,7 @@ fn main() {
                         MenuItem::action("Command Palette", OpenPalette),
                         MenuItem::action("Focus Composer", FocusComposer),
                         MenuItem::action("Stop Answer", StopTurn),
+                        MenuItem::action("Context & Speed", ShowContext),
                         MenuItem::separator(),
                         MenuItem::action("Review Uncommitted Changes", ReviewChanges),
                         MenuItem::action("Compact Conversation", CompactChat),

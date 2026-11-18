@@ -4,7 +4,8 @@ use std::collections::HashMap;
 
 use agentdesk_core::{
     AgentCommand, AgentEvent, ApprovalKind, ApprovalRequest, ChangeKind, ConfigChoice,
-    ConfigOption, FileChange, Item, ItemStatus, PlanStep, ThreadMeta, TokenUsage, TurnStatus,
+    ConfigOption, Cost, FileChange, Item, ItemStatus, PlanStep, ThreadMeta, TokenCounts,
+    TokenUsage, TurnStatus,
 };
 use serde_json::Value;
 
@@ -161,6 +162,9 @@ struct Session {
     tools: HashMap<String, Value>,
     replaying: bool,
     options: Vec<ConfigOption>,
+    /// Usage as reported so far: context from `usage_update`, counts from
+    /// each prompt's response.
+    usage: TokenUsage,
 }
 
 /// Keeps per-session state to give ACP's anonymous updates stable ids.
@@ -253,7 +257,31 @@ impl Translator {
         &mut self,
         session: &str,
         result: Result<String, String>,
+        usage: Option<&Value>,
     ) -> Vec<AgentEvent> {
+        // The turn's own counts (ACP's unstable `usage`): input there
+        // excludes the cache counters.
+        let mut reported = Vec::new();
+        if let Some(usage) = usage.filter(|u| u.is_object()) {
+            let n = |key: &str| usage[key].as_u64().unwrap_or_default();
+            let (read, write) = (n("cachedReadTokens"), n("cachedWriteTokens"));
+            let last = TokenCounts {
+                total: n("totalTokens"),
+                input: n("inputTokens") + read + write,
+                cached_input: read,
+                output: n("outputTokens"),
+                reasoning: n("thoughtTokens"),
+            };
+            if last.total > 0 || last.output > 0 {
+                let state = self.session(session);
+                state.usage.last = last;
+                state.usage.total.add(&last);
+                reported.push(AgentEvent::TokenUsage {
+                    thread_id: session.to_string(),
+                    usage: state.usage.clone(),
+                });
+            }
+        }
         let (status, error) = match result.as_deref() {
             Ok("end_turn") => (TurnStatus::Completed, None),
             Ok("cancelled") => (TurnStatus::Interrupted, None),
@@ -272,7 +300,8 @@ impl Translator {
             Ok(_) => (TurnStatus::Completed, None),
             Err(message) => (TurnStatus::Failed, Some(message.to_string())),
         };
-        self.end_turn(session, status, error)
+        reported.extend(self.end_turn(session, status, error));
+        reported
     }
 
     /// History is about to be replayed through updates (`session/load`).
@@ -432,14 +461,20 @@ impl Translator {
                 }]
             }
             "usage_update" => {
-                let used = update["used"].as_u64().unwrap_or_default();
+                let state = self.session(&session);
+                state.usage.context_used = update["used"].as_u64();
+                if let Some(size) = update["size"].as_u64().filter(|s| *s > 0) {
+                    state.usage.context_window = Some(size);
+                }
+                if let Some(amount) = update["cost"]["amount"].as_f64() {
+                    state.usage.cost = Some(Cost {
+                        amount,
+                        currency: s(&update["cost"], "currency"),
+                    });
+                }
                 vec![AgentEvent::TokenUsage {
+                    usage: state.usage.clone(),
                     thread_id: session,
-                    usage: TokenUsage {
-                        total_tokens: used,
-                        last_turn_tokens: used,
-                        context_window: update["size"].as_u64(),
-                    },
                 }]
             }
             "session_info_update" => match opt_s(update, "title") {
@@ -763,7 +798,7 @@ mod tests {
         fold(&mut transcript, events);
         let events = t.update(&update("s", json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "All good."}})));
         fold(&mut transcript, events);
-        let events = t.finish_prompt("s", Ok("end_turn".into()));
+        let events = t.finish_prompt("s", Ok("end_turn".into()), None);
         fold(&mut transcript, events);
 
         let kinds: Vec<String> = transcript

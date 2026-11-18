@@ -59,6 +59,17 @@ script/bundle-macos.sh
 - `/` 命令：`/new` `/review` `/compact` `/attach` `/settings` `/sidebar`
 - 访问模式（Read only / Auto / Full access，对应 Codex 的审批策略 + 沙箱）、推理强度（按模型支持的档位）、新对话的工作目录（含最近使用）
 
+**上下文与速度**
+- 顶栏快速查看：上下文占用环与百分比（接近满时变色），以及输出速度（tok/s，生成时实时更新）；悬停显示具体 token 数，点击或 ⌘I 打开详情
+- 每轮页脚：用时 · 输出 token 数 · 速度
+- 详情面板（"Context & speed"）：
+  - 上下文窗口：已用 / 总量 / 剩余，以及最近一次请求里缓存输入、新输入、输出各占多少
+  - 速度：上一轮、首 token 延迟、本对话平均，以及最近 8 轮的明细表
+  - token 明细：最近一次请求和整个对话的输入（含缓存命中率）、输出（含推理），Claude 还显示费用
+  - Codex 对话里可直接压缩上下文
+- 数据来源：Codex 用 `thread/tokenUsage/updated` 的完整拆分；Claude 等 ACP agent 用 `usage_update`（上下文占用、费用）加每轮 `session/prompt` 响应里的 `usage`（本轮 token）。两种报告的到达顺序不固定，所以合并而不是覆盖
+- 速度按流式文本计算：从文本估算 token 数，只计文本在流动的时间；超过 2 秒的停顿（运行工具、发起新请求）不算。不用后端报告的输出 token 数来算速度，因为其中包含不流式显示的工具参数和隐藏推理，会把速度算高。输出 token 数在后端报告时用准确值，否则标 ≈ 表示估算
+
 **对话管理**
 - 侧边栏按日期分组、搜索、置顶；每条对话可重命名 / 置顶 / 归档；⌘B 折叠为图标栏（宽度动画）
 - 顶栏：模型选择、标题、token 与上下文占比、对话菜单（重命名、置顶、代码审查、压缩上下文、归档）
@@ -101,6 +112,7 @@ AgentDesk 以 `experimentalApi` 连接 Codex app-server，下面这些都走的�
 | ⌘L | 聚焦输入框 |
 | ⌘⇧A | 添加附件 |
 | ⌘. | 停止回答 |
+| ⌘I | 上下文与速度详情 |
 | Tab | 采纳预测的下一句（输入框为空且有预测时） |
 | Enter / ⇧Enter | 发送 / 换行 |
 
@@ -136,7 +148,7 @@ UI 只认识 `agentdesk-core` 的类型，不认识任何后端协议。任何�
 cargo test --workspace
 ```
 
-- `agentdesk-core`：Transcript 的归并规则（流式拼接、乐观消息去重、审批、失败与断连）
+- `agentdesk-core`：Transcript 的归并规则（流式拼接、乐观消息去重、审批、失败与断连）；速度测量（首 token、停顿不计时、按轮次的输出数）与用量报告的乱序合并
 - `acp-client`：翻译器单元测试（流式文本与工具交替、历史回放切分轮次、diff 与权限、分组选项与模式），以及四条走真实子进程（mock-acp）的端到端测试：Claude 的完整一轮（计划 + 读文件 + 带审批的命令 + diff）、拒绝命令、Claude 回放历史与 DeepSeek 恢复会话、修改设置与中途取消；另有一条 `--ignored` 测试可对真实 agent 做握手：`AGENTDESK_ACP="dsh --profile acp" cargo test -p acp-client -- --ignored real_agent`
 - `codex-client`：JSON-RPC 请求/响应匹配、协议翻译，以及九条走真实子进程的端到端测试：带审批的完整一轮、中断、附件 + 计划 + 用时、重命名 + 压缩 + 审查 + 文件搜索、预测（fork 回退）、插话、编辑/分支/全文搜索、目标 + 账号 + 用量 + 登录登出 + 记忆、提问 + 图片 + Plan 模式 + Fast
 

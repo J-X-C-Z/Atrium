@@ -8,7 +8,7 @@
 use agentdesk_core::{
     Account, AgentEvent, ApprovalKind, ApprovalRequest, ChangeKind, Credits, FileChange, Goal,
     GoalStatus, Item, ItemStatus, PlanStep, Question, RateLimits, RateWindow, ThreadMeta,
-    TokenUsage, TurnStatus, UserInputRequest,
+    TokenCounts, TokenUsage, TurnStatus, UserInputRequest,
 };
 use serde_json::Value;
 
@@ -406,9 +406,12 @@ pub fn event(method: &str, params: &Value) -> Option<AgentEvent> {
             AgentEvent::TokenUsage {
                 thread_id,
                 usage: TokenUsage {
-                    total_tokens: usage["total"]["totalTokens"].as_u64().unwrap_or_default(),
-                    last_turn_tokens: usage["last"]["totalTokens"].as_u64().unwrap_or_default(),
+                    total: counts(&usage["total"]),
+                    last: counts(&usage["last"]),
+                    // Codex's last request is what the context holds now.
+                    context_used: usage["last"]["totalTokens"].as_u64(),
                     context_window: usage["modelContextWindow"].as_u64(),
+                    cost: None,
                 },
             }
         }
@@ -575,6 +578,18 @@ pub fn account(value: &Value) -> Option<Account> {
         },
         other => Account::Other(other.to_string()),
     })
+}
+
+/// One of Codex's token breakdowns (`total` or `last`).
+fn counts(value: &Value) -> TokenCounts {
+    let n = |key: &str| value[key].as_u64().unwrap_or_default();
+    TokenCounts {
+        total: n("totalTokens"),
+        input: n("inputTokens"),
+        cached_input: n("cachedInputTokens"),
+        output: n("outputTokens"),
+        reasoning: n("reasoningOutputTokens"),
+    }
 }
 
 #[cfg(test)]

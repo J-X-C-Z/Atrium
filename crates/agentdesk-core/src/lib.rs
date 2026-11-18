@@ -8,12 +8,14 @@
 
 mod event;
 mod model;
+mod pace;
 mod transcript;
 
 pub use event::{AgentEvent, ApprovalDecision, ApprovalKind, ApprovalRequest, UserInputRequest};
 pub use model::{
-    Account, AgentCommand, ChangeKind, ConfigChoice, ConfigOption, Credits, FileChange, Goal,
+    Account, AgentCommand, ChangeKind, ConfigChoice, ConfigOption, Cost, Credits, FileChange, Goal,
     GoalStatus, Item, ItemStatus, PlanStep, Question, RateLimits, RateWindow, RequestId,
-    ThreadMeta, TokenUsage, TurnStatus, plan_label,
+    ThreadMeta, TokenCounts, TokenUsage, TurnStatus, plan_label,
 };
+pub use pace::{TurnPace, estimate_tokens};
 pub use transcript::{Entry, EntryKind, Transcript, TurnSummary};

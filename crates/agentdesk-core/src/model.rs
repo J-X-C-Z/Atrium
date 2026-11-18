@@ -79,11 +79,82 @@ pub struct PlanStep {
     pub active: bool,
 }
 
+/// Tokens of one kind of use, as far as the backend breaks them down.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TokenCounts {
+    pub total: u64,
+    /// Prompt tokens, cached ones included.
+    pub input: u64,
+    /// The part of `input` served from the prompt cache.
+    pub cached_input: u64,
+    /// Tokens the model wrote, reasoning included.
+    pub output: u64,
+    /// The part of `output` spent reasoning.
+    pub reasoning: u64,
+}
+
+impl TokenCounts {
+    /// Whether the backend said more than a total.
+    pub fn has_breakdown(&self) -> bool {
+        self.input > 0 || self.output > 0
+    }
+
+    pub fn add(&mut self, other: &TokenCounts) {
+        self.total += other.total;
+        self.input += other.input;
+        self.cached_input += other.cached_input;
+        self.output += other.output;
+        self.reasoning += other.reasoning;
+    }
+}
+
+/// What a conversation has used, and how full its context is.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct TokenUsage {
-    pub total_tokens: u64,
-    pub last_turn_tokens: u64,
+    /// The whole conversation so far.
+    pub total: TokenCounts,
+    /// The most recent model request (or turn, for agents that report per turn).
+    pub last: TokenCounts,
+    /// Tokens in the context window now.
+    pub context_used: Option<u64>,
     pub context_window: Option<u64>,
+    /// What the conversation cost, for agents billed per token.
+    pub cost: Option<Cost>,
+}
+
+impl TokenUsage {
+    /// Takes in a newer report. Agents may report context and counts in
+    /// separate messages, in either order, so what a report leaves out keeps
+    /// its last known value.
+    pub fn merge(&mut self, newer: &TokenUsage) {
+        if newer.total.total > 0 || newer.total.has_breakdown() {
+            self.total = newer.total;
+        }
+        if newer.last.total > 0 || newer.last.has_breakdown() {
+            self.last = newer.last;
+        }
+        if newer.context_used.is_some() {
+            self.context_used = newer.context_used;
+        }
+        if newer.context_window.is_some() {
+            self.context_window = newer.context_window;
+        }
+        if newer.cost.is_some() {
+            self.cost.clone_from(&newer.cost);
+        }
+    }
+
+    /// How full the context is, 0 to 1, when the window is known.
+    pub fn context_share(&self) -> Option<f64> {
+        let window = self.context_window.filter(|w| *w > 0)?;
+        Some((self.context_used? as f64 / window as f64).clamp(0., 1.))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Cost {
+    pub amount: f64,
+    pub currency: String,
 }
 
 /// One thing that happened in a turn, normalized across backends.

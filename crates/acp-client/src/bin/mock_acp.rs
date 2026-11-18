@@ -483,11 +483,20 @@ fn prompt(out: &Out, state: &State, id: Value, params: &Value) {
     if !cancelled {
         cancelled = !stream(out, &session_id, "agent_message_chunk", &answer, &stop);
     }
-    update(
-        out,
-        &session_id,
-        json!({"sessionUpdate": "usage_update", "used": 18_400, "size": 200_000}),
-    );
+    update(out, &session_id, {
+        let turns = state
+            .sessions
+            .lock()
+            .unwrap()
+            .get(&session_id)
+            .map_or(0, |s| s.history.len() as u64);
+        let mut usage = json!({"sessionUpdate": "usage_update",
+                "used": 18_400 + 6_200 * turns, "size": 200_000});
+        if state.name == "claude" {
+            usage["cost"] = json!({"amount": 0.042 * (turns + 1) as f64, "currency": "USD"});
+        }
+        usage
+    });
     {
         let mut sessions = state.sessions.lock().unwrap();
         if let Some(s) = sessions.get_mut(&session_id) {
@@ -506,6 +515,11 @@ fn prompt(out: &Out, state: &State, id: Value, params: &Value) {
     reply(
         out,
         id,
-        json!({"stopReason": if cancelled || stop.load(Ordering::Relaxed) { "cancelled" } else { "end_turn" }}),
+        json!({
+            "stopReason": if cancelled || stop.load(Ordering::Relaxed) { "cancelled" } else { "end_turn" },
+            // This turn's counts, as claude-agent-acp reports them.
+            "usage": {"inputTokens": 1_200, "cachedReadTokens": 14_800, "cachedWriteTokens": 900,
+                "outputTokens": 640, "totalTokens": 17_540},
+        }),
     );
 }

@@ -1051,10 +1051,22 @@ fn run_turn(
     notify(
         out,
         "thread/tokenUsage/updated",
-        with(json!({"tokenUsage": {
-        "total": {"totalTokens": 1234, "inputTokens": 1000, "cachedInputTokens": 0, "cacheWriteInputTokens": 0, "outputTokens": 234, "reasoningOutputTokens": 40},
-        "last": {"totalTokens": 600, "inputTokens": 500, "cachedInputTokens": 0, "cacheWriteInputTokens": 0, "outputTokens": 100, "reasoningOutputTokens": 20},
-        "modelContextWindow": 200000}})),
+        with({
+            // Grows turn by turn, like a real conversation.
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static TURNS: AtomicU64 = AtomicU64::new(0);
+            let n = TURNS.fetch_add(1, Ordering::Relaxed) + 1;
+            // Each request re-sends the conversation so far.
+            let input = (1..=n).map(|k| 9_000 + 3_100 * k).sum::<u64>();
+            let cached = (1..n).map(|k| 9_000 + 3_100 * k).sum::<u64>() + 2_400;
+            let (output, reasoning) = (280 * n, 60 * n);
+            json!({"tokenUsage": {
+                "total": {"totalTokens": input + output, "inputTokens": input, "cachedInputTokens": cached,
+                    "cacheWriteInputTokens": 0, "outputTokens": output, "reasoningOutputTokens": reasoning},
+                "last": {"totalTokens": 9_000 + 3_380 * n, "inputTokens": 9_000 + 3_100 * n,
+                    "cachedInputTokens": 2_400 * n, "cacheWriteInputTokens": 0, "outputTokens": 280, "reasoningOutputTokens": 60},
+                "modelContextWindow": 272000}})
+        }),
     );
     let status = if interrupted {
         "interrupted"

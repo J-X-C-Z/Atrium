@@ -3,6 +3,7 @@
 
 mod chat;
 mod composer;
+mod context;
 mod rows;
 mod sidebar;
 
@@ -47,6 +48,7 @@ actions!(
         CompactChat,
         ReviewChanges,
         AttachFiles,
+        ShowContext,
     ]
 );
 
@@ -104,6 +106,14 @@ pub fn register_actions(cx: &mut App) {
         cx.notify();
     });
     forward::<OpenSettings>(cx, |this, window, cx| this.open_settings(window, cx));
+    forward::<ShowContext>(cx, |this, _, cx| {
+        if matches!(this.overlay, Some(Overlay::Context)) {
+            this.overlay = None;
+            cx.notify();
+        } else {
+            this.open_context(cx);
+        }
+    });
     forward::<FocusComposer>(cx, |this, window, cx| {
         Composer::focus_entity(&this.composer, window, cx)
     });
@@ -126,6 +136,7 @@ pub const TITLE_BAR_HEIGHT: f32 = 44.;
 enum Overlay {
     Palette,
     Account,
+    Context,
     Goal {
         objective: Entity<TextInput>,
         budget: Entity<TextInput>,
@@ -603,6 +614,7 @@ impl RootView {
                 "",
             ),
             ("usage", "Account & usage", IconName::Gauge, ""),
+            ("context", "Context & speed", IconName::Zap, "⌘I"),
             ("fast", "Toggle Fast mode", IconName::Zap, ""),
             ("plan", "Toggle Plan mode", IconName::ListChecks, ""),
             (
@@ -693,6 +705,7 @@ impl RootView {
             "branch" => workspace.update(cx, |ws, cx| ws.branch(None, cx)),
             "memory" => workspace.update(cx, |ws, cx| ws.toggle_memory(cx)),
             "usage" => self.open_account(cx),
+            "context" => self.open_context(cx),
             "fast" | "plan" | "predict" => workspace.update(cx, |ws, cx| {
                 match value {
                     "fast" => ws.settings.fast = !ws.settings.fast,
@@ -911,6 +924,7 @@ impl Render for RootView {
             None => None,
             Some(Overlay::Palette) => Some(self.palette(cx)),
             Some(Overlay::Account) => Some(self.account_dialog(cx)),
+            Some(Overlay::Context) => Some(self.context_dialog(cx)),
             Some(Overlay::Goal { objective, budget }) => {
                 let (objective, budget) = (objective.clone(), budget.clone());
                 Some(self.goal_dialog(&objective, &budget, cx))

@@ -371,12 +371,14 @@ impl AcpClient {
                 json!({ "sessionId": session_id, "prompt": blocks }),
             )
             .await
-            .map(|r| str_of(&r, "stopReason"))
             .map_err(|e| self.explain(e).to_string());
-        self.translator
-            .lock()
-            .expect("translator")
-            .finish_prompt(session_id, result)
+        let usage = result.as_ref().ok().map(|r| r["usage"].clone());
+        let result = result.map(|r| str_of(&r, "stopReason"));
+        self.translator.lock().expect("translator").finish_prompt(
+            session_id,
+            result,
+            usage.as_ref(),
+        )
     }
 
     /// Asks the running turn to stop; its prompt then ends as cancelled.

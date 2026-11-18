@@ -1,8 +1,9 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Instant};
 
 use crate::{
     event::{AgentEvent, ApprovalDecision, ApprovalRequest, UserInputRequest},
     model::{Item, ItemStatus, PlanStep, TokenUsage, TurnStatus},
+    pace::{PaceClock, TurnPace},
 };
 
 /// One row of a conversation as the UI draws it.
@@ -57,6 +58,8 @@ pub struct Transcript {
     seeded: usize,
     /// How each finished turn ended.
     turns: HashMap<String, TurnSummary>,
+    /// How fast each live-seen turn wrote, in the order the turns began.
+    paces: Vec<(String, PaceClock)>,
 }
 
 /// How a turn ended, for the footer under its answer.
@@ -158,8 +161,81 @@ impl Transcript {
         self.version
     }
 
-    pub fn usage(&self) -> Option<TokenUsage> {
-        self.usage
+    pub fn usage(&self) -> Option<&TokenUsage> {
+        self.usage.as_ref()
+    }
+
+    /// How fast `turn_id` wrote, as of `now`, if it was seen live.
+    pub fn turn_pace(&self, turn_id: &str, now: Instant) -> Option<TurnPace> {
+        self.paces
+            .iter()
+            .find(|(id, _)| id == turn_id)
+            .map(|(_, clock)| clock.at(now))
+    }
+
+    /// Every turn seen live, oldest first, with its pace as of `now`.
+    pub fn paces(&self, now: Instant) -> Vec<(String, TurnPace)> {
+        self.paces
+            .iter()
+            .map(|(id, clock)| (id.clone(), clock.at(now)))
+            .collect()
+    }
+
+    /// The running turn's pace, or else the last one's.
+    pub fn latest_pace(&self, now: Instant) -> Option<TurnPace> {
+        self.paces.last().map(|(_, clock)| clock.at(now))
+    }
+
+    fn clock(&mut self, turn_id: &str) -> Option<&mut PaceClock> {
+        self.paces
+            .iter_mut()
+            .rev()
+            .find(|(id, _)| id == turn_id)
+            .map(|(_, clock)| clock)
+    }
+
+    /// Like [`Transcript::apply`], timing the turn's output as of `now`.
+    pub fn apply_at(&mut self, event: &AgentEvent, now: Instant) -> bool {
+        match event {
+            AgentEvent::TurnStarted { turn_id, .. } if self.clock(turn_id).is_none() => {
+                // A reported total before the turn lets its own count be
+                // told apart; with history but no total it cannot be.
+                let before = match &self.usage {
+                    Some(usage) => Some(usage.total.output),
+                    None if self.turns.is_empty() && self.seeded == 0 => Some(0),
+                    None => None,
+                };
+                self.paces
+                    .push((turn_id.clone(), PaceClock::start(now, before)));
+            }
+            AgentEvent::AgentMessageDelta { turn_id, delta, .. }
+            | AgentEvent::ReasoningDelta { turn_id, delta, .. } => {
+                if let Some(clock) = self.clock(turn_id) {
+                    clock.output(delta, now);
+                }
+            }
+            AgentEvent::TokenUsage { usage, .. } if usage.total.output > 0 => {
+                if let Some(turn) = self.active_turn.clone()
+                    && let Some(clock) = self.clock(&turn)
+                {
+                    clock.reported(usage.total.output);
+                }
+            }
+            AgentEvent::TurnCompleted { turn_id, .. } => {
+                if let Some(clock) = self.clock(turn_id) {
+                    clock.end(now);
+                }
+            }
+            AgentEvent::Disconnected { .. } => {
+                if let Some(turn) = self.active_turn.clone()
+                    && let Some(clock) = self.clock(&turn)
+                {
+                    clock.end(now);
+                }
+            }
+            _ => {}
+        }
+        self.apply_untimed(event)
     }
 
     pub fn notice(&self) -> Option<&str> {
@@ -266,8 +342,13 @@ impl Transcript {
         }
     }
 
-    /// Folds one event in. Returns whether anything changed.
+    /// Folds one event in, timing output as it arrives. Returns whether
+    /// anything changed.
     pub fn apply(&mut self, event: &AgentEvent) -> bool {
+        self.apply_at(event, Instant::now())
+    }
+
+    fn apply_untimed(&mut self, event: &AgentEvent) -> bool {
         let before = self.version;
         match event {
             AgentEvent::TurnStarted { turn_id, .. } => {
@@ -389,7 +470,7 @@ impl Transcript {
                 }
             }
             AgentEvent::TokenUsage { usage, .. } => {
-                self.usage = Some(*usage);
+                self.usage.get_or_insert_with(Default::default).merge(usage);
                 self.bump();
             }
             AgentEvent::ApprovalRequested(request) => {
@@ -829,5 +910,80 @@ mod tests {
         )]);
         assert_eq!(t.len(), 2);
         assert!(!t.is_running());
+    }
+
+    #[test]
+    fn usage_reports_merge_in_either_order() {
+        use crate::model::TokenCounts;
+        let context = TokenUsage {
+            context_used: Some(18_000),
+            context_window: Some(200_000),
+            ..Default::default()
+        };
+        let counts = TokenUsage {
+            last: TokenCounts {
+                output: 640,
+                ..Default::default()
+            },
+            total: TokenCounts {
+                output: 640,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        for order in [[&context, &counts], [&counts, &context]] {
+            let mut t = Transcript::new();
+            for usage in order {
+                t.apply(&AgentEvent::TokenUsage {
+                    thread_id: "t".into(),
+                    usage: usage.clone(),
+                });
+            }
+            let usage = t.usage().unwrap();
+            assert_eq!(usage.context_used, Some(18_000));
+            assert_eq!(usage.total.output, 640);
+        }
+    }
+
+    #[test]
+    fn a_turn_is_timed_from_start_to_end() {
+        use std::time::Duration;
+        let t0 = Instant::now();
+        let at = |ms| t0 + Duration::from_millis(ms);
+        let mut t = Transcript::new();
+        t.apply_at(
+            &AgentEvent::TurnStarted {
+                thread_id: "t".into(),
+                turn_id: "1".into(),
+            },
+            t0,
+        );
+        for i in 0..5 {
+            t.apply_at(
+                &AgentEvent::AgentMessageDelta {
+                    thread_id: "t".into(),
+                    turn_id: "1".into(),
+                    item_id: "a".into(),
+                    delta: "word word word w".into(),
+                },
+                at(800 + i * 100),
+            );
+        }
+        t.apply_at(
+            &AgentEvent::TurnCompleted {
+                thread_id: "t".into(),
+                turn_id: "1".into(),
+                status: TurnStatus::Completed,
+                error: None,
+                duration_ms: None,
+            },
+            at(1_300),
+        );
+        let pace = t.turn_pace("1", at(5_000)).unwrap();
+        assert_eq!(pace.first_token, Some(Duration::from_millis(800)));
+        assert_eq!(pace.elapsed, Duration::from_millis(1_300));
+        // Four timed pieces of four tokens in 400ms.
+        assert!((pace.tokens_per_sec().unwrap() - 40.).abs() < 1e-9);
+        assert!(pace.done && !pace.writing_now);
     }
 }

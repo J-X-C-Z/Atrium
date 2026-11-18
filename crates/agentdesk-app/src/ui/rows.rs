@@ -139,8 +139,19 @@ fn footer(
         TurnStatus::Failed => footer = footer.fact("Failed"),
         _ => {}
     }
-    if let Some(ms) = summary.duration_ms {
-        footer = footer.fact(format_duration(Duration::from_millis(ms)));
+    let pace = transcript.turn_pace(&turn, std::time::Instant::now());
+    match (summary.duration_ms, pace) {
+        (Some(ms), _) => footer = footer.fact(format_duration(Duration::from_millis(ms))),
+        (None, Some(pace)) if pace.done => footer = footer.fact(format_duration(pace.elapsed)),
+        _ => {}
+    }
+    if let Some(pace) = &pace {
+        if let Some(out) = super::context::format_out(pace) {
+            footer = footer.fact(out);
+        }
+        if let Some(speed) = super::context::format_speed(pace) {
+            footer = footer.fact(speed);
+        }
     }
     let retry = workspace.clone();
     let can_retry = transcript.turn_prompt(&turn).is_some() && !transcript.is_running();
