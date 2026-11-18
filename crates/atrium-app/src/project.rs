@@ -117,6 +117,27 @@ pub struct Milestone {
     pub done: bool,
 }
 
+/// A stage of a roadmap: a `### Title` and the steps under it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Phase {
+    pub title: String,
+    pub steps: Vec<Milestone>,
+}
+
+impl Phase {
+    pub fn done(&self) -> bool {
+        self.steps.iter().all(|m| m.done)
+    }
+
+    /// Steps done and total.
+    pub fn progress(&self) -> (usize, usize) {
+        (
+            self.steps.iter().filter(|m| m.done).count(),
+            self.steps.len(),
+        )
+    }
+}
+
 /// `.atrium/tasks/<owner>/<id>.md`: one agent asked for by another.
 ///
 /// ```text
@@ -128,7 +149,12 @@ pub struct Milestone {
 /// What to do.
 ///
 /// ## Roadmap
-/// - [ ] First milestone
+/// ### First phase
+/// - [ ] A step
+/// - [ ] Another step
+///
+/// ### Next phase
+/// - [ ] A step
 ///
 /// ## Result
 /// What was done, written by the agent that did it.
@@ -145,7 +171,10 @@ pub struct Task {
     pub scope: Vec<String>,
     /// What to do: everything before the first `## ` section.
     pub body: String,
+    /// Every step of the roadmap, in order.
     pub roadmap: Vec<Milestone>,
+    /// The roadmap's phases; without `###` headings each step is a phase.
+    pub phases: Vec<Phase>,
     pub result: Option<String>,
 }
 
@@ -203,6 +232,7 @@ impl Task {
             lines.next();
         }
         let mut section: Option<String> = None;
+        let mut phases: Vec<Phase> = Vec::new();
         let mut body = String::new();
         let mut result = String::new();
         for line in lines {
@@ -216,6 +246,13 @@ impl Task {
                     body.push('\n');
                 }
                 Some("roadmap") | Some("milestones") => {
+                    if let Some(title) = line.trim().strip_prefix("### ") {
+                        phases.push(Phase {
+                            title: title.trim().to_string(),
+                            steps: Vec::new(),
+                        });
+                        continue;
+                    }
                     let item = line.trim();
                     let item = item
                         .strip_prefix("- ")
@@ -233,10 +270,19 @@ impl Task {
                     } else {
                         continue;
                     };
-                    task.roadmap.push(Milestone {
+                    let step = Milestone {
                         text: text.trim().to_string(),
                         done,
-                    });
+                    };
+                    match phases.last_mut() {
+                        Some(phase) if !phase.title.is_empty() => phase.steps.push(step.clone()),
+                        // Steps before any heading stand on their own.
+                        _ => phases.push(Phase {
+                            title: String::new(),
+                            steps: vec![step.clone()],
+                        }),
+                    }
+                    task.roadmap.push(step);
                 }
                 Some("result") | Some("report") => {
                     result.push_str(line);
@@ -249,6 +295,16 @@ impl Task {
             }
         }
         task.body = body.trim().to_string();
+        task.phases = phases
+            .into_iter()
+            .filter(|p| !p.steps.is_empty())
+            .map(|mut p| {
+                if p.title.is_empty() {
+                    p.title = p.steps[0].text.clone();
+                }
+                p
+            })
+            .collect();
         let result = result.trim();
         task.result = (!result.is_empty()).then(|| result.to_string());
         task
@@ -281,6 +337,11 @@ impl Task {
             }
         }
         text
+    }
+
+    /// The phase being worked on: the first not done.
+    pub fn current_phase(&self) -> Option<usize> {
+        self.phases.iter().position(|p| !p.done())
     }
 
     /// Steps done and total.
@@ -361,7 +422,7 @@ impl Default for ProjectFile {
             name: String::new(),
             streams: Vec::new(),
             max_workers: 3,
-            approve_leads: true,
+            approve_leads: false,
             approved: Vec::new(),
         }
     }
@@ -817,8 +878,9 @@ impl Project {
              How to work:\n\
              1. Read the repository enough to plan. Write `{dir}/plan.md`: the goal, the milestones in order, which lead owns each, and the decisions that cut across leads. Put shared conventions in `{dir}/brief.md` and interfaces between leads in `{dir}/contracts/`.\n\
              2. Split the work into 2–5 leads with clear, non-overlapping scopes. Each lead is one long-running session that owns its part. For each, write `{dir}/tasks/{id}/<lead-id>.md`:\n\
-             ```\n# <Lead name>\nstatus: open\nagent: <codex, claude, deepseek or antigravity; leave out to use yours>\nscope: <paths it owns, as globs, such as web/**, src/ui>\n\n<Its goal: what done looks like, and what it must not touch.>\n\n## Roadmap\n- [ ] <first milestone, small enough to check>\n- [ ] <next milestone>\n```\n\
-             Atrium starts a lead for each file{approval}, and the lead ticks its roadmap as it goes.\n\
+             ```\n# <Lead name>\nstatus: open\nagent: <codex, claude, deepseek or antigravity; leave out to use yours>\nscope: <paths it owns, as globs, such as web/**, src/ui>\n\n<Its goal: what done looks like, and what it must not touch.>\n\n## Roadmap\n### <Phase 1 title>\n- [ ] <step small enough to check>\n- [ ] <step>\n\n### <Phase 2 title>\n- [ ] <step>\n```\n\
+             The roadmap is that lead's share of `{dir}/plan.md`: 2–6 phases in order, each a few checkable steps. The user follows every lead's progress phase by phase, so name phases by outcome (\"Timeline editing\"), not by activity.\n\
+             Atrium starts a lead for each file{approval} and hands it the roadmap; the lead ticks steps as it goes.\n\
              3. Then stop. You are woken when a lead posts you a notice (at a milestone, or blocked on a decision across leads) or finishes its task. When woken: check its work against the plan, update `{dir}/plan.md`, and post notices to re-align leads if needed. Keep these turns short; do not take over a lead's work.\n\n\
              To tell leads something, append one line to `{dir}/notices.md`: `- YYYY-MM-DD HH:MM · {id} → <lead id or all>: <message>`.",
             project = self.file.name,
@@ -840,12 +902,22 @@ impl Project {
             .filter(|t| !t.roadmap.is_empty())
             .map(|t| {
                 let steps: Vec<String> = t
-                    .roadmap
+                    .phases
                     .iter()
-                    .map(|m| format!("- [{}] {}", if m.done { "x" } else { " " }, m.text))
+                    .map(|p| {
+                        let mut text = format!("### {}", p.title);
+                        for m in &p.steps {
+                            text.push_str(&format!(
+                                "\n- [{}] {}",
+                                if m.done { "x" } else { " " },
+                                m.text
+                            ));
+                        }
+                        text
+                    })
                     .collect();
                 format!(
-                    "Your roadmap, in `{path}` under Roadmap:\n{steps}\nWork through it in order. When you reach a milestone, change its `- [ ]` to `- [x]` in that file.\n\n",
+                    "Your roadmap from the controller, in `{path}` under Roadmap:\n{steps}\nWork through it phase by phase, in order. As soon as you finish a step, change its `- [ ]` to `- [x]` in that file: the user watches your progress there. When a phase is done, post the controller a notice. If the roadmap needs to change, tell the controller rather than editing the phases yourself.\n\n",
                     path = t.rel_path(),
                     steps = steps.join("\n")
                 )
@@ -1228,6 +1300,7 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let mut project = Project::open(&root).unwrap();
         project.file.max_workers = 1;
+        project.file.approve_leads = true;
         let mut boss = stream("boss", &[]);
         boss.role = Role::Controller;
         project.file.streams.push(boss);
@@ -1257,6 +1330,11 @@ mod tests {
         assert!(project.startable().is_empty());
         let kickoff = project.kickoff(&lead);
         assert!(kickoff.contains("- [ ] Shell") && kickoff.contains("`boss`"));
+        assert_eq!(
+            project.task(&key).unwrap().phases.len(),
+            2,
+            "steps without headings are phases"
+        );
         assert!(
             project
                 .kickoff(project.stream("boss").unwrap())
@@ -1329,5 +1407,18 @@ mod tests {
         let ready: Vec<String> = project.startable().iter().map(|t| t.key()).collect();
         assert_eq!(ready, vec!["web/theme"]);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn roadmaps_split_into_phases() {
+        let text = "# Web\n\nOwn it.\n\n## Roadmap\n- [x] Loose step\n### Shell\n- [x] Layout\n- [x] Routing\n\n### Timeline\n- [x] Model\n- [ ] Drag\n### Empty\n### Export\n- [ ] MP4\n";
+        let task = Task::parse("boss", "web", text);
+        let titles: Vec<&str> = task.phases.iter().map(|p| p.title.as_str()).collect();
+        assert_eq!(titles, vec!["Loose step", "Shell", "Timeline", "Export"]);
+        assert_eq!(task.current_phase(), Some(2));
+        assert_eq!(task.phases[2].progress(), (1, 2));
+        assert!(task.phases[1].done() && !task.phases[3].done());
+        assert_eq!(task.progress(), Some((4, 6)));
+        assert_eq!(task.body, "Own it.");
     }
 }

@@ -145,8 +145,8 @@ Do not archive or delete threads; the user may open them.
 in plain functions on `Project` (or a new `scheduler.rs` with no GPUI types)
 and test those. Required:
 
-1. A controller task becomes a lead only after approval when
-   `approve_leads` is on, immediately when it is off.
+1. A controller task becomes a lead immediately (the default,
+   `approve_leads` off), and only after approval when it is on.
 2. Two ticks in a row start one agent per task, never two (status is set to
    `running` first).
 3. With `max_workers = 2` and 3 open tasks under one lead, two start; when one
@@ -159,8 +159,9 @@ and test those. Required:
 
 Then an end-to-end check on Xvfb with the mocks, as the README's testing
 section describes (`mock-codex`, `mock-acp --name claude`): create a
-controller, write `tasks/controller/web.md` by hand, approve it in the UI,
-see the lead start and receive its kickoff with the roadmap; write
+controller, write `tasks/controller/web.md` by hand,
+see the lead start and receive its kickoff with the phased roadmap (with
+`approve_leads` on, only after "Start" in the UI); write
 `tasks/web/a.md`, see the worker start; set it to `done` with a result, see
 the notice reach the lead and the lead's next turn begin.
 

@@ -289,6 +289,8 @@ pub fn sidebar_list(workspace: &Entity<Workspace>, cx: &App) -> AnyElement {
 /// What the atrium panel shows, held by the root view.
 pub struct AtriumPanel {
     pub tab: AtriumTab,
+    /// Cards instead of the flow of phases.
+    pub cards: bool,
     pub notice_input: Entity<TextInput>,
     pub notice_to: String,
 }
@@ -500,6 +502,24 @@ pub fn render_overview(
         );
     }
 
+    let cards_view = panel.cards;
+    let flow = (!cards_view && !empty).then(|| flow_view(workspace, &views, cx));
+    let switch = root.clone();
+    let view_switch = (!empty).then(|| {
+        div().flex().justify_end().child(
+            SegmentedControl::new("overview-mode", if cards_view { "cards" } else { "flow" })
+                .size(ControlSize::Sm)
+                .segment("flow", t("Progress"), None)
+                .segment("cards", t("Cards"), None)
+                .on_change(move |value, _, cx| {
+                    let cards = value.as_ref() == "cards";
+                    switch.update(cx, |root, cx| {
+                        root.overview_cards = cards;
+                        cx.notify();
+                    })
+                }),
+        )
+    });
     let add = root.clone();
     let body = div()
         .id("project-body")
@@ -511,9 +531,11 @@ pub fn render_overview(
         .flex()
         .flex_col()
         .gap_4()
+        .children(view_switch)
         .children(attention)
         .children(controller)
         .children(proposals)
+        .children(flow)
         .when(empty, |body| {
             body.child(
                 div()
@@ -565,7 +587,7 @@ pub fn render_overview(
                     ),
             )
         })
-        .child(grid);
+        .when(cards_view, |body| body.child(grid));
 
     div()
         .flex_1()
@@ -1049,6 +1071,254 @@ fn controller_card(
             )
         })
         .into_any_element()
+}
+
+/// Every lead as a lane of its roadmap's phases, left to right: done phases
+/// fade, the current one stands out with its steps and sub-agents.
+fn flow_view(workspace: &Entity<Workspace>, views: &[StreamView], cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let tiny = theme.text_size(TextSize::Xs);
+    let small = theme.text_size(TextSize::Sm);
+    let ws = workspace.read(cx);
+    let mut lanes = div().flex().flex_col().gap_3();
+    for lead in views.iter().filter(|v| v.stream.role == Role::Lead) {
+        let id = lead.stream.id.clone();
+        let open = workspace.clone();
+        let phases = lead
+            .task
+            .as_ref()
+            .map(|t| t.phases.clone())
+            .unwrap_or_default();
+        let current = lead.task.as_ref().and_then(Task::current_phase);
+        let finished = lead
+            .task
+            .as_ref()
+            .is_some_and(|t| t.status == TaskStatus::Done)
+            || (!phases.is_empty() && current.is_none());
+        let workers: Vec<&StreamView> = views
+            .iter()
+            .filter(|v| v.stream.parent.as_deref() == Some(id.as_str()))
+            .filter(|v| !v.task.as_ref().is_some_and(|t| t.status.finished()))
+            .collect();
+        let queued = ws.queued_tasks(&id).len();
+
+        let summary = match (current, phases.len()) {
+            (_, 0) => t("No roadmap yet").to_string(),
+            (Some(ix), total) => tf(
+                "Phase {n} of {total}: {title}",
+                &[
+                    ("n", &(ix + 1)),
+                    ("total", &total),
+                    ("title", &phases[ix].title),
+                ],
+            ),
+            (None, _) => t("All phases done").to_string(),
+        };
+        let header = div()
+            .id(SharedString::from(format!("lane-{id}")))
+            .flex()
+            .items_center()
+            .gap_2()
+            .cursor_pointer()
+            .on_click(move |_, _, cx| {
+                let id = id.clone();
+                open.update(cx, |ws, cx| ws.show_stream(&id, cx))
+            })
+            .child(state_dot(&lead.state, cx))
+            .child(
+                div()
+                    .text_size(small)
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child(lead.stream.name.clone()),
+            )
+            .child(Badge::new(agent_short(ws, &lead.stream.backend)))
+            .child(
+                div()
+                    .text_size(tiny)
+                    .text_color(state_color(&lead.state, cx))
+                    .child(state_label(&lead.state)),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .text_size(tiny)
+                    .text_color(if finished {
+                        colors.success
+                    } else {
+                        colors.fg_muted
+                    })
+                    .truncate()
+                    .child(summary),
+            );
+
+        let mut row = div().flex().items_stretch().gap_1();
+        for (ix, phase) in phases.iter().enumerate() {
+            let (done, total) = phase.progress();
+            let state = match current {
+                Some(c) if ix < c => PhaseState::Done,
+                Some(c) if ix == c => PhaseState::Current,
+                None => PhaseState::Done,
+                _ => PhaseState::Ahead,
+            };
+            if ix > 0 {
+                row = row.child(div().flex().items_center().child(
+                    Icon::new(IconName::ChevronRight).size(IconSize::Xs).color(
+                        if state == PhaseState::Ahead {
+                            colors.fg_subtle
+                        } else {
+                            colors.fg_muted
+                        },
+                    ),
+                ));
+            }
+            let next_step = phase.steps.iter().find(|m| !m.done).map(|m| m.text.clone());
+            let mut block = div()
+                .flex_1()
+                .min_w(px(104.))
+                .max_w(px(220.))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .p_2()
+                .rounded(theme.radius(Radius::Md))
+                .border_1()
+                .child(
+                    div()
+                        .flex()
+                        .items_start()
+                        .gap_1()
+                        .child(match state {
+                            PhaseState::Done => Icon::new(IconName::CircleCheck)
+                                .size(IconSize::Xs)
+                                .color(colors.success)
+                                .into_any_element(),
+                            PhaseState::Current => Icon::new(IconName::CircleDot)
+                                .size(IconSize::Xs)
+                                .color(colors.accent)
+                                .into_any_element(),
+                            PhaseState::Ahead => Icon::new(IconName::Circle)
+                                .size(IconSize::Xs)
+                                .color(colors.fg_subtle)
+                                .into_any_element(),
+                        })
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(small)
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .child(phase.title.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(tiny)
+                                .text_color(colors.fg_subtle)
+                                .child(format!("{done}/{total}")),
+                        ),
+                );
+            match state {
+                PhaseState::Done => {
+                    block = block
+                        .bg(colors.sunken)
+                        .border_color(colors.border)
+                        .opacity(0.45);
+                }
+                PhaseState::Ahead => {
+                    block = block
+                        .bg(colors.surface)
+                        .border_color(colors.border)
+                        .text_color(colors.fg_muted);
+                }
+                PhaseState::Current => {
+                    block = block
+                        .bg(colors.surface)
+                        .border_color(colors.accent)
+                        .child(ProgressBar::new(
+                            SharedString::from(format!("phase-{}-{ix}", lead.stream.id)),
+                            done as f32 / total.max(1) as f32,
+                        ))
+                        .children(next_step.map(|step| {
+                            div()
+                                .text_size(tiny)
+                                .text_color(colors.fg_muted)
+                                .child(tf("Next: {step}", &[("step", &step)]))
+                        }));
+                    for worker in &workers {
+                        let wid = worker.stream.id.clone();
+                        let go = workspace.clone();
+                        block = block.child(
+                            div()
+                                .id(SharedString::from(format!("flow-worker-{wid}")))
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .px_1()
+                                .rounded_sm()
+                                .text_size(tiny)
+                                .text_color(colors.fg_muted)
+                                .cursor_pointer()
+                                .hover(|row| row.bg(colors.hover))
+                                .on_click(move |_, _, cx| {
+                                    let id = wid.clone();
+                                    go.update(cx, |ws, cx| ws.show_stream(&id, cx))
+                                })
+                                .child(state_dot(&worker.state, cx))
+                                .child(div().truncate().child(worker.stream.name.clone())),
+                        );
+                    }
+                    if queued > 0 {
+                        block = block.child(
+                            div()
+                                .text_size(tiny)
+                                .text_color(colors.fg_subtle)
+                                .child(tf("{n} queued", &[("n", &queued)])),
+                        );
+                    }
+                }
+            }
+            row = row.child(block);
+        }
+        if phases.is_empty() {
+            row = row.child(
+                div()
+                    .text_size(tiny)
+                    .text_color(colors.fg_subtle)
+                    .child(t("Its roadmap appears here once the controller writes it, or add a Roadmap section to its task file.")),
+            );
+        }
+        lanes = lanes.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .p_3()
+                .rounded(theme.radius(Radius::Lg))
+                .border_1()
+                .border_color(match lead.state {
+                    StreamState::NeedsYou(_) => colors.warning,
+                    _ => colors.border,
+                })
+                .bg(colors.surface)
+                .child(header)
+                .child(
+                    div()
+                        .id(SharedString::from(format!("phases-{}", lead.stream.id)))
+                        .overflow_x_scroll()
+                        .pb_1()
+                        .child(row),
+                ),
+        );
+    }
+    lanes.into_any_element()
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum PhaseState {
+    Done,
+    Current,
+    Ahead,
 }
 
 /// Leads the controller proposed, waiting for the user's go-ahead.

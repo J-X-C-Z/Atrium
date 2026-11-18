@@ -171,6 +171,8 @@ pub struct RootView {
     overlay: Option<Overlay>,
     /// The atrium panel's tab, and the notice being written there.
     atrium_tab: project::AtriumTab,
+    /// The project overview as cards instead of the flow of phases.
+    pub(super) overview_cards: bool,
     notice_input: Entity<TextInput>,
     notice_to: String,
     /// The theme last applied, so a change of preference or system appearance re-applies.
@@ -223,6 +225,7 @@ impl RootView {
             toaster,
             overlay: None,
             atrium_tab: project::AtriumTab::default(),
+            overview_cards: false,
             notice_input,
             notice_to: "all".into(),
             applied: None,
@@ -1059,6 +1062,7 @@ impl Render for RootView {
         let main = if overview {
             let panel = project::AtriumPanel {
                 tab: self.atrium_tab,
+                cards: self.overview_cards,
                 notice_input: self.notice_input.clone(),
                 notice_to: self.notice_to.clone(),
             };
