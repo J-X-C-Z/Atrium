@@ -1,14 +1,18 @@
 //! The workspace's project side: projects, their workstreams running side by
 //! side in the background, and the atrium they align through.
 
-use std::{collections::HashSet, path::PathBuf, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
 
 use atrium_core::{AgentEvent, EntryKind, GoalStatus, Item, ThreadMeta, Transcript, TurnStatus};
 use codex_client::StartThread;
 use gpui::Context;
 
 use super::{CODEX, Composed, Notice, View, Workspace};
-use crate::i18n::{t, tf};
+use crate::i18n::tf;
 use crate::{
     agents,
     project::{self, ATRIUM, Project, Role, Task, TaskStatus, Workstream},
@@ -62,12 +66,84 @@ pub struct StreamView {
     pub task: Option<Task>,
 }
 
+#[derive(Default)]
+pub(super) struct ScheduleState {
+    cleaning: HashSet<(PathBuf, String)>,
+    seen: HashMap<PathBuf, usize>,
+    pending: HashSet<(PathBuf, String)>,
+    last_wake: HashMap<(PathBuf, String), Instant>,
+    orphan_logged: HashSet<(PathBuf, String)>,
+}
+
+#[derive(Debug, PartialEq)]
+enum StartDecision {
+    Start,
+    Wait,
+    Unknown,
+}
+
+fn start_decision(known: bool, ready: bool, running: usize) -> StartDecision {
+    if !known {
+        StartDecision::Unknown
+    } else if !ready || running >= 12 {
+        StartDecision::Wait
+    } else {
+        StartDecision::Start
+    }
+}
+
+fn controller_notice(notice: &project::ProjectNotice, controller: &str) -> bool {
+    notice.from != controller && notice.to.iter().any(|to| to == controller)
+}
+
+fn wake_allowed(
+    last: Option<Instant>,
+    now: Instant,
+    needs_user: bool,
+    running: bool,
+    codex: bool,
+) -> bool {
+    !needs_user
+        && (!running || codex)
+        && last.is_none_or(|last| now.duration_since(last) >= Duration::from_secs(30))
+}
+
+/// Temporarily route an automated message without consuming the user's edit.
+struct BackgroundDispatch {
+    view: View,
+    editing: Option<(String, String)>,
+}
+
+impl BackgroundDispatch {
+    fn enter(view: &mut View, editing: &mut Option<(String, String)>, thread: String) -> Self {
+        Self {
+            view: std::mem::replace(view, View::Thread(thread)),
+            editing: editing.take(),
+        }
+    }
+
+    fn restore(self, view: &mut View, editing: &mut Option<(String, String)>) {
+        *view = self.view;
+        *editing = self.editing;
+    }
+}
+
 impl Workspace {
     pub(super) fn init_projects(&mut self, cx: &mut Context<Self>) {
         let roots = self.settings.projects.clone();
         for root in roots {
             match Project::open(&root) {
-                Ok(project) => self.projects.push(project),
+                Ok(mut project) => {
+                    match project.recover_unbound_tasks() {
+                        Ok(parents) => {
+                            for parent in parents {
+                                self.project_schedule.pending.insert((root.clone(), parent));
+                            }
+                        }
+                        Err(e) => log::warn!("could not recover project claims: {e:#}"),
+                    }
+                    self.projects.push(project);
+                }
                 Err(error) => log::warn!("could not open project {}: {error:#}", root.display()),
             }
         }
@@ -96,14 +172,225 @@ impl Workspace {
     /// Every couple of seconds in a project: read the atrium again if it
     /// changed, and open workstream chats whose agent has come up.
     fn tick_project(&mut self, cx: &mut Context<Self>) {
-        let Some(root) = self.project_root() else {
-            return;
-        };
-        self.load_streams(&root, cx);
-        if let Some(project) = self.projects.iter_mut().find(|p| p.root == root)
-            && project.reload()
-        {
-            cx.notify();
+        let roots: Vec<_> = self.projects.iter().map(|p| p.root.clone()).collect();
+        for root in roots {
+            let changed = self.project_mut(&root).is_some_and(Project::reload);
+            self.load_streams(&root, cx);
+            let Some(project) = self.projects.iter().find(|p| p.root == root) else {
+                continue;
+            };
+            let seen = self
+                .project_schedule
+                .seen
+                .entry(root.clone())
+                .or_insert_with(|| {
+                    project
+                        .controller()
+                        .map_or(project.notices.len(), |c| c.notices_seen)
+                });
+            if let Some(controller) = project.controller()
+                && project
+                    .notices
+                    .iter()
+                    .skip((*seen).min(project.notices.len()))
+                    .any(|n| controller_notice(n, &controller.id))
+            {
+                self.project_schedule
+                    .pending
+                    .insert((root.clone(), controller.id.clone()));
+            }
+            *seen = project.notices.len();
+            for parent in project.pending_report_parents() {
+                self.project_schedule.pending.insert((root.clone(), parent));
+            }
+            for task in &project.tasks {
+                if project.stream(&task.owner).is_none()
+                    && self
+                        .project_schedule
+                        .orphan_logged
+                        .insert((root.clone(), task.key()))
+                {
+                    log::warn!("ignoring orphan task {} in {}", task.key(), root.display());
+                }
+            }
+            let tasks: Vec<_> = project
+                .startable_with(|task| {
+                    let Some(owner) = project.stream(&task.owner) else {
+                        return false;
+                    };
+                    let backend = task.agent.as_deref().unwrap_or(&owner.backend);
+                    !self.scheduler_backend_known(backend) || self.backend_ready(backend)
+                })
+                .into_iter()
+                .cloned()
+                .collect();
+            for task in tasks {
+                let running = self
+                    .stream_views_for(&root)
+                    .iter()
+                    .filter(|v| matches!(v.state, StreamState::Working | StreamState::Starting))
+                    .count();
+                let Some(project) = self.projects.iter().find(|p| p.root == root) else {
+                    break;
+                };
+                let Some(owner) = project.stream(&task.owner) else {
+                    continue;
+                };
+                let backend = task.agent.as_deref().unwrap_or(&owner.backend).to_string();
+                let known = self.scheduler_backend_known(&backend);
+                let decision = start_decision(known, self.backend_ready(&backend), running);
+                if decision == StartDecision::Unknown {
+                    if let Some(project) = self.project_mut(&root) {
+                        if let Err(e) = project.set_task_status(&task.key(), TaskStatus::Failed) {
+                            log::warn!("cannot fail task {}: {e:#}", task.key());
+                            continue;
+                        }
+                        let _ = project.post(ATRIUM, vec![task.owner.clone()], &format!(
+                            "Unknown agent '{backend}' in {}; use codex, claude, deepseek or antigravity.", task.key()));
+                    }
+                    self.project_schedule
+                        .pending
+                        .insert((root.clone(), task.owner.clone()));
+                    cx.notify();
+                    continue;
+                }
+                if decision != StartDecision::Start {
+                    continue;
+                }
+                let Some(project) = self.project_mut(&root) else {
+                    continue;
+                };
+                let Some(stream) = project.stream_from_task(&task, &backend) else {
+                    continue;
+                };
+                if let Err(e) = project.set_task_status(&task.key(), TaskStatus::Running) {
+                    log::warn!("cannot claim task {}: {e:#}", task.key());
+                    continue;
+                }
+                self.start_stream(&root, stream, cx);
+            }
+            let reports: Vec<_> = self
+                .projects
+                .iter()
+                .find(|p| p.root == root)
+                .map(|p| {
+                    p.unreported()
+                        .into_iter()
+                        .map(|(s, t)| (s.clone(), t.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            for (stream, task) in reports {
+                let Some(parent) = stream.parent.clone() else {
+                    continue;
+                };
+                // Do not stop a goal in the middle of its finishing turn.
+                if stream
+                    .thread_id
+                    .as_ref()
+                    .and_then(|id| self.transcripts.get(id))
+                    .is_some_and(Transcript::is_running)
+                {
+                    continue;
+                }
+                if stream.role == Role::Worker
+                    && agents::is_codex(&stream.backend)
+                    && let Some(thread) = stream.thread_id.clone()
+                {
+                    if let Some(client) = self.codex_for(&stream.backend) {
+                        // The persistent reported flag is written only after cleanup succeeds.
+                        let root = root.clone();
+                        let stream_id = stream.id.clone();
+                        if !self
+                            .project_schedule
+                            .cleaning
+                            .insert((root.clone(), stream_id.clone()))
+                        {
+                            continue;
+                        }
+                        cx.spawn(async move |this, cx| {
+                            let cleanup = match client.goal_get(&thread).await {
+                                Ok(Some(goal)) if goal.status != GoalStatus::Complete => {
+                                    client
+                                        .goal_set(&thread, None, Some(GoalStatus::Complete), None)
+                                        .await
+                                }
+                                other => other,
+                            };
+                            match cleanup {
+                                Ok(goal) => {
+                                    let _ = this.update(cx, |ws, cx| {
+                                        ws.project_schedule
+                                            .cleaning
+                                            .remove(&(root.clone(), stream_id.clone()));
+                                        if let Some(goal) = goal {
+                                            ws.goals.insert(thread, goal);
+                                        } else {
+                                            ws.goals.remove(&thread);
+                                        }
+                                        ws.report_task(&root, &stream_id, cx);
+                                    });
+                                }
+                                Err(e) => {
+                                    log::warn!("worker goal cleanup failed: {e:#}");
+                                    let _ = this.update(cx, |ws, _| {
+                                        ws.project_schedule
+                                            .cleaning
+                                            .remove(&(root.clone(), stream_id.clone()));
+                                    });
+                                }
+                            }
+                        })
+                        .detach();
+                    }
+                    continue;
+                }
+                let _ = task;
+                self.report_task(&root, &stream.id, cx);
+                self.project_schedule.pending.insert((root.clone(), parent));
+            }
+            if changed {
+                cx.notify();
+            }
+        }
+        let pending: Vec<_> = self.project_schedule.pending.iter().cloned().collect();
+        for (root, stream) in pending {
+            let key = (root.clone(), stream.clone());
+            if !wake_allowed(
+                self.project_schedule.last_wake.get(&key).copied(),
+                Instant::now(),
+                false,
+                false,
+                false,
+            ) {
+                continue;
+            }
+            if self.deliver_notices_at(&root, &stream, cx) {
+                self.project_schedule.pending.remove(&key);
+                self.project_schedule.last_wake.insert(key, Instant::now());
+            }
+        }
+    }
+
+    fn scheduler_backend_known(&self, backend: &str) -> bool {
+        backend == CODEX
+            || self.agent(backend).is_some()
+            || (agents::is_codex(backend)
+                && agents::split_backend(backend)
+                    .1
+                    .is_some_and(|d| self.device(d).is_some()))
+    }
+
+    fn report_task(&mut self, root: &PathBuf, stream: &str, cx: &mut Context<Self>) {
+        if let Some(project) = self.project_mut(root) {
+            match project.report_finished(stream) {
+                Ok(Some(parent)) => {
+                    self.project_schedule.pending.insert((root.clone(), parent));
+                    cx.notify();
+                }
+                Ok(None) => {}
+                Err(e) => log::warn!("could not report task: {e:#}"),
+            }
         }
     }
 
@@ -244,12 +531,7 @@ impl Workspace {
             if self.transcripts.contains_key(&thread) || self.loading.contains(&thread) {
                 continue;
             }
-            let ready = match backend.as_str() {
-                CODEX => self.client.is_some(),
-                agent => self
-                    .agent(agent)
-                    .is_some_and(|a| a.status == super::AgentStatus::Ready),
-            };
+            let ready = self.backend_ready(&backend);
             if ready {
                 self.load_thread(thread, cx);
             }
@@ -269,12 +551,29 @@ impl Workspace {
         let Some(root) = self.project_root() else {
             return;
         };
-        let ready = match backend.as_str() {
-            CODEX => self.client.is_some(),
-            agent => self
-                .agent(agent)
-                .is_some_and(|a| a.status == super::AgentStatus::Ready),
-        };
+        if self
+            .stream_views_for(&root)
+            .iter()
+            .filter(|v| matches!(v.state, StreamState::Working | StreamState::Starting))
+            .count()
+            >= 12
+        {
+            cx.emit(Notice::Error(
+                "The project already has 12 running workstreams.".into(),
+            ));
+            return;
+        }
+        if role == Role::Controller
+            && self
+                .active_project()
+                .is_some_and(|p| p.controller().is_some())
+        {
+            cx.emit(Notice::Error(
+                "The project already has a controller.".into(),
+            ));
+            return;
+        }
+        let ready = self.backend_ready(&backend);
         if !ready {
             cx.emit(Notice::Error(tf(
                 "{agent} is not running.",
@@ -303,27 +602,46 @@ impl Workspace {
             task: None,
             reported: false,
         };
+        self.start_stream(&root, stream, cx);
+    }
+
+    fn start_stream(&mut self, root: &Path, stream: Workstream, cx: &mut Context<Self>) {
+        let root = root.to_path_buf();
+        let backend = stream.backend.clone();
+        let Some(project) = self.project_mut(&root) else {
+            return;
+        };
         let id = stream.id.clone();
         let title = format!("{} · {}", project.file.name, stream.name);
         project.file.streams.push(stream.clone());
         if let Err(error) = project.save() {
-            cx.emit(Notice::Error(format!("{error:#}")));
+            self.stream_failed(&root, &id, error, cx);
+            return;
         }
         let kickoff = project.kickoff(&stream);
         let cwd = root.clone();
         cx.notify();
 
-        if backend == CODEX {
-            let Some(client) = self.client.clone() else {
+        if agents::is_codex(&backend) {
+            let Some(client) = self.codex_for(&backend) else {
                 return;
             };
             let options = StartThread {
                 cwd: Some(cwd.display().to_string()),
-                model: self.settings.model.clone(),
+                model: if agents::split_backend(&backend).1.is_some() {
+                    None
+                } else {
+                    self.settings.model.clone()
+                },
                 approval_policy: Some(self.settings.mode.approval_policy().into()),
                 sandbox: Some(self.settings.mode.sandbox_mode().into()),
             };
-            let objective = stream.goal.clone();
+            // Controllers are event-driven; never give them an auto-continuing goal.
+            let objective = if stream.role == Role::Controller {
+                String::new()
+            } else {
+                stream.goal.clone()
+            };
             cx.spawn(async move |this, cx| {
                 let meta = match client.thread_start(options).await {
                     Ok(meta) => meta,
@@ -334,26 +652,48 @@ impl Workspace {
                 };
                 let thread = meta.id.clone();
                 let _ = client.thread_set_name(&thread, &title).await;
+                let bound = this
+                    .update(cx, |ws, cx| match ws.attach_thread(&root, &id, &thread) {
+                        Ok(()) => true,
+                        Err(error) => {
+                            ws.stream_failed(&root, &id, error, cx);
+                            false
+                        }
+                    })
+                    .unwrap_or(false);
+                if !bound {
+                    return;
+                }
+                // Establish the goal before kickoff so a fast worker cannot be
+                // reactivated by a late goal_set after it has already finished.
+                let goal = if objective.is_empty() {
+                    None
+                } else {
+                    client
+                        .goal_set(&thread, Some(&objective), Some(GoalStatus::Active), None)
+                        .await
+                        .ok()
+                        .flatten()
+                };
                 let _ = this.update(cx, |ws, cx| {
                     ws.upsert_thread(ThreadMeta {
                         name: Some(title.clone()),
+                        backend: backend.clone(),
                         ..meta
                     });
                     ws.transcripts.insert(thread.clone(), Transcript::new());
-                    ws.attach_thread(&root, &id, &thread);
-                    ws.send_to_thread(thread.clone(), Composed::text(kickoff), cx);
+                    if let Some(goal) = goal {
+                        ws.goals.insert(thread.clone(), goal);
+                    }
+                    // The user may have removed it while goal setup was in flight.
+                    if ws
+                        .projects
+                        .iter()
+                        .any(|p| p.root == root && p.stream(&id).is_some())
+                    {
+                        ws.send_to_thread(thread.clone(), Composed::text(kickoff), cx);
+                    }
                 });
-                // Codex keeps at it across turns once it has a goal.
-                if !objective.is_empty()
-                    && let Ok(Some(goal)) = client
-                        .goal_set(&thread, Some(&objective), Some(GoalStatus::Active), None)
-                        .await
-                {
-                    let _ = this.update(cx, |ws, cx| {
-                        ws.goals.insert(thread, goal);
-                        cx.notify();
-                    });
-                }
             })
             .detach();
         } else {
@@ -388,23 +728,20 @@ impl Workspace {
                         ws.commands.insert(thread.clone(), commands);
                     }
                     ws.transcripts.insert(thread.clone(), Transcript::new());
-                    ws.attach_thread(&root, &id, &thread);
-                    ws.send_to_thread(thread, Composed::text(kickoff), cx);
+                    match ws.attach_thread(&root, &id, &thread) {
+                        Ok(()) => ws.send_to_thread(thread, Composed::text(kickoff), cx),
+                        Err(error) => ws.stream_failed(&root, &id, error, cx),
+                    }
                 });
             })
             .detach();
         }
     }
 
-    fn attach_thread(&mut self, root: &PathBuf, stream: &str, thread: &str) {
-        if let Some(project) = self.project_mut(root) {
-            if let Some(s) = project.stream_mut(stream) {
-                s.thread_id = Some(thread.to_string());
-            }
-            if let Err(error) = project.save() {
-                log::warn!("could not save the project: {error:#}");
-            }
-        }
+    fn attach_thread(&mut self, root: &PathBuf, stream: &str, thread: &str) -> anyhow::Result<()> {
+        self.project_mut(root)
+            .ok_or_else(|| anyhow::anyhow!("project was removed before startup completed"))?
+            .bind_thread(stream, thread)
     }
 
     fn stream_failed(
@@ -414,9 +751,17 @@ impl Workspace {
         error: anyhow::Error,
         cx: &mut Context<Self>,
     ) {
+        let mut wake_parent = None;
         if let Some(project) = self.project_mut(root) {
-            project.file.streams.retain(|s| s.id != stream);
-            let _ = project.save();
+            match project.fail_start(stream, &format!("{error:#}")) {
+                Ok(parent) => wake_parent = parent,
+                Err(e) => log::warn!(
+                    "could not persist startup failure; keeping workstream for recovery: {e:#}"
+                ),
+            }
+        }
+        if let Some(parent) = wake_parent {
+            self.project_schedule.pending.insert((root.clone(), parent));
         }
         cx.emit(Notice::Error(tf(
             "Could not start the workstream: {error}",
@@ -439,9 +784,9 @@ impl Workspace {
 
     /// Sends `composed` to a thread whatever the main column shows.
     pub fn send_to_thread(&mut self, thread: String, composed: Composed, cx: &mut Context<Self>) {
-        let shown = std::mem::replace(&mut self.view, View::Thread(thread));
+        let state = BackgroundDispatch::enter(&mut self.view, &mut self.editing, thread);
         self.send(composed, cx);
-        self.view = shown;
+        state.restore(&mut self.view, &mut self.editing);
         cx.notify();
     }
 
@@ -472,29 +817,42 @@ impl Workspace {
 
     /// Hands a workstream its new notices now, asking it to carry on.
     pub fn deliver_notices(&mut self, stream: &str, cx: &mut Context<Self>) {
-        let Some(thread) = self
-            .active_project()
-            .and_then(|p| p.stream(stream))
-            .and_then(|s| s.thread_id.clone())
-        else {
-            return;
-        };
-        let running = self
-            .transcripts
-            .get(&thread)
-            .is_some_and(Transcript::is_running);
-        if running && !crate::agents::is_codex(self.backend_of(&thread)) {
-            cx.emit(Notice::Info(
-                t("It is working; the notices go with its next message.").into(),
-            ));
-            return;
+        if let Some(root) = self.project_root() {
+            self.deliver_notices_at(&root, stream, cx);
         }
-        // Codex reads them at its next step (a steer); others start a turn.
+    }
+
+    fn deliver_notices_at(&mut self, root: &PathBuf, stream: &str, cx: &mut Context<Self>) -> bool {
+        let Some(project) = self.projects.iter().find(|p| p.root == *root) else {
+            return true;
+        };
+        if project.unread(stream).is_empty() {
+            return true;
+        }
+        let Some(thread) = project.stream(stream).and_then(|s| s.thread_id.clone()) else {
+            return false;
+        };
+        if !self.backend_ready(self.backend_of(&thread)) {
+            return false;
+        }
+        let Some(transcript) = self.transcripts.get(&thread) else {
+            return false;
+        };
+        if !wake_allowed(
+            None,
+            Instant::now(),
+            waiting_on_user(transcript) > 0,
+            transcript.is_running(),
+            agents::is_codex(self.backend_of(&thread)),
+        ) {
+            return false;
+        }
         self.send_to_thread(
             thread,
             Composed::text("Take these into account and carry on toward your goal.".into()),
             cx,
         );
+        true
     }
 
     /// Asks an idle workstream to keep going toward its goal.
@@ -685,7 +1043,14 @@ impl Workspace {
 
     /// What each workstream of the shown project is doing.
     pub fn stream_views(&self) -> Vec<StreamView> {
-        let Some(project) = self.active_project() else {
+        let Some(root) = self.project_root() else {
+            return Vec::new();
+        };
+        self.stream_views_for(&root)
+    }
+
+    fn stream_views_for(&self, root: &PathBuf) -> Vec<StreamView> {
+        let Some(project) = self.projects.iter().find(|p| p.root == *root) else {
             return Vec::new();
         };
         let now = std::time::Instant::now();
@@ -698,12 +1063,7 @@ impl Workspace {
                     .thread_id
                     .as_ref()
                     .and_then(|id| self.transcripts.get(id));
-                let agent_up = match stream.backend.as_str() {
-                    CODEX => self.client.is_some(),
-                    agent => self
-                        .agent(agent)
-                        .is_some_and(|a| a.status == super::AgentStatus::Ready),
-                };
+                let agent_up = self.backend_ready(&stream.backend);
                 let waiting = transcript.map_or(0, waiting_on_user);
                 let state = match (transcript, &stream.thread_id) {
                     (_, None) => StreamState::Starting,
@@ -862,5 +1222,64 @@ mod tests {
         let status = "# Frontend\n\n## Focus\n\n- Timeline drag and drop\n\n## Done\n- Shell\n";
         assert_eq!(focus_of(status).as_deref(), Some("Timeline drag and drop"));
         assert_eq!(focus_of("nothing here"), None);
+    }
+    #[test]
+    fn automated_dispatch_cannot_resend_an_edit_and_restores_the_draft() {
+        for target in ["shown", "background"] {
+            let mut view = View::Thread("shown".into());
+            let mut editing = Some(("shown".into(), "old-turn".into()));
+            let state = BackgroundDispatch::enter(&mut view, &mut editing, target.into());
+            assert!(matches!(&view, View::Thread(id) if id == target));
+            // send's resend_edited branch requires Some, even for the same thread.
+            assert!(editing.is_none());
+            state.restore(&mut view, &mut editing);
+            assert!(matches!(&view, View::Thread(id) if id == "shown"));
+            assert_eq!(editing, Some(("shown".into(), "old-turn".into())));
+        }
+    }
+
+    #[test]
+    fn scheduler_distinguishes_unknown_offline_and_project_cap() {
+        assert_eq!(start_decision(false, false, 0), StartDecision::Unknown);
+        assert_eq!(start_decision(true, false, 0), StartDecision::Wait);
+        assert_eq!(start_decision(true, true, 12), StartDecision::Wait);
+        assert_eq!(start_decision(true, true, 11), StartDecision::Start);
+    }
+
+    #[test]
+    fn only_direct_external_notices_wake_controller() {
+        let mut notice = project::ProjectNotice {
+            at: String::new(),
+            from: "lead".into(),
+            to: vec!["all".into()],
+            text: "milestone".into(),
+        };
+        assert!(!controller_notice(&notice, "boss"));
+        notice.to = vec!["boss".into()];
+        assert!(controller_notice(&notice, "boss"));
+        notice.from = "boss".into();
+        assert!(!controller_notice(&notice, "boss"));
+    }
+
+    #[test]
+    fn wake_debounces_and_never_overrides_user_attention() {
+        let now = Instant::now();
+        assert!(!wake_allowed(
+            Some(now),
+            now + Duration::from_secs(29),
+            false,
+            false,
+            false
+        ));
+        assert!(wake_allowed(
+            Some(now),
+            now + Duration::from_secs(30),
+            false,
+            false,
+            false
+        ));
+        assert!(!wake_allowed(None, now, true, false, true));
+        assert!(!wake_allowed(None, now, false, true, false));
+        assert!(wake_allowed(None, now, false, true, true));
     }
 }

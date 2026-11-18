@@ -171,6 +171,7 @@ pub struct Workspace {
     pub projects: Vec<crate::project::Project>,
     pub room: Room,
     _atrium_poll: Option<Task<()>>,
+    project_schedule: projects::ScheduleState,
     /// Other devices of the tailnet that run `atrium-node`.
     pub devices: Vec<Device>,
     pub discovering: bool,
@@ -229,6 +230,7 @@ impl Workspace {
             projects: Vec::new(),
             room: Room::Chats,
             _atrium_poll: None,
+            project_schedule: projects::ScheduleState::default(),
             devices: Vec::new(),
             discovering: false,
             remote_dirs: HashMap::new(),

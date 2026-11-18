@@ -1,0 +1,31 @@
+[package]
+name = "atrium-node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+futures.workspace = true
+dirs.workspace = true
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["ws"] }
+toml = "0.8"
+uuid = { version = "1", features = ["v4"] }
+libc = "0.2"
+cap-std = "3"
+
+ureq.workspace = true
+
+[dev-dependencies]
+codex-client.workspace = true
+acp-client.workspace = true
+agent-rpc.workspace = true
+atrium-core.workspace = true
+tungstenite.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp"] }

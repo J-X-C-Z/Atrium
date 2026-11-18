@@ -1,0 +1,48 @@
+name: macOS backend acceptance
+
+"on":
+  pull_request:
+    paths:
+      - 'crates/atrium-node/**'
+      - 'crates/atrium-app/src/project.rs'
+      - 'crates/atrium-app/src/workspace.rs'
+      - 'crates/atrium-app/src/workspace_project.rs'
+      - 'crates/agent-rpc/**'
+      - 'crates/codex-client/**'
+      - 'crates/acp-client/**'
+      - 'crates/atrium-core/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/node.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  node:
+    name: Node on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: '1'
+    steps:
+      - name: Checkout without persistent credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # official v4
+        with:
+          persist-credentials: false
+      - name: Official stable Rust toolchain
+        run: rustup toolchain install stable --profile minimal --component clippy
+      - name: Strict native-node lint
+        run: cargo +stable clippy -p atrium-node --all-targets --locked -- -D warnings
+      - name: Workspace tests including scheduler and native protocol
+        run: cargo +stable test --workspace --locked
+      - name: Build scripted agents (no real accounts)
+        run: cargo +stable build -p codex-client --bin mock-codex -p acp-client --bin mock-acp --locked
+      - name: Native remote clients with scripted agents
+        run: cargo +stable test -p atrium-node --test agents --locked -- --ignored

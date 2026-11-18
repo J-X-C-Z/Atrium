@@ -25,7 +25,9 @@
 use std::{
     collections::HashMap,
     fs,
+    io::Write,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::SystemTime,
 };
 
@@ -487,6 +489,47 @@ pub struct Project {
 const BRIEF: &str = "# Brief\n\nShared conventions and decisions every workstream follows. Keep it short.\n\n## Architecture\n\n## Conventions\n\n## Decisions\n";
 const CONTRACTS: &str = "# Contracts\n\nOne file per interface between workstreams (an API, a schema, an event).\nThe workstream that changes an interface updates its file and posts a notice.\n";
 
+// Replace only after a complete, synced write. A failed write/rename leaves
+// the previous document intact; temporary files are not part of the format.
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    static SERIAL: AtomicU64 = AtomicU64::new(0);
+    let tmp = path.with_extension(format!(
+        "tmp-{}-{}",
+        std::process::id(),
+        SERIAL.fetch_add(1, Ordering::Relaxed)
+    ));
+    atomic_write_at(path, bytes, &tmp)
+}
+
+fn atomic_write_at(path: &Path, bytes: &[u8], tmp: &Path) -> Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    // Failure here returns before cleanup: a collision belongs to someone else.
+    let mut file = options
+        .open(tmp)
+        .with_context(|| format!("creating {}", tmp.display()))?;
+    let result = (|| -> Result<()> {
+        if let Ok(metadata) = fs::metadata(path) {
+            file.set_permissions(metadata.permissions())?;
+        }
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(tmp, path)?;
+        #[cfg(unix)]
+        fs::File::open(path.parent().expect("document has a parent"))?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(tmp);
+    }
+    result.with_context(|| format!("writing {}", path.display()))
+}
+
 impl Project {
     pub fn dir(&self) -> PathBuf {
         self.root.join(DIR)
@@ -511,13 +554,17 @@ impl Project {
         let file = match fs::read_to_string(dir.join("project.json")) {
             Ok(text) => serde_json::from_str(&text)
                 .with_context(|| format!("reading {}", dir.join("project.json").display()))?,
-            Err(_) => ProjectFile {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => ProjectFile {
                 name: root
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "Project".into()),
                 ..ProjectFile::default()
             },
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("reading {}", dir.join("project.json").display()));
+            }
         };
         let mut project = Self {
             root: root.to_path_buf(),
@@ -532,7 +579,7 @@ impl Project {
     pub fn save(&self) -> Result<()> {
         let path = self.dir().join("project.json");
         let text = serde_json::to_string_pretty(&self.file)?;
-        fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
+        atomic_write(&path, text.as_bytes())
     }
 
     /// When the atrium's files last changed.
@@ -589,13 +636,13 @@ impl Project {
 
     /// Writes `status` into a task's file.
     pub fn set_task_status(&mut self, key: &str, status: TaskStatus) -> Result<()> {
-        let Some(task) = self.task(key) else {
-            return Ok(());
-        };
+        let task = self
+            .task(key)
+            .ok_or_else(|| anyhow::anyhow!("task {key} is missing or unreadable"))?;
         let path = self.root.join(task.rel_path());
-        let text = fs::read_to_string(&path).unwrap_or_default();
-        fs::write(&path, with_status(&text, status))
-            .with_context(|| format!("writing {}", path.display()))?;
+        let text =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        atomic_write(&path, with_status(&text, status).as_bytes())?;
         self.stamp = None;
         self.reload();
         Ok(())
@@ -667,6 +714,12 @@ impl Project {
     // Used by the scheduler: see docs/hierarchy-implementation.md.
     #[allow(dead_code)]
     pub fn startable(&self) -> Vec<&Task> {
+        self.startable_with(|_| true)
+    }
+
+    /// Check backend availability before reserving per-lead slots, so an
+    /// offline request cannot starve a later ready task under the same lead.
+    pub fn startable_with(&self, eligible: impl Fn(&Task) -> bool) -> Vec<&Task> {
         let mut started: HashMap<&str, usize> = HashMap::new();
         for stream in &self.file.streams {
             if let (Some(parent), Some(task)) = (&stream.parent, self.task_of(stream))
@@ -684,6 +737,7 @@ impl Project {
                 || owner.role.child().is_none()
                 || self.stream_for_task(&task.key()).is_some()
                 || self.awaits_approval(task)
+                || !eligible(task)
             {
                 continue;
             }
@@ -740,6 +794,159 @@ impl Project {
         })
     }
 
+    /// Persist a completion receipt. The deterministic notice is checked before
+    /// appending, so a crash between the notice write and reported flag is safe.
+    pub fn report_finished(&mut self, id: &str) -> Result<Option<String>> {
+        let Some(stream) = self.stream(id).cloned() else {
+            return Ok(None);
+        };
+        if stream.reported {
+            return Ok(None);
+        }
+        let Some(parent) = stream.parent.clone() else {
+            return Ok(None);
+        };
+        let Some(task) = self.task_of(&stream) else {
+            return Ok(None);
+        };
+        if !task.status.finished() {
+            return Ok(None);
+        }
+        let text = completion_text(&stream, task);
+        if !self
+            .notices
+            .iter()
+            .any(|n| n.from == ATRIUM && n.to == [parent.clone()] && n.text == text)
+        {
+            self.post(ATRIUM, vec![parent.clone()], &text)?;
+        }
+        self.stream_mut(id)
+            .expect("stream remains present")
+            .reported = true;
+        if let Err(e) = self.save() {
+            self.stream_mut(id)
+                .expect("stream remains present")
+                .reported = false;
+            return Err(e);
+        }
+        Ok(Some(parent))
+    }
+
+    /// Bind before kickoff. On failure callers must not send any work.
+    pub(crate) fn bind_thread(&mut self, stream: &str, thread: &str) -> Result<()> {
+        let target = self
+            .stream_mut(stream)
+            .ok_or_else(|| anyhow::anyhow!("workstream was removed before startup completed"))?;
+        let previous = target.thread_id.replace(thread.to_string());
+        if let Err(e) = self.save() {
+            self.stream_mut(stream).unwrap().thread_id = previous;
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Preserve evidence until both task failure and its notice have persisted.
+    pub(crate) fn fail_start(&mut self, id: &str, reason: &str) -> Result<Option<String>> {
+        let Some(stream) = self.stream(id).cloned() else {
+            return Ok(None);
+        };
+        if let (Some(task), Some(parent)) = (&stream.task, &stream.parent) {
+            let text = format!("Could not start an agent for {task}: {reason}");
+            if !self
+                .notices
+                .iter()
+                .any(|n| n.from == ATRIUM && n.to == [parent.clone()] && n.text == text)
+            {
+                self.post(ATRIUM, vec![parent.clone()], &text)?;
+            }
+            if !self.task(task).is_some_and(|task| task.status.finished()) {
+                self.set_task_status(task, TaskStatus::Failed)?;
+            }
+        }
+        let previous = self.file.streams.clone();
+        self.file.streams.retain(|s| s.id != id);
+        if let Err(e) = self.save() {
+            self.file.streams = previous;
+            return Err(e);
+        }
+        Ok(stream.parent)
+    }
+
+    /// Recover an interrupted pre-launch claim conservatively. No thread can
+    /// have been started by our launcher before its Workstream was saved.
+    /// Never relaunch automatically: show a failed task and tell its owner.
+    pub fn recover_unbound_tasks(&mut self) -> Result<Vec<String>> {
+        let tasks: Vec<_> = self
+            .tasks
+            .iter()
+            .filter(|task| {
+                task.status == TaskStatus::Running
+                    && self.stream_for_task(&task.key()).is_none()
+                    && self
+                        .stream(&task.owner)
+                        .is_some_and(|s| s.role.child().is_some())
+            })
+            .cloned()
+            .collect();
+        let unstarted: Vec<_> = self
+            .file
+            .streams
+            .iter()
+            .filter(|s| {
+                s.thread_id.is_none()
+                    && self
+                        .task_of(s)
+                        .is_some_and(|t| t.status == TaskStatus::Running)
+            })
+            .map(|s| s.id.clone())
+            .collect();
+        let mut parents = Vec::new();
+        for id in unstarted {
+            if let Some(parent) = self.fail_start(
+                &id,
+                "interrupted before session binding; review before retrying",
+            )? {
+                parents.push(parent);
+            }
+        }
+        for task in tasks {
+            let text = format!(
+                "Could not start an agent for {}: interrupted before the workstream was persisted. Review and reopen the task to retry.",
+                task.key()
+            );
+            // Post first: replay is deduplicated if interrupted before Failed.
+            if !self
+                .notices
+                .iter()
+                .any(|n| n.from == ATRIUM && n.text == text)
+            {
+                self.post(ATRIUM, vec![task.owner.clone()], &text)?;
+            }
+            self.set_task_status(&task.key(), TaskStatus::Failed)?;
+            parents.push(task.owner);
+        }
+        Ok(parents)
+    }
+
+    /// A saved receipt may outlive the in-memory wake queue after restart.
+    /// Re-enqueue only completion notices not yet handed to their parent.
+    pub fn pending_report_parents(&self) -> Vec<String> {
+        self.file
+            .streams
+            .iter()
+            .filter(|s| s.reported)
+            .filter_map(|stream| {
+                let parent = stream.parent.as_ref()?;
+                let task = self.task_of(stream)?;
+                let text = completion_text(stream, task);
+                self.unread(parent)
+                    .iter()
+                    .any(|n| n.from == ATRIUM && n.text == text)
+                    .then(|| parent.clone())
+            })
+            .collect()
+    }
+
     /// Appends a notice and reads it back.
     pub fn post(&mut self, from: &str, to: Vec<String>, text: &str) -> Result<()> {
         let notice = ProjectNotice {
@@ -749,16 +956,24 @@ impl Project {
             text: text.trim().to_string(),
         };
         let path = self.dir().join("notices.md");
-        let mut body = fs::read_to_string(&path).unwrap_or_default();
-        if !body.is_empty() && !body.ends_with('\n') {
-            body.push('\n');
-        }
-        body.push_str(&notice.line());
-        body.push('\n');
-        fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
+        let body =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let separator = if !body.is_empty() && !body.ends_with('\n') {
+            "\n"
+        } else {
+            ""
+        };
+        let line = format!("{separator}{}\n", notice.line());
+        // Append rather than replacing other agents' concurrent notices.
+        let mut file = fs::OpenOptions::new().append(true).open(&path)?;
+        let result = file
+            .write_all(line.as_bytes())
+            .and_then(|()| file.sync_all());
+        // An error (notably fsync) can follow a visible append. Refresh before
+        // returning so a retry can recognize that receipt instead of duplicating it.
         self.stamp = None;
         self.reload();
-        Ok(())
+        result.with_context(|| format!("appending {}", path.display()))
     }
 
     pub fn stream(&self, id: &str) -> Option<&Workstream> {
@@ -1013,6 +1228,26 @@ pub fn scope_label(scope: &[String]) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     }
+}
+
+fn completion_text(stream: &Workstream, task: &Task) -> String {
+    let verb = if task.status == TaskStatus::Done {
+        "finished"
+    } else {
+        "could not finish"
+    };
+    let reason = task
+        .result
+        .as_deref()
+        .map(first_line)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("no reason given");
+    format!(
+        "{} \"{}\" {verb} {}: {reason}. Read its Result and review its changes.",
+        stream.role.label(),
+        stream.name,
+        task.rel_path()
+    )
 }
 
 pub fn first_line(text: &str) -> &str {
@@ -1420,5 +1655,264 @@ mod tests {
         assert!(task.phases[1].done() && !task.phases[3].done());
         assert_eq!(task.progress(), Some((4, 6)));
         assert_eq!(task.body, "Own it.");
+    }
+    #[test]
+    fn completion_receipt_survives_reload_and_partial_save() {
+        let root = std::env::temp_dir().join(format!("atrium-receipt-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let mut project = Project::open(&root).unwrap();
+        project.file.streams.push(stream("lead", &[]));
+        let key = project
+            .add_task("lead", "job", "# Job\nstatus: open\n\nDo it.")
+            .unwrap();
+        let task = project.task(&key).unwrap().clone();
+        let worker = project.stream_from_task(&task, "codex").unwrap();
+        let id = worker.id.clone();
+        project.file.streams.push(worker);
+        project.set_task_status(&key, TaskStatus::Done).unwrap();
+        assert_eq!(
+            project.report_finished(&id).unwrap().as_deref(),
+            Some("lead")
+        );
+        assert_eq!(project.notices.len(), 1);
+        // Simulate a crash after the notice write but before saving reported.
+        project.stream_mut(&id).unwrap().reported = false;
+        project.save().unwrap();
+        let mut project = Project::open(&root).unwrap();
+        assert!(project.report_finished(&id).unwrap().is_some());
+        assert_eq!(project.notices.len(), 1);
+        let mut project = Project::open(&root).unwrap();
+        assert!(project.report_finished(&id).unwrap().is_none());
+        assert_eq!(project.notices.len(), 1);
+        assert_eq!(project.pending_report_parents(), vec!["lead"]);
+        project.mark_read("lead");
+        project.save().unwrap();
+        let project = Project::open(&root).unwrap();
+        assert!(project.pending_report_parents().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn claiming_two_tasks_then_finishing_one_releases_a_slot() {
+        let root = std::env::temp_dir().join(format!("atrium-slots-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let mut project = Project::open(&root).unwrap();
+        project.file.max_workers = 2;
+        project.file.streams.push(stream("lead", &[]));
+        for name in ["a", "b", "c"] {
+            project.add_task("lead", name, "# Task\n\nWork").unwrap();
+        }
+        let tasks: Vec<_> = project.startable().into_iter().cloned().collect();
+        assert_eq!(tasks.len(), 2);
+        for task in tasks {
+            let worker = project.stream_from_task(&task, "codex").unwrap();
+            project
+                .set_task_status(&task.key(), TaskStatus::Running)
+                .unwrap();
+            project.file.streams.push(worker);
+        }
+        assert!(project.startable().is_empty());
+        project.set_task_status("lead/a", TaskStatus::Done).unwrap();
+        assert_eq!(
+            project
+                .startable()
+                .iter()
+                .map(|t| t.key())
+                .collect::<Vec<_>>(),
+            vec!["lead/c"]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn atomic_write_collision_never_removes_someone_elses_file() {
+        let root =
+            std::env::temp_dir().join(format!("atrium-write-collision-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("document");
+        let tmp = root.join("occupied.tmp");
+        fs::write(&path, b"original").unwrap();
+        fs::write(&tmp, b"belongs to another writer").unwrap();
+        assert!(atomic_write_at(&path, b"replacement", &tmp).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"original");
+        assert_eq!(fs::read(&tmp).unwrap(), b"belongs to another writer");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_is_private_for_new_files_and_preserves_existing_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("atrium-write-mode-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("document");
+        atomic_write_at(&path, b"new", &root.join("new.tmp")).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+        atomic_write_at(&path, b"replacement", &root.join("replace.tmp")).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_metadata_save_does_not_lose_binding_or_completion_receipt() {
+        let root =
+            std::env::temp_dir().join(format!("atrium-metadata-failure-{}", std::process::id()));
+        let mut p = Project::open(&root).unwrap();
+        p.file.streams.push(stream("lead", &[]));
+        let key = p.add_task("lead", "job", "# Job\n\nDo it").unwrap();
+        let worker = p.stream_from_task(p.task(&key).unwrap(), "codex").unwrap();
+        let id = worker.id.clone();
+        p.file.streams.push(worker);
+        p.save().unwrap();
+        let path = p.dir().join("project.json");
+        let backup = p.dir().join("project.backup");
+        fs::rename(&path, &backup).unwrap();
+        fs::create_dir(&path).unwrap(); // metadata rename now fails without permissions tricks
+        assert!(p.bind_thread(&id, "session").is_err());
+        assert!(p.stream(&id).unwrap().thread_id.is_none());
+        p.set_task_status(&key, TaskStatus::Done).unwrap();
+        assert!(p.report_finished(&id).is_err());
+        assert!(!p.stream(&id).unwrap().reported);
+        assert_eq!(p.notices.len(), 1);
+        assert!(p.report_finished(&id).is_err());
+        assert_eq!(p.notices.len(), 1);
+        assert!(
+            !fs::read_dir(p.dir())
+                .unwrap()
+                .flatten()
+                .any(|e| e.file_name().to_string_lossy().contains("tmp-"))
+        );
+        fs::remove_dir(&path).unwrap();
+        fs::rename(&backup, &path).unwrap();
+        let mut p = Project::open(&root).unwrap();
+        assert!(p.report_finished(&id).unwrap().is_some());
+        assert_eq!(p.notices.len(), 1);
+        assert!(p.report_finished(&id).unwrap().is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unreadable_task_and_notice_never_replace_original_contents() {
+        let root = std::env::temp_dir().join(format!("atrium-read-failure-{}", std::process::id()));
+        let mut p = Project::open(&root).unwrap();
+        let key = p
+            .add_task("lead", "job", "# Job\n\nImportant instructions")
+            .unwrap();
+        let task_path = root.join(p.task(&key).unwrap().rel_path());
+        fs::write(&task_path, [0xff, 0xfe]).unwrap();
+        assert!(p.set_task_status(&key, TaskStatus::Running).is_err());
+        assert_eq!(fs::read(&task_path).unwrap(), vec![0xff, 0xfe]);
+        let notices = p.dir().join("notices.md");
+        fs::write(&notices, [0xff, 0xfe]).unwrap();
+        assert!(p.post(ATRIUM, vec!["lead".into()], "finished").is_err());
+        assert_eq!(fs::read(&notices).unwrap(), vec![0xff, 0xfe]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn startup_failure_preserves_evidence_until_status_can_be_written() {
+        let root =
+            std::env::temp_dir().join(format!("atrium-start-failure-{}", std::process::id()));
+        let mut p = Project::open(&root).unwrap();
+        p.file.streams.push(stream("lead", &[]));
+        let key = p
+            .add_task("lead", "job", "# Job\nstatus: running\n\nDo it")
+            .unwrap();
+        let worker = p.stream_from_task(p.task(&key).unwrap(), "codex").unwrap();
+        let id = worker.id.clone();
+        p.file.streams.push(worker);
+        p.save().unwrap();
+        let task_path = root.join(p.task(&key).unwrap().rel_path());
+        let original = fs::read(&task_path).unwrap();
+        // First post succeeds, but task status cannot be read. Keep the stream.
+        fs::write(&task_path, [0xff]).unwrap();
+        assert!(p.fail_start(&id, "backend unavailable").is_err());
+        assert!(p.stream(&id).is_some());
+        assert_eq!(p.notices.len(), 1);
+        fs::write(&task_path, original).unwrap();
+        p.stamp = None;
+        p.reload();
+        assert_eq!(
+            p.fail_start(&id, "backend unavailable").unwrap(),
+            Some("lead".into())
+        );
+        assert!(p.stream(&id).is_none());
+        assert_eq!(p.task(&key).unwrap().status, TaskStatus::Failed);
+        assert_eq!(p.notices.len(), 1);
+        let mut p = Project::open(&root).unwrap();
+        assert!(p.recover_unbound_tasks().unwrap().is_empty());
+        assert!(p.startable().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn restart_recovers_an_unbound_persisted_claim_without_relaunch() {
+        let root = std::env::temp_dir().join(format!("atrium-bound-claim-{}", std::process::id()));
+        let mut p = Project::open(&root).unwrap();
+        p.file.streams.push(stream("lead", &[]));
+        let key = p
+            .add_task("lead", "job", "# Job\nstatus: running\n\nDo it")
+            .unwrap();
+        let worker = p.stream_from_task(p.task(&key).unwrap(), "codex").unwrap();
+        p.file.streams.push(worker);
+        p.save().unwrap();
+        let mut p = Project::open(&root).unwrap();
+        assert_eq!(p.recover_unbound_tasks().unwrap(), vec!["lead"]);
+        assert_eq!(p.task(&key).unwrap().status, TaskStatus::Failed);
+        assert!(p.recover_unbound_tasks().unwrap().is_empty());
+        assert_eq!(p.notices.len(), 1);
+        // A finished task without a session is not a claim to recover. Never
+        // overwrite an agent/user's finished outcome during startup repair.
+        let done = p
+            .add_task("lead", "done", "# Done\nstatus: done\n\nResult")
+            .unwrap();
+        let worker = p.stream_from_task(p.task(&done).unwrap(), "codex").unwrap();
+        p.file.streams.push(worker);
+        p.save().unwrap();
+        let mut p = Project::open(&root).unwrap();
+        assert!(p.recover_unbound_tasks().unwrap().is_empty());
+        assert_eq!(p.task(&done).unwrap().status, TaskStatus::Done);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn offline_task_does_not_reserve_a_worker_slot() {
+        let mut project = Project::default();
+        project.file.max_workers = 1;
+        project.file.streams.push(stream("lead", &[]));
+        project.tasks = vec![
+            Task::parse("lead", "a", "# Offline\nagent: claude\n"),
+            Task::parse("lead", "b", "# Ready\nagent: codex\n"),
+        ];
+        let tasks = project.startable_with(|task| task.agent.as_deref() == Some("codex"));
+        assert_eq!(
+            tasks.iter().map(|t| t.key()).collect::<Vec<_>>(),
+            vec!["lead/b"]
+        );
+    }
+
+    #[test]
+    fn interrupted_unbound_claim_is_reported_not_relaunched() {
+        let root = std::env::temp_dir().join(format!("atrium-unbound-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let mut project = Project::open(&root).unwrap();
+        project.file.streams.push(stream("lead", &[]));
+        project.save().unwrap();
+        let key = project
+            .add_task("lead", "job", "# Job\nstatus: running\n\nDo it.")
+            .unwrap();
+        assert_eq!(project.recover_unbound_tasks().unwrap(), vec!["lead"]);
+        assert_eq!(project.task(&key).unwrap().status, TaskStatus::Failed);
+        assert!(project.startable().is_empty());
+        let mut project = Project::open(&root).unwrap();
+        assert!(project.recover_unbound_tasks().unwrap().is_empty());
+        assert_eq!(project.notices.len(), 1);
+        fs::remove_dir_all(root).unwrap();
     }
 }
