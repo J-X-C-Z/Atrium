@@ -8,8 +8,8 @@ use std::{
 };
 
 use agent_rpc::{Connection, Incoming, RpcError, process};
-use atrium_core::{AgentEvent, ApprovalDecision, ConfigOption, RequestId, ThreadMeta};
 use anyhow::{Context as _, Result, anyhow};
+use atrium_core::{AgentEvent, ApprovalDecision, ConfigOption, RequestId, ThreadMeta};
 use base64::Engine as _;
 use futures::channel::mpsc;
 use serde_json::{Value, json};

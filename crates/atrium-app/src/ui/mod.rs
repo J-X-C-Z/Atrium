@@ -4,6 +4,7 @@
 mod chat;
 mod composer;
 mod context;
+mod project;
 mod rows;
 mod sidebar;
 
@@ -33,6 +34,7 @@ use crate::{
 };
 pub use composer::AcceptPrediction;
 use composer::Composer;
+pub use context::format_speed;
 
 actions!(
     atrium,
@@ -148,6 +150,12 @@ enum Overlay {
         thread_id: String,
         field: Entity<TextInput>,
     },
+    NewStream {
+        name: Entity<TextInput>,
+        goal: Entity<TextInput>,
+        scope: Entity<TextInput>,
+        backend: String,
+    },
 }
 
 pub struct RootView {
@@ -157,6 +165,10 @@ pub struct RootView {
     search: Entity<TextInput>,
     toaster: Entity<Toaster>,
     overlay: Option<Overlay>,
+    /// The atrium panel's tab, and the notice being written there.
+    atrium_tab: project::AtriumTab,
+    notice_input: Entity<TextInput>,
+    notice_to: String,
     /// The theme last applied, so a change of preference or system appearance re-applies.
     applied: Option<(ThemePref, bool)>,
     _subscriptions: Vec<Subscription>,
@@ -168,6 +180,11 @@ impl RootView {
         let composer = cx.new(|cx| Composer::new(workspace.clone(), window, cx));
         let search = cx.new(|cx| TextInput::new(window, cx).placeholder("Search chats"));
         let toaster = cx.new(|_| Toaster::default());
+        let notice_input = cx.new(|cx| {
+            TextInput::new(window, cx)
+                .multi_line(2, 5)
+                .placeholder("Tell the workstreams something…")
+        });
         let subscriptions = vec![
             cx.observe_in(&workspace, window, |this, _, window, cx| {
                 this.apply_theme(window, cx);
@@ -198,6 +215,9 @@ impl RootView {
             search,
             toaster,
             overlay: None,
+            atrium_tab: project::AtriumTab::default(),
+            notice_input,
+            notice_to: "all".into(),
             applied: None,
             _subscriptions: subscriptions,
         };
@@ -242,6 +262,11 @@ impl RootView {
     }
 
     fn new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // In a project, something new is a workstream.
+        if self.workspace.read(cx).project_root().is_some() {
+            self.open_new_stream(window, cx);
+            return;
+        }
         self.workspace.update(cx, |ws, cx| ws.new_chat(cx));
         Composer::focus_entity(&self.composer, window, cx);
     }
@@ -615,6 +640,14 @@ impl RootView {
             ),
             ("usage", "Account & usage", IconName::Gauge, ""),
             ("context", "Context & speed", IconName::Zap, "⌘I"),
+            (
+                "project",
+                "Open a folder as a project…",
+                IconName::FolderOpen,
+                "",
+            ),
+            ("stream", "New workstream…", IconName::Layers, ""),
+            ("chats", "Go to chats", IconName::MessageSquare, ""),
             ("fast", "Toggle Fast mode", IconName::Zap, ""),
             ("plan", "Toggle Plan mode", IconName::ListChecks, ""),
             (
@@ -706,6 +739,13 @@ impl RootView {
             "memory" => workspace.update(cx, |ws, cx| ws.toggle_memory(cx)),
             "usage" => self.open_account(cx),
             "context" => self.open_context(cx),
+            "project" => project::choose_project(workspace, cx),
+            "stream" => {
+                if workspace.read(cx).project_root().is_some() {
+                    self.open_new_stream(window, cx)
+                }
+            }
+            "chats" => workspace.update(cx, |ws, cx| ws.enter_chats(cx)),
             "fast" | "plan" | "predict" => workspace.update(cx, |ws, cx| {
                 match value {
                     "fast" => ws.settings.fast = !ws.settings.fast,
@@ -912,14 +952,27 @@ impl Render for RootView {
             window,
             cx,
         );
-        let main = chat::render(
-            &self.workspace,
-            &self.composer,
-            cx.entity(),
-            collapsed,
-            window,
-            cx,
+        let overview = matches!(
+            self.workspace.read(cx).room,
+            crate::workspace::Room::Project { stream: None, .. }
         );
+        let main = if overview {
+            let panel = project::AtriumPanel {
+                tab: self.atrium_tab,
+                notice_input: self.notice_input.clone(),
+                notice_to: self.notice_to.clone(),
+            };
+            project::render_overview(&self.workspace, cx.entity(), panel, collapsed, window, cx)
+        } else {
+            chat::render(
+                &self.workspace,
+                &self.composer,
+                cx.entity(),
+                collapsed,
+                window,
+                cx,
+            )
+        };
         let overlay: Option<AnyElement> = match &self.overlay {
             None => None,
             Some(Overlay::Palette) => Some(self.palette(cx)),
@@ -932,6 +985,16 @@ impl Render for RootView {
             Some(Overlay::Settings { codex_path }) => {
                 let codex_path = codex_path.clone();
                 Some(self.settings_dialog(&codex_path, cx))
+            }
+            Some(Overlay::NewStream {
+                name,
+                goal,
+                scope,
+                backend,
+            }) => {
+                let (name, goal, scope, backend) =
+                    (name.clone(), goal.clone(), scope.clone(), backend.clone());
+                Some(self.new_stream_dialog(&name, &goal, &scope, &backend, cx))
             }
             Some(Overlay::Rename { thread_id, field }) => {
                 let (close, submit) = (cx.entity(), cx.entity());

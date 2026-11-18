@@ -3,7 +3,7 @@
 
 use atrium_core::{Account, plan_label};
 use ely_gpui_component::{
-    buttons::{ButtonVariant, IconButton},
+    buttons::{Button, ButtonVariant, IconButton, SegmentedControl},
     chat::{Conversation, ConversationList, new_chat_button},
     data_display::{Avatar, Badge, Tone},
     forms::{SearchInput, TextInput},
@@ -109,9 +109,13 @@ pub fn render(
     }
 
     let now = Timestamp::now();
+    let in_project = ws.project_root().is_some();
+    // Workstreams' sessions live in their project, not among the chats.
+    let project_threads = ws.project_threads();
     let conversations: Vec<Conversation> = ws
         .threads
         .iter()
+        .filter(|thread| !project_threads.contains(&thread.id))
         .map(|thread| Conversation {
             key: thread.id.clone().into(),
             // Other agents' chats say whose they are.
@@ -208,97 +212,158 @@ pub fn render(
                         }),
                 ),
         )
-        .child(
+        .child({
+            let switch = workspace.clone();
             div().flex_none().px_3().pb_2().child(
-                new_chat_button("new-chat")
-                    .on_click(move |_, _, cx| fresh.update(cx, |ws, cx| ws.new_chat(cx))),
-            ),
-        )
-        .child(
-            div()
-                .flex_none()
-                .px_3()
-                .pb_2()
-                .child(SearchInput::new("search", search).size(ControlSize::Sm)),
-        )
-        .child(
-            div()
-                .id("conversation-scroll")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .px_2()
-                .pb_2()
-                .when(empty, |column| {
-                    column.child(
-                        div()
-                            .px_2()
-                            .py_6()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .text_size(theme.text_size(TextSize::Sm))
-                            .text_color(colors.fg_muted)
-                            .child(if connecting {
-                                "Loading chats…"
+                SegmentedControl::new("room", if in_project { "projects" } else { "chats" })
+                    .segment("chats", "Chats", Some(IconName::MessageSquare))
+                    .segment("projects", "Projects", Some(IconName::Layers))
+                    .size(ControlSize::Sm)
+                    .on_change(move |value, _, cx| {
+                        let projects = value.as_ref() == "projects";
+                        switch.update(cx, |ws, cx| {
+                            if projects {
+                                match ws
+                                    .settings
+                                    .active_project
+                                    .clone()
+                                    .or_else(|| ws.projects.first().map(|p| p.root.clone()))
+                                {
+                                    Some(root) => ws.enter_project(root, cx),
+                                    None => {
+                                        ws.room = crate::workspace::Room::Project {
+                                            root: std::path::PathBuf::new(),
+                                            stream: None,
+                                        };
+                                        cx.notify();
+                                    }
+                                }
                             } else {
-                                "No chats yet."
-                            })
-                            .child(
+                                ws.enter_chats(cx);
+                            }
+                        })
+                    }),
+            )
+        })
+        .when(in_project, |sidebar| {
+            let add = workspace.clone();
+            sidebar
+                .child(
+                    div().flex_none().px_3().pb_2().child(
+                        Button::new("open-project", "Open a folder as a project")
+                            .icon(IconName::FolderPlus)
+                            .variant(ButtonVariant::Outline)
+                            .full_width()
+                            .on_click(move |_, _, cx| {
+                                super::project::choose_project(add.clone(), cx)
+                            }),
+                    ),
+                )
+                .child(
+                    div()
+                        .id("project-scroll")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .px_2()
+                        .pb_2()
+                        .child(super::project::sidebar_list(workspace, cx)),
+                )
+        })
+        .when(!in_project, |sidebar| {
+            sidebar
+                .child(
+                    div().flex_none().px_3().pb_2().child(
+                        new_chat_button("new-chat")
+                            .on_click(move |_, _, cx| fresh.update(cx, |ws, cx| ws.new_chat(cx))),
+                    ),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .px_3()
+                        .pb_2()
+                        .child(SearchInput::new("search", search).size(ControlSize::Sm)),
+                )
+                .child(
+                    div()
+                        .id("conversation-scroll")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .px_2()
+                        .pb_2()
+                        .when(empty, |column| {
+                            column.child(
                                 div()
-                                    .text_size(theme.text_size(TextSize::Xs))
-                                    .text_color(colors.fg_subtle)
-                                    .child("Your Codex conversations show here."),
-                            ),
-                    )
-                })
-                // With only message hits, the list's "no match" would push them away.
-                .when(!empty && (titles_match || hits.is_empty()), |column| {
-                    column.child(list)
-                })
-                .when(!hits.is_empty(), |column| {
-                    column
-                        .child(
-                            div()
-                                .px_2()
-                                .pt_3()
-                                .pb_1()
-                                .text_size(theme.text_size(TextSize::Xs))
-                                .text_color(colors.fg_subtle)
-                                .child("In messages"),
-                        )
-                        .children(hits.into_iter().map(|(id, title, snippet)| {
-                            let open = workspace.clone();
-                            div()
-                                .id(SharedString::from(format!("hit-{id}")))
-                                .flex()
-                                .flex_col()
-                                .gap_0p5()
-                                .px_2()
-                                .py_1p5()
-                                .rounded_md()
-                                .cursor_pointer()
-                                .hover(|row| row.bg(colors.hover))
-                                .on_click(move |_, _, cx| {
-                                    let id = id.clone();
-                                    open.update(cx, |ws, cx| ws.open_thread(id, cx))
-                                })
+                                    .px_2()
+                                    .py_6()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .text_size(theme.text_size(TextSize::Sm))
+                                    .text_color(colors.fg_muted)
+                                    .child(if connecting {
+                                        "Loading chats…"
+                                    } else {
+                                        "No chats yet."
+                                    })
+                                    .child(
+                                        div()
+                                            .text_size(theme.text_size(TextSize::Xs))
+                                            .text_color(colors.fg_subtle)
+                                            .child("Your Codex conversations show here."),
+                                    ),
+                            )
+                        })
+                        // With only message hits, the list's "no match" would push them away.
+                        .when(!empty && (titles_match || hits.is_empty()), |column| {
+                            column.child(list)
+                        })
+                        .when(!hits.is_empty(), |column| {
+                            column
                                 .child(
                                     div()
-                                        .truncate()
-                                        .text_size(theme.text_size(TextSize::Sm))
-                                        .child(title),
-                                )
-                                .child(
-                                    div()
+                                        .px_2()
+                                        .pt_3()
+                                        .pb_1()
                                         .text_size(theme.text_size(TextSize::Xs))
-                                        .text_color(colors.fg_muted)
-                                        .line_clamp(2)
-                                        .child(snippet),
+                                        .text_color(colors.fg_subtle)
+                                        .child("In messages"),
                                 )
-                        }))
-                }),
-        )
+                                .children(hits.into_iter().map(|(id, title, snippet)| {
+                                    let open = workspace.clone();
+                                    div()
+                                        .id(SharedString::from(format!("hit-{id}")))
+                                        .flex()
+                                        .flex_col()
+                                        .gap_0p5()
+                                        .px_2()
+                                        .py_1p5()
+                                        .rounded_md()
+                                        .cursor_pointer()
+                                        .hover(|row| row.bg(colors.hover))
+                                        .on_click(move |_, _, cx| {
+                                            let id = id.clone();
+                                            open.update(cx, |ws, cx| ws.open_thread(id, cx))
+                                        })
+                                        .child(
+                                            div()
+                                                .truncate()
+                                                .text_size(theme.text_size(TextSize::Sm))
+                                                .child(title),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(theme.text_size(TextSize::Xs))
+                                                .text_color(colors.fg_muted)
+                                                .line_clamp(2)
+                                                .child(snippet),
+                                        )
+                                }))
+                        }),
+                )
+        })
         .child({
             let open = account_root.clone();
             let row = div()

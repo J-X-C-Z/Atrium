@@ -48,6 +48,10 @@ pub struct Settings {
     pub agent_commands: std::collections::HashMap<String, String>,
     /// Agent sessions the user archived (ACP has no archive of its own).
     pub hidden_sessions: Vec<String>,
+    /// Project folders, in the order they were added.
+    pub projects: Vec<PathBuf>,
+    /// The project the user was in, to come back to it.
+    pub active_project: Option<PathBuf>,
 }
 
 impl Settings {

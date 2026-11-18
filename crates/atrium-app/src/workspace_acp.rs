@@ -62,7 +62,7 @@ impl Workspace {
         self.agents.iter().find(|a| a.profile.id == backend)
     }
 
-    fn acp(&self, backend: &str) -> Option<AcpClient> {
+    pub(super) fn acp(&self, backend: &str) -> Option<AcpClient> {
         self.agent(backend).and_then(|a| a.client.clone())
     }
 
@@ -159,10 +159,15 @@ impl Workspace {
     /// Replaces `backend`'s threads in the list with `threads`.
     pub(super) fn merge_threads(&mut self, backend: &str, threads: Vec<ThreadMeta>) {
         let hidden = &self.settings.hidden_sessions;
+        // Workstreams' sessions stay even when the agent leaves them out.
+        let projects = self.project_threads();
+        let listed: Vec<String> = threads.iter().map(|t| t.id.clone()).collect();
         let kept: Vec<ThreadMeta> = self
             .threads
             .drain(..)
-            .filter(|t| t.backend != backend)
+            .filter(|t| {
+                t.backend != backend || (projects.contains(&t.id) && !listed.contains(&t.id))
+            })
             .collect();
         self.threads = kept;
         // Untitled sessions were never used (some agents store every session

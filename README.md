@@ -27,6 +27,34 @@ CODEX_BIN=target/debug/mock-codex cargo run -p atrium-app
 script/bundle-macos.sh
 ```
 
+## 两种用法：聊天与项目
+
+侧边栏顶部切换"Chats / Projects"。
+
+**聊天**：日常问答，就是下面描述的对话界面，选一个 agent 就开始。
+
+**项目**：一个代码目录，由几条**工作线**长期并行推进。每条工作线是一个独立会话（任意 agent），有自己的长期目标和负责范围，自己往前走，不需要总管反复督促；工作线之间通过项目目录里的**中庭**（`.atrium/`）对齐：
+
+```
+.atrium/project.json      工作线（Atrium 自己的记录）
+.atrium/brief.md          共识：架构、约定、决定。所有工作线开工先读
+.atrium/contracts/*.md    工作线之间的接口（API、数据结构）。改接口的一方更新文件并发公告
+.atrium/status/<id>.md    每条工作线自己的状态：Focus / Done / Next / Touching / Questions
+.atrium/notices.md        只追加的公告："- 时间 · 发送方 → 接收方: 内容"
+```
+
+都是普通文件，agent 用自己的读写文件能力就能参与，不依赖任何专门协议；可以提交进 git。
+
+- **新建工作线**：名字、agent、长期目标、负责范围（如 `web/**`）。Atrium 新建会话，发一段开场说明（目标、范围、其他工作线、中庭的规则），然后它自己开工。Codex 另外设置原生长期目标（`thread/goal`），跨轮次自动推进；其他 agent 没有这个能力，空闲时点"Carry on"继续
+- **概览**：每条工作线一张卡片：状态（工作中 / 需要你 / 空闲 / 出错 / agent 未运行）、目标、范围、计划进度与当前步骤、状态文件里的 Focus、最近说的话、未读公告、越界次数、速度和上下文占用
+- **需要你**：所有工作线等你审批或回答的事项汇总在概览顶部，侧边栏项目旁有角标
+- **公告只推增量**：发给某条工作线（或所有人）的新公告，在它下一条消息前自动附上；也可以点"Hand over notices"立即移交（Codex 运行中走插话，读到下一步）。不会把整个中庭塞进上下文
+- **越界提醒**：Atrium 看得到每个会话改了哪些文件。改到别人范围内的文件时，卡片标出，弹出提示，并自动发公告给范围所属的工作线
+- **中庭面板**：公告（可以自己发，选择接收方）、Brief、Contracts、各工作线状态；文件变化 2 秒内刷新，"Edit" 用系统编辑器打开
+- 工作线的会话不出现在普通聊天列表里；点进去就是完整的聊天界面，上方一条项目导航（返回、目标、范围、移交公告、移出项目）
+
+当前限制：工作线共用一个代码目录（还没有每条线独立 worktree）；越界提醒只针对 agent 报告的文件修改，不包括它在命令里直接写的文件。
+
 ## 支持的 Agent
 
 | Agent | 接入方式 | 本机需要 |
@@ -107,7 +135,7 @@ Atrium 以 `experimentalApi` 连接 Codex app-server，下面这些都走的是 
 
 | 快捷键 | 作用 |
 |---|---|
-| ⌘N | 新对话 |
+| ⌘N | 新对话（在项目里：新工作线） |
 | ⌘K | 命令面板 |
 | ⌘, | 设置 |
 | ⌘B | 折叠 / 展开侧边栏 |
@@ -130,7 +158,7 @@ crates/
   agent-rpc/        共享传输层：子进程 stdio 上的行分隔 JSON-RPC（可选 JSON-RPC 2.0），查找可执行文件
   codex-client/     codex app-server 客户端与协议翻译；含 mock-codex
   acp-client/       ACP 客户端：握手、会话（new/load/resume/list/prompt/cancel/设置）、权限；把 session/update 翻译成 AgentEvent（为没有 id 的 ACP 合成轮次与条目）；含 mock-acp（可模仿 claude / deepseek / antigravity）
-  atrium-app/    GPUI 应用：Workspace（状态与后端调用）+ ui/（sidebar、chat、composer、rows、调色板与设置）
+  atrium-app/    GPUI 应用：Workspace（状态与后端调用；workspace_project 管项目与工作线）、project（中庭文件、公告解析、范围匹配）+ ui/（sidebar、chat、composer、rows、project、调色板与设置）
 ```
 
 数据流只有一个方向：
@@ -156,6 +184,7 @@ cargo test --workspace
 
 ## 下一步
 
+- 每条工作线可选独立 git worktree；中庭写入的 MCP 工具（发公告、更新状态），让写入更规范
 - 编排内核独立为 daemon，Hub MCP 实现跨后端派单与回执
 - ACP agent 的插话（Claude 支持 prompt 排队）、agent 内登录（`authenticate`）
 - 场景（Scene）配置与网格面板

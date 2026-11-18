@@ -2,6 +2,7 @@
 //! session works on its own; the atrium is where they share and align.
 
 mod agents;
+mod project;
 mod settings;
 mod ui;
 mod workspace;

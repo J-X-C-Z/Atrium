@@ -23,7 +23,10 @@ use crate::settings::{Settings, ThemePref};
 
 #[path = "workspace_acp.rs"]
 mod acp;
+#[path = "workspace_project.rs"]
+mod projects;
 pub use acp::{AcpAgent, AgentStatus, CODEX};
+pub use projects::{Room, StreamState, StreamView};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
@@ -60,6 +63,13 @@ pub struct Composed {
 }
 
 impl Composed {
+    pub fn text(text: String) -> Self {
+        Self {
+            text,
+            ..Self::default()
+        }
+    }
+
     fn attachments(&self) -> Vec<String> {
         self.images
             .iter()
@@ -153,6 +163,10 @@ pub struct Workspace {
     agent_commands: HashMap<String, Vec<AgentCommand>>,
     /// A session made ahead for a new chat, by agent: `(session, folder)`.
     warm: HashMap<String, (String, PathBuf)>,
+    /// Projects, and where the user is: the chats or one of them.
+    pub projects: Vec<crate::project::Project>,
+    pub room: Room,
+    _atrium_poll: Option<Task<()>>,
     _pump: Option<Task<()>>,
 }
 
@@ -200,10 +214,14 @@ impl Workspace {
             commands: HashMap::new(),
             agent_commands: HashMap::new(),
             warm: HashMap::new(),
+            projects: Vec::new(),
+            room: Room::Chats,
+            _atrium_poll: None,
             _pump: None,
         };
         workspace.connect(cx);
         workspace.init_agents(cx);
+        workspace.init_projects(cx);
         if let Some(agent) = workspace.settings.default_agent.clone()
             && (agent == CODEX
                 || workspace
@@ -349,6 +367,7 @@ impl Workspace {
             return;
         }
         self.time(&event);
+        self.watch_streams(&event, cx);
         match &event {
             AgentEvent::PredictionUpdated { thread_id, text } => {
                 self.set_prediction(thread_id, text.clone());
@@ -599,10 +618,7 @@ impl Workspace {
         };
         transcript.is_running()
             && transcript.entries().last().is_some_and(|entry| {
-                matches!(
-                    entry.kind,
-                    atrium_core::EntryKind::Item(Item::User { .. })
-                )
+                matches!(entry.kind, atrium_core::EntryKind::Item(Item::User { .. }))
             })
     }
 
@@ -627,6 +643,11 @@ impl Workspace {
     pub fn open_thread(&mut self, thread_id: String, cx: &mut Context<Self>) {
         self.view = View::Thread(thread_id.clone());
         cx.notify();
+        self.load_thread(thread_id, cx);
+    }
+
+    /// Reads a thread's history into its transcript, without showing it.
+    fn load_thread(&mut self, thread_id: String, cx: &mut Context<Self>) {
         if self.transcripts.contains_key(&thread_id) || self.loading.contains(&thread_id) {
             return;
         }
@@ -1129,6 +1150,7 @@ impl Workspace {
         if composed.text.is_empty() && composed.images.is_empty() {
             return;
         }
+        let composed = self.with_stream_notices(composed);
         if !self.is_codex_view() {
             self.acp_send(composed, cx);
             return;

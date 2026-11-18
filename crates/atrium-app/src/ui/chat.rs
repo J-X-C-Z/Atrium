@@ -53,6 +53,7 @@ pub fn render(
         .flex_col()
         .bg(colors.bg)
         .child(header)
+        .children(super::project::stream_bar(workspace, cx))
         .children(goal)
         .child(div().flex_1().min_h_0().child(body))
         .into_any_element()
