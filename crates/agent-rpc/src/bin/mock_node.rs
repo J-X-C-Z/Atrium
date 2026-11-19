@@ -105,6 +105,14 @@ fn now() -> i64 {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.as_slice() == ["--echo-stdio"] {
+        let mut output = std::io::stdout().lock();
+        for line in std::io::stdin().lock().lines() {
+            writeln!(output, "{}", line.expect("read echo input")).expect("write echo output");
+            output.flush().expect("flush echo output");
+        }
+        return;
+    }
     let mut port = 7381u16;
     let mut name = "mock".to_string();
     let mut roots = Vec::new();

@@ -24,6 +24,7 @@ struct MockNode {
 impl Drop for MockNode {
     fn drop(&mut self) {
         let _ = self.child.kill();
+        let _ = self.child.wait();
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
@@ -31,10 +32,12 @@ impl Drop for MockNode {
 fn mock_node(tag: &str) -> MockNode {
     let root = std::env::temp_dir().join(format!("atrium-node-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_mock-node"))
+    let executable = env!("CARGO_BIN_EXE_mock-node");
+    let mut child = Command::new(executable)
         .args(["--port", "0", "--name", "studio", "--root"])
         .arg(&root)
-        .args(["--agent", "echo=raw=cat"])
+        .arg("--agent")
+        .arg(format!("echo=raw={executable},--echo-stdio"))
         .stdout(Stdio::piped())
         .spawn()
         .expect("mock-node starts");
@@ -147,7 +150,7 @@ fn json_rpc_runs_over_an_attachment() {
     let attachment = client.attach(&proc.id, 0);
     let (connection, mut events) =
         Connection::jsonrpc2(attachment.reader, attachment.writer, "echo");
-    // `cat` sends a notification straight back.
+    // The echo fixture sends the notification straight back.
     connection
         .notify("hello", Some(serde_json::json!({ "from": "atrium" })))
         .unwrap();
