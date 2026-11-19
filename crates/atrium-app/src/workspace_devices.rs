@@ -297,6 +297,7 @@ impl Workspace {
                         }),
                         link: None,
                         _pump: None,
+                        reopen: Vec::new(),
                     });
                     self.agents.len() - 1
                 }

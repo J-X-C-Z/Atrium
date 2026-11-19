@@ -3,7 +3,7 @@
 //! thread list and transcripts as Codex's.
 
 use super::notice_dispatch::{NoticeDispatch, NoticeSendResult, NoticeTarget};
-use crate::i18n::tf;
+use crate::i18n::{t, tf};
 use crate::project::notice_delivery::NoticeOutcome;
 use std::time::Instant;
 
@@ -39,6 +39,7 @@ pub struct AcpAgent {
     /// The link to its device, while it runs there.
     pub link: Option<std::sync::Arc<std::sync::Mutex<agent_rpc::node::LinkState>>>,
     pub(super) _pump: Option<Task<()>>,
+    pub(super) reopen: Vec<String>,
 }
 
 impl Workspace {
@@ -58,6 +59,7 @@ impl Workspace {
                 remote: None,
                 link: None,
                 _pump: None,
+                reopen: Vec::new(),
             })
             .collect();
         for ix in 0..self.agents.len() {
@@ -96,9 +98,57 @@ impl Workspace {
         agents::is_codex(self.view_backend())
     }
 
+    /// Notify only if the effective environment actually changed.
+    pub fn save_environment(&mut self, previous: Vec<(String, String)>, cx: &mut Context<Self>) {
+        self.settings.save();
+        if previous != self.session_env() && self.agents.iter().any(|a| a.client.is_some()) {
+            cx.emit(Notice::Info(
+                t("Restart ACP agents to use the new environment.").into(),
+            ));
+        }
+        cx.notify();
+    }
+
+    pub fn restart_acp_agents(&mut self, cx: &mut Context<Self>) {
+        let running: Vec<_> = self
+            .agents
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.client.is_some())
+            .map(|(ix, _)| ix)
+            .collect();
+        let busy = self.draft.is_running()
+            || self.threads.iter().any(|thread| {
+                !agents::is_codex(&thread.backend)
+                    && (self.loading.contains(&thread.id)
+                        || self.transcripts.get(&thread.id).is_some_and(|chat| {
+                            chat.is_running() || chat.pending_approvals().next().is_some()
+                        }))
+            });
+        if busy {
+            cx.emit(Notice::Info(
+                t("Finish or stop active ACP turns before restarting agents.").into(),
+            ));
+            return;
+        }
+        for ix in running {
+            let backend = self.agents[ix].profile.id.clone();
+            self.agents[ix].reopen = self
+                .threads
+                .iter()
+                .filter(|thread| {
+                    thread.backend == backend && self.transcripts.contains_key(&thread.id)
+                })
+                .map(|thread| thread.id.clone())
+                .collect();
+            self.start_agent(ix, cx);
+        }
+    }
+
     /// Starts (or restarts) one ACP agent and pumps its events.
     pub fn start_agent(&mut self, ix: usize, cx: &mut Context<Self>) {
         let owner = self.settings.install_id.clone();
+        let env = self.session_env();
         let agent = &mut self.agents[ix];
         let backend = agent.profile.id.to_string();
         let remote = agent.remote.clone();
@@ -109,6 +159,7 @@ impl Workspace {
         agent.status = AgentStatus::Starting;
         agent.client = None;
         agent.link = None;
+        self.warm.remove(&backend);
         cx.notify();
         let starting = backend.clone();
         agent._pump = Some(cx.spawn(async move |this, cx| {
@@ -124,7 +175,7 @@ impl Workspace {
                         (Some(remote), _) => {
                             let proc = remote
                                 .node
-                                .spawn(&remote.agent, &remote.cwd, &owner)
+                                .spawn_with_env(&remote.agent, &remote.cwd, &owner, &env)
                                 .map_err(|e| anyhow::anyhow!("{e}"))?;
                             let attachment = remote.node.attach(&proc.id, 0);
                             let link = attachment.state.clone();
@@ -145,7 +196,7 @@ impl Workspace {
                             backend: backend.clone(),
                             program,
                             args,
-                            env: Vec::new(),
+                            env,
                         })
                         .await
                         .map(|(client, events)| (client, events, None)),
@@ -169,12 +220,17 @@ impl Workspace {
             };
             let listing = client.clone();
             let ok = this.update(cx, |ws, cx| {
-                if let Some(agent) = ws.agents.iter_mut().find(|a| a.profile.id == backend) {
-                    log::info!("{} {} ready", agent.profile.name, client.info.version);
-                    agent.info = Some(client.info.clone());
-                    agent.client = Some(client.clone());
-                    agent.status = AgentStatus::Ready;
-                    agent.link = link;
+                let Some(agent) = ws.agents.iter_mut().find(|a| a.profile.id == backend) else {
+                    return;
+                };
+                log::info!("{} {} ready", agent.profile.name, client.info.version);
+                agent.info = Some(client.info.clone());
+                agent.client = Some(client.clone());
+                agent.status = AgentStatus::Ready;
+                agent.link = link;
+                let reopen = std::mem::take(&mut agent.reopen);
+                for session in reopen {
+                    ws.acp_open(session, cx);
                 }
                 if ws.draft_backend == backend {
                     ws.warm_draft(cx);
@@ -212,7 +268,9 @@ impl Workspace {
             .threads
             .drain(..)
             .filter(|t| {
-                t.backend != backend || (projects.contains(&t.id) && !listed.contains(&t.id))
+                t.backend != backend
+                    || ((projects.contains(&t.id) || self.transcripts.contains_key(&t.id))
+                        && !listed.contains(&t.id))
             })
             .collect();
         self.threads = kept;

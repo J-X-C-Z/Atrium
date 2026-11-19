@@ -283,10 +283,21 @@ impl NodeClient {
 
     /// Starts `agent` in `cwd` on the device.
     pub fn spawn(&self, agent: &str, cwd: &str, owner: &str) -> Result<Proc> {
+        self.spawn_with_env(agent, cwd, owner, &[])
+    }
+
+    pub fn spawn_with_env(
+        &self,
+        agent: &str,
+        cwd: &str,
+        owner: &str,
+        env: &[(String, String)],
+    ) -> Result<Proc> {
         let process: Proc = self.json(self.request("POST", "/v1/procs").send_json(json!({
             "agent": agent,
             "cwd": cwd,
             "owner": owner,
+            "env": env.iter().collect::<HashMap<_, _>>(),
         })))?;
         self.remember(&process);
         Ok(process)

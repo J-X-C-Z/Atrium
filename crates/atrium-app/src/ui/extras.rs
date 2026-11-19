@@ -175,7 +175,12 @@ impl RootView {
         let theme = cx.theme();
         let colors = theme.colors.clone();
         let active = ws.settings.environment.clone();
-        let mut list = div().flex().flex_col().gap_1();
+        let restart = self.workspace.clone();
+        let mut list = div().flex().flex_col().gap_1().child(
+            Button::new("restart-acp", t("Restart ACP agents"))
+                .size(ControlSize::Sm)
+                .on_click(move |_, _, cx| restart.update(cx, |ws, cx| ws.restart_acp_agents(cx))),
+        );
         let none_on = active.is_none();
         let pick_none = self.workspace.clone();
         list = list.child(
@@ -185,9 +190,9 @@ impl RootView {
                 .when(none_on, |el| el.border_color(colors.accent))
                 .on_click(move |_, _, cx| {
                     pick_none.update(cx, |ws, cx| {
+                        let previous = ws.session_env();
                         ws.settings.environment = None;
-                        ws.settings.save();
-                        cx.notify();
+                        ws.save_environment(previous, cx);
                     })
                 })
                 .child(
@@ -221,9 +226,9 @@ impl RootView {
                     .on_click(move |_, _, cx| {
                         let name = name.clone();
                         pick.update(cx, |ws, cx| {
+                            let previous = ws.session_env();
                             ws.settings.environment = Some(name);
-                            ws.settings.save();
-                            cx.notify();
+                            ws.save_environment(previous, cx);
                         })
                     })
                     .child(
@@ -262,6 +267,7 @@ impl RootView {
                         .on_click(move |_, _, cx| {
                             cx.stop_propagation();
                             remove.update(cx, |ws, cx| {
+                                let previous = ws.session_env();
                                 if ix < ws.settings.environments.len() {
                                     let gone = ws.settings.environments.remove(ix);
                                     if ws.settings.environment.as_deref()
@@ -270,8 +276,7 @@ impl RootView {
                                         ws.settings.environment = None;
                                     }
                                 }
-                                ws.settings.save();
-                                cx.notify();
+                                ws.save_environment(previous, cx);
                             })
                         }),
                     ),
@@ -301,14 +306,14 @@ impl RootView {
                                     return;
                                 }
                                 ws.update(cx, |ws, cx| {
+                                    let previous = ws.session_env();
                                     ws.settings.environments.retain(|e| e.name != n);
                                     ws.settings.environments.push(SavedEnvironment {
                                         name: n.clone(),
                                         vars: v,
                                     });
                                     ws.settings.environment = Some(n);
-                                    ws.settings.save();
-                                    cx.notify();
+                                    ws.save_environment(previous, cx);
                                 });
                                 name.update(cx, |i, cx| i.set_text("", cx));
                                 vars.update(cx, |i, cx| i.set_text("", cx));

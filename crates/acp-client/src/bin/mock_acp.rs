@@ -229,7 +229,8 @@ fn handle(method: &str, id: Value, params: &Value, out: &Out, state: &Arc<State>
                 ),
             };
             let mut result = json!({"protocolVersion": 1, "agentCapabilities": caps, "authMethods": [],
-                "agentInfo": {"name": format!("mock-{name}"), "title": title, "version": "0.0.0"}});
+                "agentInfo": {"name": format!("mock-{name}"), "title": title,
+                    "version": std::env::var("ATRIUM_MOCK_ACP_VERSION").unwrap_or_else(|_| "0.0.0".into())}});
             if name == "claude" {
                 result["_meta"] = json!({"steering": {"supported": true}});
             }

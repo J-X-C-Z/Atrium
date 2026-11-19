@@ -20,6 +20,23 @@ async fn start(name: &str) -> (AcpClient, UnboundedReceiver<Incoming>) {
     .expect("mock-acp starts")
 }
 
+#[test]
+fn spawned_agent_gets_its_named_environment() {
+    block_on(async {
+        for version in ["1.2.3", "3.2.1"] {
+            let (client, _events) = AcpClient::start(AcpConfig {
+                backend: "claude".into(),
+                program: PathBuf::from(env!("CARGO_BIN_EXE_mock-acp")),
+                args: Vec::new(),
+                env: vec![("ATRIUM_MOCK_ACP_VERSION".into(), version.into())],
+            })
+            .await
+            .unwrap();
+            assert_eq!(client.info.version, version);
+        }
+    });
+}
+
 /// Sends `text` and folds everything until the turn ends into `transcript`,
 /// answering permission prompts with `decision`.
 async fn turn(
