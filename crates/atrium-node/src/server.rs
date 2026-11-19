@@ -32,10 +32,11 @@ impl State {
     pub async fn new(config: Arc<Config>, path: String) -> Result<Arc<Self>> {
         let roots = Arc::new(Roots::new(config.roots.clone())?);
         let s = Arc::new(Self {
-            procs: ProcessManager::new(
+            procs: ProcessManager::with_total_output_bytes(
                 config.keep_output_lines,
                 config.keep_output_bytes,
                 config.detached_timeout_secs,
+                config.total_output_bytes,
             ),
             config,
             path,
@@ -331,7 +332,13 @@ async fn socket_loop(mut socket: WebSocket, p: Arc<Process>, mut after: i64) {
             if failed || snap.ended {
                 break;
             }
-            replay = false;
+            replay = snap.more;
+            if replay {
+                // Backlog may belong to an already exited producer: no future
+                // changed notification is required to drain the next page.
+                tokio::task::yield_now().await;
+                continue;
+            }
         }
         tokio::select! {r=changed.changed()=>{if r.is_err(){break}replay=true;},_=ping.tick()=>{if missed>=2{break}missed+=1;if !send_message(&mut socket,Message::Ping(Bytes::new())).await{break}},msg=socket.recv()=>{match msg{Some(Ok(Message::Text(text)))=>{if let Ok(v)=serde_json::from_str::<Value>(&text)&& let Some(line)=v["line"].as_str()&& p.try_input_for(generation,line.into()).await.is_err(){break}},Some(Ok(Message::Pong(_)))=>missed=0,Some(Ok(Message::Ping(p)))=>{if !send_message(&mut socket,Message::Pong(p)).await{break}},Some(Ok(Message::Close(_)))|None|Some(Err(_))=>break,_=>{}}}}
     }

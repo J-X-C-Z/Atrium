@@ -162,7 +162,7 @@ Node → client:
 | --- | --- |
 | `{"seq": 17, "line": "<one line of stdout, without the newline>"}` | Output. `seq` counts lines from 1 and never repeats for this process. |
 | `{"seq": 18, "stderr": "<one line of stderr>"}` | Diagnostics; shares the counter. |
-| `{"gap": {"from": 1, "to": 4120}}` | Lines in that range were dropped (older than `keep_output_lines`); sent first, before the replay, when the client asked for lines no longer kept. |
+| `{"gap": {"from": 1, "to": 4120}}` | Lines in that range were dropped (evicted by `keep_output_lines`, per-process `keep_output_bytes`, or node-wide `total_output_bytes`); sent first, before the replay, when the client asked for lines no longer kept. |
 | `{"seq": 4500, "exit": {"code": 0, "signal": null}}` | The process ended; the node closes the socket after it. |
 
 Client → node:
@@ -228,3 +228,26 @@ protocol = "acp"
 ```
 
 The same tests run against `mock-node` in CI, so the two must agree.
+
+### Native node output retention budget
+
+`keep_output_bytes` retains its legacy per-process effective ceiling (at least
+64 MiB + 1,024 bytes to fit maximum-sized frames). The optional
+`total_output_bytes` config adds a node-wide ceiling, default 128 MiB, shared by
+all running and retained exited processes. It must fit one 64 MiB payload plus
+128 bytes of accounted frame overhead. Each retained stdout/stderr frame counts
+its UTF-8 payload bytes plus 128 bytes; this is an accounting bound, not an RSS
+hard limit. Partial reader buffers, replay copies, JSON serialization, stdin and
+network buffers are not covered by this retention budget.
+
+When full, the largest retained-output consumer loses its oldest frame first;
+equal consumers use stable process registration order to break ties. Per-process
+line and byte ceilings still apply. Eviction removes a contiguous sequence
+prefix, does not reset sequence numbers, and replays report the existing `gap`
+frame. A request for only new output (`after=-1`) does not replay a gap.
+
+One fixed-shape terminal frame per process is retained separately from stdout/
+stderr bytes, so budget pressure cannot hide process completion (including an
+ended process attached with `after=-1`). Removing the final process handle
+releases its retained-output allocation; ending a process alone retains its
+history until the existing retention cleanup. Output is not persisted to disk.

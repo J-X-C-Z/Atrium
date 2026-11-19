@@ -1,5 +1,8 @@
 //! Per-user service integration. No registration happens on `serve` or at
 //! build/test time: only an explicit install/uninstall CLI action changes it.
+#[cfg(all(unix, any(target_os = "macos", test)))]
+#[path = "service_launchd.rs"]
+mod launchd;
 use anyhow::{Context, Result, bail};
 use std::{
     path::{Path, PathBuf},
@@ -26,11 +29,13 @@ fn path_text(p: &Path) -> Result<&str> {
 }
 #[cfg(any(target_os = "macos", test))]
 pub fn render_launchd(exe: &Path, config: &Path, log: &Path) -> Result<String> {
+    let marker = "<!-- atrium-node managed service v1 -->";
     let e = xml(path_text(exe)?);
     let c = xml(path_text(config)?);
     let l = xml(path_text(log)?);
     Ok(format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
+{marker}
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>Label</key><string>{LABEL}</string>
@@ -110,6 +115,7 @@ fn invoke(program: &str, args: &[&str]) -> Result<()> {
     }
     Ok(())
 }
+#[cfg(any(target_os = "linux", windows, test))]
 fn save(path: &Path, content: &str) -> Result<()> {
     use std::io::Write;
     let parent = path.parent().context("service path has no parent")?;
@@ -198,18 +204,18 @@ pub fn run(action: &str, config_path: &Path) -> Result<()> {
                     .context("home unavailable")?
                     .join("Library/Logs/atrium-node.log");
                 std::fs::create_dir_all(log.parent().unwrap())?;
-                save(&target, &render_launchd(&exe, &config, &log)?)?;
-                // Do not silently unload another running service. bootstrap
-                // reports an already-loaded service for explicit user handling.
-                invoke("launchctl", &["bootstrap", &domain, t])?;
+                launchd::install(
+                    &mut launchd::Launchctl,
+                    &domain,
+                    &label,
+                    &target,
+                    &render_launchd(&exe, &config, &log)?,
+                )?;
             }
             "uninstall" => {
-                invoke("launchctl", &["bootout", &label])?;
-                if target.exists() {
-                    std::fs::remove_file(&target)?;
-                }
+                launchd::uninstall(&mut launchd::Launchctl, &domain, &label, &target)?;
             }
-            "status" => invoke("launchctl", &["print", &label])?,
+            "status" => invoke("/bin/launchctl", &["print", &label])?,
             _ => unreachable!(),
         }
     }

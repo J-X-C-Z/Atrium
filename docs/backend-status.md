@@ -4,6 +4,9 @@ Based on repository commit `c7e121ff67c4f4d690af4d42873b5631cf77f642`.
 
 ## Node
 
+For an isolated first run, use [the macOS quickstart](node-macos-quickstart.md).
+It creates an explicit root and matching client token; no real account or service installation is required.
+
 `cargo run -p atrium-node -- serve --config /absolute/path/config.toml`
 
 The node is a Rust/Tokio/Axum executable, not a wrapper around Python. It implements
@@ -18,7 +21,9 @@ use of ambient loopback access.
 An absent configuration uses **no roots**, so metadata can be queried but file and
 process APIs cannot access the home directory. Configure explicit roots first.
 `keep_output_bytes` defaults to 128 MiB per process in addition to
-`keep_output_lines`. At most 128 tracked process records are admitted. Stdin has
+`keep_output_lines`. The new `total_output_bytes` defaults to 128 MiB across
+all retained process output; it bounds accounted payload, not total RSS.
+At most 128 tracked process records are admitted. Stdin has
 an independent bounded queue; slow attachments are detached rather than blocking
 child output. Long lines are supported up to 64 MiB before JSON encoding.
 
@@ -208,3 +213,9 @@ operations, scheduler/fault tests, native remote-client mock turns, workspace/li
 regression, and a reproducible release microbenchmark. Publication/review evidence
 will be recorded separately. Real provider-account, GUI and second-device tailnet
 acceptance are still not claimed.
+
+## Follow-up resource bounds
+
+See [node-resource-bounds.md](node-resource-bounds.md) for the shared output
+budget, paged replay, isolated tests and explicit whole-process memory limits.
+Service failure recovery is described in [launchd-recovery.md](launchd-recovery.md).

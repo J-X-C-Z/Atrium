@@ -1,0 +1,68 @@
+{
+  "platform": "Linux-6.18.57-x86_64-with-glibc2.41",
+  "binary": "/workspace/scratch/62ca90913a5d/atrium-launchd-review/target/debug/atrium-node",
+  "binary_sha256": "000245762b3728d496040fa30d91eb5351ba0f7c94efc0998a4507444cc1f739",
+  "build_profile": "debug (path target/debug); not release performance",
+  "duration_seconds": 120.02799266400143,
+  "clients": 8,
+  "payload_bytes_min": 1024,
+  "offered_rate_ceiling_per_second": 800,
+  "echoes_verified": 94732,
+  "throughput_per_second": 789.249223430626,
+  "latency_ms": {
+    "p50": 0.3695779996633064,
+    "p95": 0.7491240012313938,
+    "max": 53.56419500094489
+  },
+  "reconnect_replays_verified": 376,
+  "node_only_resources": {
+    "baseline": {
+      "t": 10520.698298568,
+      "rss_kib": 5560,
+      "hwm_kib": 5560,
+      "cpu_seconds": 0.01,
+      "fds": 11
+    },
+    "after_load": {
+      "t": 10640.750706493,
+      "rss_kib": 12492,
+      "hwm_kib": 12852,
+      "cpu_seconds": 16.04,
+      "fds": 43
+    },
+    "after_stop": {
+      "t": 10641.5813795,
+      "rss_kib": 12492,
+      "hwm_kib": 12852,
+      "cpu_seconds": 16.05,
+      "fds": 11
+    },
+    "after_retention": {
+      "t": 10646.884375545,
+      "rss_kib": 12492,
+      "hwm_kib": 12852,
+      "cpu_seconds": 16.08,
+      "fds": 12
+    },
+    "peak_rss_kib": 12876,
+    "kernel_peak_rss_kib": 12852,
+    "peak_cpu_percent_one_core_200ms_sample": 43.16023043716769,
+    "average_cpu_percent_one_core_load": 13.355217932264631
+  },
+  "checks": {
+    "ordered_echo": true,
+    "reconnect_replay": true,
+    "retention_empty": true,
+    "owned_children_gone": true,
+    "fd_return_near_baseline": true
+  },
+  "limits": [
+    "Linux cloud only; no macOS/Windows runtime claim",
+    "Bounded rate echo soak, not saturation or real LLM latency",
+    "RSS/CPU count node only; excludes client and mock processes",
+    "No slow-reader, 64MiB frame, or crash/restart coverage in this script",
+    "Allocator RSS need not return to baseline; FD/child/row release checked"
+  ],
+  "label": "exploratory existing-binary soak; not a controlled baseline",
+  "source_note": "Existing debug executable before global-output-budget rebuild. Tracked source was concurrently being edited; binary SHA is the authoritative measured artifact. No source diff was captured at binary build time."
+}

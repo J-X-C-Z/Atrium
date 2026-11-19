@@ -192,3 +192,71 @@ fn authenticated_native_node_replays_and_confines_files() {
         Err(ureq::Error::Status(400, _)) | Err(ureq::Error::Status(404, _))
     ));
 }
+
+#[test]
+fn concurrent_finished_process_replays_drain_all_pages_before_exit() {
+    let node = Node::start();
+    let mut ids = Vec::new();
+    for process_index in 0..2 {
+        let proc: Value = node
+            .req("POST", "/v1/procs")
+            .send_json(json!({"agent":"echo","cwd":node.root,"owner":"paged-replay-test"}))
+            .unwrap()
+            .into_json()
+            .unwrap();
+        let id = proc["id"].as_str().unwrap().to_owned();
+        let mut socket = node.ws(&id, 0);
+        // A 500 KiB backlog is more than one 256 KiB replay page, without
+        // requiring giant allocations just to exercise the production limit.
+        for line_index in 0..5 {
+            let line = format!("{process_index}:{line_index}:{}", "x".repeat(100 * 1024));
+            socket
+                .send(Message::Text(json!({"line":line}).to_string()))
+                .unwrap();
+            let reply = frame(&mut socket);
+            assert_eq!(reply["seq"], line_index + 1);
+            assert_eq!(reply["line"], line);
+        }
+        drop(socket);
+        node.req("DELETE", &format!("/v1/procs/{id}"))
+            .call()
+            .unwrap();
+        ids.push(id);
+    }
+    let sockets: Vec<_> = ids.iter().map(|id| node.ws(id, 0)).collect();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(sockets.len()));
+    let workers: Vec<_> = sockets
+        .into_iter()
+        .enumerate()
+        .map(|(process_index, mut socket)| {
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                for seq in 1..=5 {
+                    let reply = frame(&mut socket);
+                    assert_eq!(reply["seq"], seq, "pagination skipped/duplicated a frame");
+                    assert!(
+                        reply.get("exit").is_none(),
+                        "exit arrived before the backlog drained"
+                    );
+                    let line = reply["line"].as_str().unwrap();
+                    assert!(line.starts_with(&format!("{process_index}:{}:", seq - 1)));
+                    assert_eq!(line.len(), 100 * 1024 + 4);
+                }
+                let exit = frame(&mut socket);
+                assert_eq!(exit["seq"], 6);
+                assert_eq!(exit["exit"]["code"], 0);
+            })
+        })
+        .collect();
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    for id in ids {
+        let mut socket = node.ws(&id, -1);
+        let exit = frame(&mut socket);
+        assert_eq!(exit["seq"], 6);
+        assert!(exit.get("line").is_none());
+        assert_eq!(exit["exit"]["code"], 0);
+    }
+}

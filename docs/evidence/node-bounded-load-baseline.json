@@ -1,0 +1,83 @@
+{
+  "platform": "Linux-6.18.57-x86_64-with-glibc2.41",
+  "binary": "/workspace/scratch/62ca90913a5d/atrium-load-artifacts/atrium-node-baseline",
+  "binary_sha256": "e47a3771d4bbc809234f411a06f2af8b491b5cd7ff149629ec153a89ec4492dc",
+  "label": "clean-faac71a-baseline",
+  "source_commit": "faac71a5d19815aa09c91d9e48b04717153c5b87",
+  "node_tracked_diff_sha256": null,
+  "build_provenance": {
+    "source_commit": "faac71a5d19815aa09c91d9e48b04717153c5b87",
+    "source_method": "unmodified git archive of exact commit into isolated directory",
+    "source_archive_sha256": "d20dce0911b7549e0a60b92bdc1920635f8561687f37a8e0ae6afac0a0e92c31",
+    "cargo_lock_sha256": "75f196b5500b2ea884da7e9bc8249332bab210282762b18f086331fac086dc0e",
+    "rustc": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
+    "build_command": "cargo build --locked --offline -p atrium-node",
+    "build_profile": "debug",
+    "target_dir": "isolated atrium-load-baseline-target",
+    "binary_sha256": "e47a3771d4bbc809234f411a06f2af8b491b5cd7ff149629ec153a89ec4492dc",
+    "node_tracked_diff_sha256": null,
+    "created_utc": "2026-11-19T05:08:55.995703+00:00"
+  },
+  "build_profile": "debug; not release performance",
+  "duration_seconds": 120.02843125099935,
+  "clients": 8,
+  "payload_bytes_min": 1024,
+  "offered_rate_ceiling_per_second": 800,
+  "echoes_verified": 94383,
+  "throughput_per_second": 786.3386950599188,
+  "latency_ms": {
+    "p50": 0.3666729990072781,
+    "p95": 0.8968199999799253,
+    "max": 68.93479600148567
+  },
+  "reconnect_replays_verified": 376,
+  "node_only_resources": {
+    "baseline": {
+      "t": 10813.826221067,
+      "rss_kib": 5644,
+      "hwm_kib": 5644,
+      "cpu_seconds": 0.0,
+      "fds": 14
+    },
+    "after_load": {
+      "t": 10933.874378687,
+      "rss_kib": 11292,
+      "hwm_kib": 12144,
+      "cpu_seconds": 16.5,
+      "fds": 43
+    },
+    "after_stop": {
+      "t": 10934.711592189,
+      "rss_kib": 11292,
+      "hwm_kib": 12144,
+      "cpu_seconds": 16.51,
+      "fds": 11
+    },
+    "after_retention": {
+      "t": 10940.010017505,
+      "rss_kib": 11292,
+      "hwm_kib": 12144,
+      "cpu_seconds": 16.53,
+      "fds": 11
+    },
+    "peak_rss_kib": 12324,
+    "kernel_peak_rss_kib": 12144,
+    "peak_cpu_percent_one_core_200ms_sample": 43.24028680212841,
+    "average_cpu_percent_one_core_load": 13.746743024155473
+  },
+  "checks": {
+    "ordered_echo": true,
+    "reconnect_replay": true,
+    "retention_empty": true,
+    "owned_children_gone": true,
+    "fd_return_near_baseline": true
+  },
+  "limits": [
+    "Linux cloud only; no macOS/Windows runtime claim",
+    "Bounded rate echo soak, not saturation or real LLM latency",
+    "RSS/CPU count node only; excludes client and mock processes",
+    "No slow-reader, 64MiB frame, or crash/restart coverage in this script",
+    "Allocator RSS need not return to baseline; FD/child/row release checked"
+  ],
+  "harness_sha256": "64194449dffca17d30915a926310f20e699148b09e8a11e22cb550b0e9b5af51"
+}

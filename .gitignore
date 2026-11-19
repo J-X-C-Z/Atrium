@@ -5,3 +5,7 @@
 # Isolated backend and scheduler verification builds
 /target-node
 /target-scheduler
+
+# Python-only isolated test helpers
+__pycache__/
+*.pyc

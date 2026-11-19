@@ -5,7 +5,7 @@ use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Mutex as StdMutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -22,6 +22,7 @@ use tokio::{
 mod windows_process;
 
 pub const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
+const REPLAY_PAGE_BYTES: usize = 256 * 1024;
 const INPUT_BUDGET: usize = 128 * 1024 * 1024;
 fn now() -> u64 {
     SystemTime::now()
@@ -30,61 +31,161 @@ fn now() -> u64 {
         .as_secs()
 }
 
-struct Ring {
-    frames: VecDeque<(i64, Value, usize)>,
+// Only retained output is budgeted here. Reader buffers, replay copies and
+// transport allocations are transient and are not an RSS hard limit.
+#[derive(Default)]
+struct OutputStore {
+    rings: HashMap<usize, RingData>,
+    next_id: usize,
+    bytes: usize,
+    max_bytes: usize,
+}
+struct RingData {
+    frames: VecDeque<(i64, Arc<Value>, usize)>,
     next: i64,
     bytes: usize,
     max_lines: usize,
     max_bytes: usize,
+    // Fixed-size terminal metadata must survive output eviction, including -1.
+    terminal: Option<(i64, Arc<Value>)>,
+}
+impl RingData {
+    fn evict(&mut self) -> usize {
+        let size = self.frames.pop_front().map_or(0, |f| f.2);
+        self.bytes -= size;
+        size
+    }
+}
+struct Ring {
+    id: usize,
+    store: Arc<StdMutex<OutputStore>>,
 }
 impl Ring {
+    #[cfg(test)]
     fn new(lines: usize, bytes: usize) -> Self {
-        Self {
-            frames: VecDeque::new(),
-            next: 1,
-            bytes: 0,
-            max_lines: lines.max(1),
-            max_bytes: bytes.max(MAX_LINE_BYTES + 1024),
-        }
+        Self::with_limits(
+            lines,
+            bytes,
+            Arc::new(StdMutex::new(OutputStore {
+                max_bytes: bytes,
+                ..OutputStore::default()
+            })),
+        )
+    }
+    fn shared(lines: usize, bytes: usize, store: Arc<StdMutex<OutputStore>>) -> Self {
+        // Preserve the legacy effective per-process minimum for max-size frames.
+        Self::with_limits(lines, bytes.max(MAX_LINE_BYTES + 1024), store)
+    }
+    fn with_limits(lines: usize, bytes: usize, store: Arc<StdMutex<OutputStore>>) -> Self {
+        let mut output = store.lock().unwrap();
+        let id = output.next_id;
+        output.next_id += 1;
+        output.rings.insert(
+            id,
+            RingData {
+                frames: VecDeque::new(),
+                next: 1,
+                bytes: 0,
+                max_lines: lines.max(1),
+                max_bytes: bytes,
+                terminal: None,
+            },
+        );
+        drop(output);
+        Self { id, store }
     }
     fn push(&mut self, mut value: Value) {
-        let seq = self.next;
-        self.next += 1;
+        // Callers may hold process state; this lock never acquires process state.
+        let mut output = self.store.lock().unwrap();
+        let ring = output.rings.get_mut(&self.id).unwrap();
+        let seq = ring.next;
+        ring.next += 1;
         value["seq"] = json!(seq);
-        // Account retained payload bytes, not transient JSON escaping allocations.
+        if value.get("exit").is_some() {
+            ring.terminal = Some((seq, Arc::new(value)));
+            return;
+        }
         let size = value
             .get("line")
             .or_else(|| value.get("stderr"))
             .and_then(Value::as_str)
             .map_or(128, |s| s.len() + 128);
-        self.bytes += size;
-        self.frames.push_back((seq, value, size));
-        while self.frames.len() > self.max_lines
-            || (self.bytes > self.max_bytes && self.frames.len() > 1)
-        {
-            if let Some((_, _, size)) = self.frames.pop_front() {
-                self.bytes -= size;
-            }
+        ring.bytes += size;
+        ring.frames.push_back((seq, Arc::new(value), size));
+        let mut removed = 0;
+        while ring.frames.len() > ring.max_lines || ring.bytes > ring.max_bytes {
+            removed += ring.evict();
+        }
+        output.bytes += size;
+        output.bytes -= removed;
+        while output.bytes > output.max_bytes {
+            // Reclaim the largest consumer first, oldest frame first. Stable ID
+            // breaks ties deterministically. A noisy producer cannot reserve the
+            // whole budget forever while other processes have no history.
+            let victim = *output
+                .rings
+                .iter()
+                .filter(|(_, r)| r.bytes > 0)
+                .max_by_key(|(id, r)| (r.bytes, std::cmp::Reverse(**id)))
+                .unwrap()
+                .0;
+            let released = output.rings.get_mut(&victim).unwrap().evict();
+            output.bytes -= released;
         }
     }
     fn snapshot(&self, after: i64, ended: bool) -> Snapshot {
-        let latest = self.next - 1;
-        let first = self.frames.front().map(|f| f.0).unwrap_or(self.next);
+        let output = self.store.lock().unwrap();
+        let ring = &output.rings[&self.id];
+        let latest = ring.next - 1;
+        let first = ring
+            .frames
+            .front()
+            .map(|f| f.0)
+            .or_else(|| ring.terminal.as_ref().map(|f| f.0))
+            .unwrap_or(ring.next);
         let skip_backlog = after == -1;
         let after = if skip_backlog { latest } else { after.max(0) };
         let gap = (after < first - 1).then(|| json!({"gap":{"from":after + 1,"to":first - 1}}));
+        let mut frames = Vec::new();
+        let mut bytes = 0usize;
+        let mut more = false;
+        for (_, frame, size) in ring.frames.iter().filter(|f| f.0 > after) {
+            // Always permit one legal large frame, otherwise a 64 MiB frame
+            // could never make progress through the smaller replay page.
+            if !frames.is_empty() && bytes.saturating_add(*size) > REPLAY_PAGE_BYTES {
+                more = true;
+                break;
+            }
+            bytes = bytes.saturating_add(*size);
+            frames.push(frame.clone());
+        }
+        if !more
+            && let Some((seq, terminal)) = &ring.terminal
+            && (*seq > after || (skip_backlog && ended))
+        {
+            if !frames.is_empty() && bytes.saturating_add(128) > REPLAY_PAGE_BYTES {
+                more = true;
+            } else {
+                frames.push(terminal.clone());
+            }
+        }
+        // Capture cheap references while locked, then clone potentially large
+        // protocol payloads outside the shared store lock.
+        drop(output);
         Snapshot {
             gap,
-            frames: self
-                .frames
-                .iter()
-                .filter(|(seq, value, _)| {
-                    *seq > after || (skip_backlog && ended && value.get("exit").is_some())
-                })
-                .map(|(_, v, _)| v.clone())
-                .collect(),
+            frames: frames.into_iter().map(|frame| (*frame).clone()).collect(),
             latest,
-            ended,
+            ended: ended && !more,
+            more,
+        }
+    }
+}
+impl Drop for Ring {
+    fn drop(&mut self) {
+        let mut output = self.store.lock().unwrap();
+        if let Some(ring) = output.rings.remove(&self.id) {
+            output.bytes -= ring.bytes;
         }
     }
 }
@@ -93,7 +194,10 @@ pub struct Snapshot {
     pub gap: Option<Value>,
     pub frames: Vec<Value>,
     pub latest: i64,
+    /// True only after this page includes the final retained backlog/exit.
     pub ended: bool,
+    /// Another page must be fetched immediately, without waiting for new output.
+    pub more: bool,
 }
 struct State {
     ring: Ring,
@@ -227,14 +331,28 @@ pub struct ProcessManager {
     registry: Mutex<Registry>,
     keep_lines: usize,
     keep_bytes: usize,
+    output: Arc<StdMutex<OutputStore>>,
     timeout: Duration,
 }
 impl ProcessManager {
+    #[cfg(test)]
     pub fn new(keep_lines: usize, keep_bytes: usize, timeout_secs: u64) -> Self {
+        Self::with_total_output_bytes(keep_lines, keep_bytes, timeout_secs, keep_bytes)
+    }
+    pub fn with_total_output_bytes(
+        keep_lines: usize,
+        keep_bytes: usize,
+        timeout_secs: u64,
+        total_bytes: usize,
+    ) -> Self {
         Self {
             registry: Mutex::new(Registry::default()),
             keep_lines,
             keep_bytes,
+            output: Arc::new(StdMutex::new(OutputStore {
+                max_bytes: total_bytes,
+                ..OutputStore::default()
+            })),
             timeout: Duration::from_secs(timeout_secs.max(1)),
         }
     }
@@ -289,7 +407,7 @@ impl ProcessManager {
             pid,
             started_at: now(),
             state: Mutex::new(State {
-                ring: Ring::new(self.keep_lines, self.keep_bytes),
+                ring: Ring::shared(self.keep_lines, self.keep_bytes, self.output.clone()),
                 exit: None,
                 generation: 0,
                 attached: false,
@@ -710,6 +828,68 @@ mod tests {
     }
 
     #[test]
+    fn replay_pages_preserve_sequence_and_exit_without_new_output() {
+        let mut r = Ring::new(10, 2 * 1024 * 1024);
+        for _ in 0..5 {
+            r.push(json!({"line":"x".repeat(100 * 1024)}));
+        }
+        r.push(json!({"exit":{"code":0}}));
+        let mut after = 0;
+        let mut seqs = Vec::new();
+        let mut pages = 0;
+        loop {
+            let page = r.snapshot(after, true);
+            pages += 1;
+            assert_eq!(page.latest, 6); // Never use high-water as pagination cursor.
+            assert_eq!(page.ended, !page.more);
+            for frame in &page.frames {
+                after = frame["seq"].as_i64().unwrap();
+                seqs.push(after);
+            }
+            if !page.more {
+                assert!(page.frames.last().unwrap().get("exit").is_some());
+                break;
+            }
+            assert!(pages < 10);
+        }
+        assert_eq!(pages, 3);
+        assert_eq!(seqs, vec![1, 2, 3, 4, 5, 6]);
+        let tail = r.snapshot(-1, true);
+        assert!(tail.ended && !tail.more && tail.gap.is_none());
+        assert_eq!(tail.frames.len(), 1);
+        assert_eq!(tail.frames[0]["seq"], 6);
+    }
+
+    #[test]
+    fn replay_page_handles_eviction_between_pages_and_a_large_first_frame() {
+        let mut r = Ring::new(3, 2 * 1024 * 1024);
+        for _ in 0..4 {
+            r.push(json!({"line":"x".repeat(300 * 1024)}));
+        }
+        let page = r.snapshot(0, false);
+        assert_eq!(page.gap, Some(json!({"gap":{"from":1,"to":1}})));
+        assert!(page.more && !page.ended);
+        assert_eq!(page.frames.len(), 1); // first frame may exceed the page budget
+        assert_eq!(page.frames[0]["seq"], 2);
+        r.push(json!({"line":"a"}));
+        r.push(json!({"line":"b"})); // sequence 3 is evicted between snapshots
+        let next = r.snapshot(2, false);
+        assert_eq!(next.gap, Some(json!({"gap":{"from":3,"to":3}})));
+        assert_eq!(next.frames[0]["seq"], 4);
+        assert!(next.more);
+        let tail = r.snapshot(4, false);
+        assert_eq!(
+            tail.frames
+                .iter()
+                .map(|v| v["seq"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![5, 6]
+        );
+        assert!(!tail.more);
+        assert!(r.snapshot(-1, false).frames.is_empty());
+    }
+
+    #[test]
     fn ring_reports_gap_and_order() {
         let mut r = Ring::new(2, 128 * 1024 * 1024);
         for i in 0..4 {
@@ -923,18 +1103,82 @@ mod tests {
 
     #[test]
     fn byte_budget_evicts_without_losing_sequence() {
-        let mut r = Ring::new(100, 128 * 1024 * 1024);
-        // A smaller test-only budget avoids large allocations.
-        r.max_bytes = 270;
+        let mut r = Ring::new(100, 270);
         r.push(json!({"line":"first"}));
         r.push(json!({"line":"second"}));
         r.push(json!({"line":"third"}));
-        assert!(r.bytes <= 270);
+        assert!(r.store.lock().unwrap().bytes <= 270);
         assert_eq!(
             r.snapshot(0, false).gap,
             Some(json!({"gap":{"from":1,"to":1}}))
         );
         assert_eq!(r.snapshot(0, false).frames.len(), 2);
+    }
+    #[test]
+    fn legacy_minimum_retains_max_frame_accounting() {
+        let store = Arc::new(StdMutex::new(OutputStore {
+            max_bytes: MAX_LINE_BYTES + 128,
+            ..OutputStore::default()
+        }));
+        let ring = Ring::shared(10, MAX_LINE_BYTES, store.clone());
+        assert_eq!(
+            store.lock().unwrap().rings[&ring.id].max_bytes,
+            MAX_LINE_BYTES + 1024
+        );
+    }
+    #[test]
+    fn global_output_budget_reclaims_largest_consumer_and_releases_on_drop() {
+        let store = Arc::new(StdMutex::new(OutputStore {
+            max_bytes: 390,
+            ..OutputStore::default()
+        }));
+        let mut noisy = Ring::with_limits(100, 1000, store.clone());
+        let mut quiet = Ring::with_limits(100, 1000, store.clone());
+        noisy.push(json!({"line":"a"}));
+        noisy.push(json!({"line":"b"}));
+        quiet.push(json!({"line":"q"}));
+        for _ in 0..20 {
+            noisy.push(json!({"line":"n"}));
+            assert!(store.lock().unwrap().bytes <= 390);
+        }
+        assert_eq!(quiet.snapshot(0, false).frames[0]["line"], "q");
+        let snapshot = noisy.snapshot(0, false);
+        assert_eq!(snapshot.gap, Some(json!({"gap":{"from":1,"to":20}})));
+        assert_eq!(snapshot.frames.len(), 2);
+        drop(noisy);
+        assert_eq!(store.lock().unwrap().bytes, 129);
+        drop(quiet);
+        assert_eq!(store.lock().unwrap().bytes, 0);
+        assert!(store.lock().unwrap().rings.is_empty());
+    }
+    #[test]
+    fn global_budget_and_per_process_budget_preserve_terminal_and_gap() {
+        let store = Arc::new(StdMutex::new(OutputStore {
+            max_bytes: 130,
+            ..OutputStore::default()
+        }));
+        let mut a = Ring::with_limits(10, 130, store.clone());
+        let mut b = Ring::with_limits(10, 1000, store.clone());
+        a.push(json!({"line":"a"}));
+        a.push(json!({"exit":{"code":0,"signal":null}}));
+        b.push(json!({"line":"b"}));
+        let ended = a.snapshot(0, true);
+        assert_eq!(ended.gap, Some(json!({"gap":{"from":1,"to":1}})));
+        assert_eq!(ended.frames.len(), 1);
+        assert_eq!(ended.frames[0]["seq"], 2);
+        assert!(a.snapshot(-1, true).frames[0].get("exit").is_some());
+        // A frame larger than either limit is dropped, never retained above it.
+        b.push(json!({"line":"long"}));
+        assert!(b.snapshot(0, false).frames.is_empty());
+        assert_eq!(
+            b.snapshot(0, false).gap,
+            Some(json!({"gap":{"from":1,"to":2}}))
+        );
+        assert_eq!(store.lock().unwrap().bytes, 0);
+        let mut c = Ring::with_limits(10, 128, store.clone());
+        c.push(json!({"line":"c"}));
+        assert_eq!(store.lock().unwrap().bytes, 0);
+        assert_eq!(c.snapshot(0, false).latest, 1);
     }
     #[test]
     fn dropping_input_releases_byte_budget() {

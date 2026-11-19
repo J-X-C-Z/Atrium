@@ -24,6 +24,7 @@ pub struct Config {
     pub token: String,
     pub keep_output_lines: usize,
     pub keep_output_bytes: usize,
+    pub total_output_bytes: usize,
     pub detached_timeout_secs: u64,
     pub agents: BTreeMap<String, Agent>,
     #[serde(skip)]
@@ -42,6 +43,7 @@ impl Default for Config {
             token: String::new(),
             keep_output_lines: 20_000,
             keep_output_bytes: 128 * 1024 * 1024,
+            total_output_bytes: 128 * 1024 * 1024,
             detached_timeout_secs: 86400,
             agents: BTreeMap::new(),
             auto_claude: true,
@@ -66,6 +68,9 @@ impl Config {
         };
         if c.keep_output_lines == 0 || c.keep_output_bytes < 64 * 1024 * 1024 {
             bail!("output limits must retain at least one 64 MiB frame");
+        }
+        if c.total_output_bytes < 64 * 1024 * 1024 + 128 {
+            bail!("total output budget must retain at least one 64 MiB frame with metadata");
         }
         if c.detached_timeout_secs == 0 {
             bail!("detached timeout must be positive");
@@ -215,6 +220,11 @@ mod tests {
         assert!(c.roots.is_empty());
         assert_eq!(c.port, 7381);
         assert!(c.keep_output_bytes >= 64 * 1024 * 1024);
+        assert_eq!(c.total_output_bytes, 128 * 1024 * 1024);
+        // Existing configurations omit the new field and keep their old cap.
+        let legacy: Config = toml::from_str("keep_output_bytes=268435456").unwrap();
+        assert_eq!(legacy.keep_output_bytes, 256 * 1024 * 1024);
+        assert_eq!(legacy.total_output_bytes, 128 * 1024 * 1024);
     }
     #[test]
     fn unknown_security_keys_are_not_silently_ignored() {
