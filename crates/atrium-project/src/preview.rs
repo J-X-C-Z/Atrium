@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     ffi::{OsStr, OsString},
     fs,
-    io::{self, Read},
+    io::{self, Read, Seek, SeekFrom},
     net::{Ipv4Addr, SocketAddr, TcpStream},
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
@@ -15,8 +15,8 @@ use std::{
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Launch {
-    pub name: String,
+struct Launch {
+    name: String,
     command: String,
     port: u16,
     #[serde(default = "slash")]
@@ -29,8 +29,20 @@ fn slash() -> String {
     "/".into()
 }
 
-pub fn launches(root: &Path) -> Result<Vec<Launch>> {
-    let file = fs::File::open(root.join(DIR).join("launch.json"))?;
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviewCommands {
+    root: PathBuf,
+    entries: Vec<Launch>,
+}
+
+pub fn launches(root: &Path) -> Result<PreviewCommands> {
+    let root = root.canonicalize()?;
+    let path = root.join(DIR).join("launch.json");
+    ensure!(
+        fs::metadata(&path)?.is_file(),
+        "expected a regular launch.json file"
+    );
+    let file = fs::File::open(path)?;
     let entries: Vec<Launch> = serde_json::from_reader(file)?;
     ensure!(!entries.is_empty(), "no preview commands configured");
     for e in &entries {
@@ -52,7 +64,7 @@ pub fn launches(root: &Path) -> Result<Vec<Launch>> {
             "expected a local URL path"
         );
     }
-    Ok(entries)
+    Ok(PreviewCommands { root, entries })
 }
 
 #[derive(Debug, Clone)]
@@ -102,7 +114,12 @@ impl Preview {
         }
     }
 
-    pub fn capture(&self, approved: &[Launch], path: &OsStr, cancel: &AtomicBool) -> Result<bool> {
+    pub fn capture(
+        &self,
+        approved: &PreviewCommands,
+        path: &OsStr,
+        cancel: &AtomicBool,
+    ) -> Result<bool> {
         self.capture_with(approved, path, cancel, Duration::from_secs(120), || {
             browser(path)
         })
@@ -110,7 +127,7 @@ impl Preview {
 
     fn capture_with(
         &self,
-        approved: &[Launch],
+        approved: &PreviewCommands,
         path: &OsStr,
         cancel: &AtomicBool,
         limit: Duration,
@@ -123,18 +140,18 @@ impl Preview {
             Ok(())
         };
         check()?;
-        if approved.is_empty() || !self.stale()? {
+        if !self.stale()? {
             return Ok(false);
         }
-        let entries = launches(&self.root)?;
+        let current = launches(&self.root)?;
         ensure!(
-            entries == approved,
+            &current == approved,
             "preview commands changed; review them in the project menu"
         );
-        let root = self.root.canonicalize()?;
+        let root = current.root;
         let work = self.work_dir.canonicalize()?;
         ensure!(work.starts_with(&root), "work directory is outside project");
-        let Some((entry, cwd)) = entries.iter().find_map(|e| {
+        let Some((entry, cwd)) = current.entries.iter().find_map(|e| {
             let dir = work.join(&e.cwd).canonicalize().ok()?;
             (dir.starts_with(&work) && dir.is_dir()).then_some((e, dir))
         }) else {
@@ -214,32 +231,50 @@ impl Preview {
         .arg(flag("--screenshot=", &png))
         .arg(format!("http://{addr}{}", entry.url));
         check()?;
-        // Inherit Chromium diagnostics in the test harness for native smoke failures.
-        cmd.stdin(Stdio::null()).stdout(Stdio::null());
-        #[cfg(not(test))]
-        cmd.stderr(Stdio::null());
-        let mut camera = ProcessTree::spawn(&mut cmd).context("start headless browser")?;
-        while !camera.exited()? {
+        let mut camera = quiet_spawn(&mut cmd).context("start headless browser")?;
+        loop {
             check()?;
+            // Chromium can hang in profile shutdown after writing the complete screenshot.
+            if complete_screenshot(&png)? {
+                break;
+            }
+            if camera.exited()? {
+                let status = camera.finish()?;
+                ensure!(
+                    complete_screenshot(&png)?,
+                    "browser exited without a complete screenshot ({status})"
+                );
+                break;
+            }
             ensure!(!server.exited()?, "preview server stopped during capture");
             std::thread::sleep(POLL);
         }
-        let status = camera.finish()?;
-        ensure!(status.success(), "headless screenshot failed ({status})");
-        drop(server);
         check()?;
-        let mut signature = [0; 8];
-        fs::File::open(&png)?.read_exact(&mut signature)?;
-        ensure!(
-            &signature == b"\x89PNG\r\n\x1a\n",
-            "browser did not produce a PNG"
-        );
         if !self.stale()? {
             return Ok(false);
         }
         fs::rename(png, &self.output)?;
         Ok(true)
     }
+}
+
+fn complete_screenshot(path: &Path) -> io::Result<bool> {
+    let mut png = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    if png.metadata()?.len() < 45 {
+        return Ok(false);
+    }
+    let mut head = [0; 24];
+    png.read_exact(&mut head)?;
+    let mut end = [0; 12];
+    png.seek(SeekFrom::End(-12))?;
+    png.read_exact(&mut end)?;
+    Ok(head.starts_with(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR")
+        && head[16..24] == [0, 0, 5, 0, 0, 0, 3, 32]
+        && end == *b"\0\0\0\0IEND\xaeB`\x82")
 }
 
 const POLL: Duration = Duration::from_millis(50);
@@ -377,10 +412,18 @@ mod tests {
         let data = json!([{"name":"web","port":5173,"command":"npm run dev","cwd":"web"}]);
         fs::write(&config, data.to_string()).unwrap();
         let approved = launches(&p.root).unwrap();
-        assert_eq!(approved[0].url, "/");
+        assert_eq!(approved.entries[0].url, "/");
         let req = Preview::from_notice(&p, &n).unwrap();
         let cancel = AtomicBool::new(false);
-        assert!(!req.capture(&[], OsStr::new(""), &cancel).unwrap());
+        let (_other, other, _) = fixture();
+        fs::write(other.dir().join("launch.json"), data.to_string()).unwrap();
+        let foreign = launches(&other.root).unwrap();
+        assert!(
+            req.capture(&foreign, OsStr::new(""), &cancel)
+                .unwrap_err()
+                .to_string()
+                .contains("commands changed")
+        );
         let mut changed = data.clone();
         changed[0]["command"] = json!("other");
         fs::write(&config, changed.to_string()).unwrap();
@@ -426,7 +469,10 @@ mod tests {
         }
     }
 
-    fn server_config(p: &mut Project, n: &ProjectNotice) -> (Preview, Vec<Launch>, u16, PathBuf) {
+    fn server_config(
+        p: &mut Project,
+        n: &ProjectNotice,
+    ) -> (Preview, PreviewCommands, u16, PathBuf) {
         p.file.worktrees = true;
         let work = p.work_dir("web").join("site");
         fs::create_dir_all(&work).unwrap();
@@ -506,6 +552,49 @@ mod tests {
             assert!(Instant::now() < deadline, "browser child survived");
             std::thread::sleep(POLL);
         }
+    }
+
+    #[test]
+    fn cancellation_stops_a_running_server_and_preserves_the_previous_preview() {
+        let (_tmp, mut p, n) = fixture();
+        let (req, approved, expected, work) = server_config(&mut p, &n);
+        // Keep the runner waiting for readiness while the actual server is alive.
+        let mut other = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        if other.local_addr().unwrap().port() == expected {
+            other = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        }
+        let port = other.local_addr().unwrap().port();
+        fs::write(work.join("fixture-port"), port.to_string()).unwrap();
+        drop(other);
+        fs::create_dir_all(req.output.parent().unwrap()).unwrap();
+        let mut old = fs::File::create(&req.output).unwrap();
+        old.write_all(b"old preview").unwrap();
+        old.set_modified(UNIX_EPOCH).unwrap();
+        drop(old);
+        let cancel = AtomicBool::new(false);
+        let path = std::env::var_os("PATH").unwrap();
+        std::thread::scope(|scope| {
+            let job = scope.spawn(|| {
+                req.capture_with(&approved, &path, &cancel, Duration::from_secs(10), || {
+                    Ok(std::env::current_exe()?)
+                })
+            });
+            let until = Instant::now() + Duration::from_secs(5);
+            while !work.join("started").exists() {
+                assert!(Instant::now() < until, "server did not start");
+                std::thread::sleep(POLL);
+            }
+            cancel.store(true, Ordering::Release);
+            assert!(
+                job.join()
+                    .unwrap()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("cancelled")
+            );
+        });
+        check_stopped(port);
+        assert_eq!(fs::read(req.output).unwrap(), b"old preview");
     }
 
     #[test]

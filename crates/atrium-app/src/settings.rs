@@ -51,7 +51,8 @@ pub struct Settings {
     /// Project folders, in the order they were added.
     pub projects: Vec<PathBuf>,
     /// Launch configurations explicitly approved on this device, keyed by project.
-    pub preview_commands: std::collections::HashMap<PathBuf, Vec<atrium_project::preview::Launch>>,
+    pub preview_commands:
+        std::collections::HashMap<PathBuf, atrium_project::preview::PreviewCommands>,
     /// The project the user was in, to come back to it.
     pub active_project: Option<PathBuf>,
     /// Nodes added by address, besides those found on the tailnet.

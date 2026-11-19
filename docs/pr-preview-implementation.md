@@ -50,6 +50,15 @@ agents that can take screenshots themselves.
   minutes.
 - Tests: launch.json parsing; the "is the preview stale" decision.
 
+Local previews start disabled. In the project menu, **Review local preview
+commands…** shows the resolved project folder and its launch entries. Approval
+is stored in this device's Atrium settings. If the configuration or resolved
+project changes, disable the old approval and review the commands again.
+Atrium uses the first entry whose working directory exists inside the lead’s
+work directory. Use a foreground server command. Unix cleanup targets the
+launch process group, and Windows cleanup targets the launch Job Object.
+Removing the project, disabling previews, or quitting Atrium cancels the run.
+
 ## 3. Environments for ACP agents
 
 **UI (done):** Settings → Environments stores named variable sets and the

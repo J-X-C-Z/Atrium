@@ -2,7 +2,7 @@
 use super::Workspace;
 use atrium_project::{
     Project,
-    preview::{Launch, Preview},
+    preview::{Preview, PreviewCommands},
 };
 use gpui::Context;
 use std::{
@@ -34,7 +34,7 @@ impl ProjectPreviews {
     pub(super) fn tick(
         &mut self,
         project: &Project,
-        approved: &[Launch],
+        approved: &PreviewCommands,
         cx: &mut Context<Workspace>,
     ) {
         if let Some(worker) = &self.worker {
@@ -57,7 +57,7 @@ impl ProjectPreviews {
         while let Some(n) = project.notices.get(self.seen) {
             self.seen += 1;
             if let Some(request) = Preview::from_notice(project, n) {
-                let approved = approved.to_vec();
+                let approved = approved.clone();
                 let cancel = self.cancel.clone();
                 self.worker = Some(std::thread::spawn(move || {
                     let path = agent_rpc::process::effective_path();
@@ -75,7 +75,7 @@ impl Workspace {
     pub fn set_preview_commands(
         &mut self,
         root: &Path,
-        commands: Option<Vec<Launch>>,
+        commands: Option<PreviewCommands>,
         cx: &mut Context<Self>,
     ) {
         self.previews.remove(root);
