@@ -1,6 +1,8 @@
 //! Atrium: a native desktop home for coding agents, built on GPUI. Each
 //! session works on its own; the atrium is where they share and align.
 
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod agents;
 mod alerts;
 mod i18n;

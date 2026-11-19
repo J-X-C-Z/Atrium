@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Builds Atrium.app (release) into dist/. Unsigned: right-click > Open the first time,
-# or sign it with `codesign --deep -s "Developer ID Application: ..." dist/Atrium.app`.
+# Build the native release app and a ZIP that preserves its executable and signature.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -41,10 +40,15 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 plutil -lint "$APP/Contents/Info.plist"
-printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize"}' \
-  | "$APP/Contents/MacOS/Atrium" mcp --project "$STAGE" --stream package-smoke \
-  | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["jsonrpc"] == "2.0" and r["id"] == 1 and r["result"]["serverInfo"]["name"] == "atrium", r'
+codesign --force --sign - --timestamp=none "$APP"
+ZIP="Atrium-macos-$(uname -m).zip"
+ditto -c -k --keepParent "$APP" "$STAGE/$ZIP"
+ditto -x -k "$STAGE/$ZIP" "$STAGE/verify"
+EXTRACTED="$STAGE/verify/Atrium.app"
+codesign --verify --strict "$EXTRACTED"
+python3 script/smoke-desktop.py "$EXTRACTED/Contents/MacOS/Atrium"
 
 rm -rf dist/Atrium.app
 mv "$APP" dist/Atrium.app
-echo "Built dist/Atrium.app"
+mv "$STAGE/$ZIP" "dist/$ZIP"
+echo "Built dist/Atrium.app and dist/$ZIP"

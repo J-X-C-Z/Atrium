@@ -21,11 +21,23 @@ cargo build -p codex-client --bin mock-codex
 CODEX_BIN=target/debug/mock-codex cargo run -p atrium-app
 ```
 
-打包 `.app`：
+## 桌面打包
+
+在 macOS 上安装 Xcode Command Line Tools 和 Python 3，运行：
 
 ```bash
 script/bundle-macos.sh
 ```
+
+脚本生成 `dist/Atrium.app` 和与本机架构对应的 `dist/Atrium-macos-arm64.zip` 或 `dist/Atrium-macos-x86_64.zip`。应用使用本地 ad-hoc 签名，未公证。
+
+Windows x64 使用原生 `x86_64-pc-windows-msvc` Rust 工具链、Visual Studio 的“使用 C++ 的桌面开发”工作负载、Windows 10/11 SDK 和 Python 3（`python`）。GPUI 用 SDK 的 `rc.exe` 编译清单、用 `fxc.exe` 预编译 Direct3D 着色器。若 SDK 安装在自定义位置，可设置 `GPUI_FXC_PATH` 为 x64 `fxc.exe` 的完整路径。在 PowerShell 中运行：
+
+```powershell
+.\script\bundle-windows.ps1
+```
+
+产物为 `dist/Atrium-windows-x64.zip`，解压后启动 `atrium.exe`。两个打包脚本均会启动解包后的程序，通过标准输入输出检查 MCP 的 `initialize` 和 `tools/list`。GitHub Actions 工作流 `Native desktop packages` 在对应系统上执行相同脚本并保存通过检查的 ZIP。
 
 ## 两种用法：聊天与项目
 

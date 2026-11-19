@@ -1,0 +1,46 @@
+name: Native desktop packages
+
+"on":
+  pull_request:
+    paths:
+      - 'crates/**'
+      - 'third_party/ely-gpui-components/**'
+      - 'skills/atrium/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'script/**'
+      - '.github/workflows/desktop-package.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build macOS release and smoke the extracted app
+        if: runner.os == 'macOS'
+        run: ./script/bundle-macos.sh
+      - name: Build Windows release and smoke the extracted executable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./script/bundle-windows.ps1
+      - name: Keep the tested ZIP
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: Atrium-${{ runner.os }}-${{ runner.arch }}
+          path: dist/Atrium-*.zip
+          if-no-files-found: error
+          compression-level: 0
