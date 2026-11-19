@@ -1,5 +1,4 @@
-//! Isolated native node acceptance with /bin/cat, never a real agent/account.
-#![cfg(unix)]
+//! Isolated native node acceptance using a line echo fixture.
 use serde_json::{Value, json};
 use std::{
     io::{BufRead, BufReader},
@@ -18,32 +17,71 @@ impl Node {
             std::env::temp_dir().join(format!("atrium-native-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
         let cfg = root.join("config.toml");
-        std::fs::write(&cfg,format!("port=0\ndiscover_magpie=false\nloopback_only=true\nroots=[{:?}]\ntoken=\"test-only-token\"\n[agents.echo]\ncommand=[\"/bin/cat\"]\nprotocol=\"raw\"\n",root.to_string_lossy())).unwrap();
-        use std::io::Write;
-        let mut extra = std::fs::OpenOptions::new().append(true).open(&cfg).unwrap();
-        for name in ["codex", "claude", "deepseek", "antigravity"] {
-            writeln!(
-                extra,
-                "[agents.{name}]\ncommand=[\"/bin/cat\"]\nprotocol=\"raw\""
-            )
-            .unwrap();
+        #[cfg(unix)]
+        let command = json!(["/bin/cat"]);
+        #[cfg(windows)]
+        let command = json!([
+            std::env::var_os("SystemRoot")
+                .map(std::path::PathBuf::from)
+                .unwrap()
+                .join(r"System32\WindowsPowerShell1.0\powershell.exe"),
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "while ($null -ne ($line = [Console]::ReadLine())) { [Console]::WriteLine($line) }"
+        ]);
+        let mut config = format!(
+            "port=0\ndiscover_magpie=false\nloopback_only=true\nroots=[{}]\ntoken=\"test-only-token\"\n",
+            json!(root)
+        );
+        for name in ["echo", "codex", "claude", "deepseek", "antigravity"] {
+            config += &format!("[agents.{name}]\ncommand={command}\nprotocol=\"raw\"\n");
         }
-        let mut child = Command::new(env!("CARGO_BIN_EXE_atrium-node"))
+        std::fs::write(&cfg, config).unwrap();
+        let child = Self::spawn_node(&cfg);
+        let mut node = Self {
+            child,
+            root,
+            url: String::new(),
+        };
+        node.url = format!("http://{}", node.listen_address());
+        node
+    }
+    fn spawn_node(config: &std::path::Path) -> std::process::Child {
+        Command::new(env!("CARGO_BIN_EXE_atrium-node"))
             .args(["serve", "--config"])
-            .arg(cfg)
+            .arg(config)
             .stdout(Stdio::piped())
             .spawn()
+            .unwrap()
+    }
+    fn listen_address(&mut self) -> String {
+        let stdout = self.child.stdout.take().unwrap();
+        let (started, announcement) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            let result = BufReader::new(stdout).read_line(&mut line).map(|_| line);
+            let _ = started.send(result);
+        });
+        let line = announcement
+            .recv_timeout(Duration::from_secs(15))
+            .expect("listener startup deadline")
             .unwrap();
-        let mut line = String::new();
-        BufReader::new(child.stdout.take().unwrap())
-            .read_line(&mut line)
-            .unwrap();
-        assert!(line.starts_with("listening on "), "{line}");
-        let url = format!(
-            "http://{}",
-            line.trim().strip_prefix("listening on ").unwrap()
+        line.trim()
+            .strip_prefix("listening on ")
+            .expect("node listening announcement")
+            .to_owned()
+    }
+    fn restart(&mut self) {
+        let config = self.root.join("config.toml");
+        let text = std::fs::read_to_string(&config).unwrap().replacen(
+            "port=0",
+            &format!("port={}", self.url.rsplit(':').next().unwrap()),
+            1,
         );
-        Self { child, root, url }
+        std::fs::write(&config, text).unwrap();
+        self.child = Self::spawn_node(&config);
+        assert_eq!(format!("http://{}", self.listen_address()), self.url);
     }
     fn req(&self, method: &str, path: &str) -> ureq::Request {
         ureq::request(method, &format!("{}{path}", self.url))
@@ -73,9 +111,18 @@ impl Node {
 impl Drop for Node {
     fn drop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
+            #[cfg(unix)]
             unsafe {
                 libc::kill(self.child.id() as i32, libc::SIGTERM);
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                while std::time::Instant::now() < deadline {
+                    if self.child.try_wait().ok().flatten().is_some() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
             }
+            let _ = self.child.kill();
             let _ = self.child.wait();
         }
         let _ = std::fs::remove_dir_all(&self.root);
@@ -150,7 +197,7 @@ fn authenticated_native_node_replays_and_confines_files() {
     );
     assert!(matches!(
         n.req("GET", "/v1/fs/read")
-            .query("path", "/etc/passwd")
+            .query("path", n.root.with_extension("outside").to_str().unwrap())
             .call(),
         Err(ureq::Error::Status(403, _))
     ));
@@ -360,6 +407,7 @@ fn instance_identity_detects_restart_without_replaying_queued_input() {
     n.child.wait().unwrap();
     // Inspect only the two PIDs returned by this fixture's own spawn requests.
     // Orphaned zombies count as exited; their OS adopter, not this test, reaps.
+    #[cfg(unix)]
     for pid in [p.pid.unwrap(), second.pid.unwrap()] {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -380,24 +428,7 @@ fn instance_identity_detects_restart_without_replaying_queued_input() {
     }
     wait_for(&link.state, |s| matches!(s, LinkState::Reconnecting { .. }));
     link.writer.write_all(b"must-not-replay\n").unwrap();
-    let cfg = n.root.join("config.toml");
-    let text = std::fs::read_to_string(&cfg).unwrap().replacen(
-        "port=0",
-        &format!("port={}", n.url.rsplit(':').next().unwrap()),
-        1,
-    );
-    std::fs::write(&cfg, text).unwrap();
-    n.child = Command::new(env!("CARGO_BIN_EXE_atrium-node"))
-        .args(["serve", "--config"])
-        .arg(cfg)
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut line = String::new();
-    BufReader::new(n.child.stdout.take().unwrap())
-        .read_line(&mut line)
-        .unwrap();
-    assert!(line.starts_with("listening on "));
+    n.restart();
     assert_ne!(
         client.info().unwrap().instance_id.as_deref(),
         Some(instance.as_str())
@@ -487,31 +518,7 @@ async fn restart_closes_rpc_waiters_and_discards_disconnected_requests() {
     assert!(futures::poll!(queued_one.as_mut()).is_pending());
     assert!(futures::poll!(queued_two.as_mut()).is_pending());
 
-    let config = node.root.join("config.toml");
-    let text = std::fs::read_to_string(&config).unwrap().replacen(
-        "port=0",
-        &format!("port={}", node.url.rsplit(':').next().unwrap()),
-        1,
-    );
-    std::fs::write(&config, text).unwrap();
-    node.child = Command::new(env!("CARGO_BIN_EXE_atrium-node"))
-        .args(["serve", "--config"])
-        .arg(config)
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let stdout = node.child.stdout.take().unwrap();
-    let (started, announcement) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut line = String::new();
-        let result = BufReader::new(stdout).read_line(&mut line).map(|_| line);
-        let _ = started.send(result);
-    });
-    let line = announcement
-        .recv_timeout(Duration::from_secs(10))
-        .expect("restart startup deadline")
-        .unwrap();
-    assert!(line.starts_with("listening on "));
+    node.restart();
     assert_ne!(client.info().unwrap().instance_id, original_instance);
     state_matches(
         &state,

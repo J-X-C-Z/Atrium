@@ -1,7 +1,6 @@
 //! Native node -> real remote transport/client -> scripted agents, no accounts.
 //! Run after `cargo build -p codex-client --bin mock-codex -p acp-client --bin mock-acp`:
 //! `cargo test -p atrium-node --test agents -- --ignored`
-#![cfg(unix)]
 
 #[path = "support/hierarchy.rs"]
 mod hierarchy;
@@ -37,8 +36,8 @@ impl Node {
         // Use Cargo's binary output path, not the version-dependent test layout.
         let executable = PathBuf::from(env!("CARGO_BIN_EXE_atrium-node"));
         let bin = executable.parent().unwrap().to_path_buf();
-        let codex = bin.join("mock-codex");
-        let acp = bin.join("mock-acp");
+        let codex = bin.join(format!("mock-codex{}", std::env::consts::EXE_SUFFIX));
+        let acp = bin.join(format!("mock-acp{}", std::env::consts::EXE_SUFFIX));
         assert!(
             codex.is_file() && acp.is_file(),
             "build mock-codex and mock-acp in the same Cargo target directory first"
@@ -48,17 +47,17 @@ impl Node {
         std::fs::create_dir(&root).unwrap();
         let token = uuid::Uuid::new_v4().to_string();
         let mut config = format!(
-            "port=0\ndiscover_magpie=false\nloopback_only=true\nroots=[{:?}]\ntoken={token:?}\n",
-            root.to_string_lossy()
+            "port=0\ndiscover_magpie=false\nloopback_only=true\nroots=[{}]\ntoken={token:?}\n",
+            serde_json::json!(root)
         );
         config += &format!(
-            "[agents.codex]\ncommand=[{:?}]\nprotocol=\"codex-app-server\"\n",
-            codex.to_string_lossy()
+            "[agents.codex]\ncommand=[{}]\nprotocol=\"codex-app-server\"\n",
+            serde_json::json!(codex)
         );
         for name in ["claude", "deepseek", "antigravity"] {
             config += &format!(
-                "[agents.{name}]\ncommand=[{:?},\"--name\",{name:?}]\nprotocol=\"acp\"\n",
-                acp.to_string_lossy()
+                "[agents.{name}]\ncommand=[{},\"--name\",{name:?}]\nprotocol=\"acp\"\n",
+                serde_json::json!(acp)
             );
         }
         let cfg = root.join("config.toml");
@@ -68,11 +67,13 @@ impl Node {
         if hierarchy {
             command.env("ATRIUM_HIERARCHY_MOCK", "1");
         }
+        #[cfg(unix)]
+        command.env("SHELL", "/bin/sh");
         let mut child = command
             .args(["serve", "--config"])
             .arg(cfg)
             .env("HOME", &root)
-            .env("SHELL", "/bin/sh")
+            .env("USERPROFILE", &root)
             .stdout(Stdio::piped())
             .spawn()
             .unwrap();
@@ -123,15 +124,16 @@ impl Drop for Node {
     fn drop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
             // Only our own child, never global process-name cleanup.
+            #[cfg(unix)]
             unsafe {
                 libc::kill(self.child.id() as i32, libc::SIGTERM);
-            }
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while Instant::now() < deadline {
-                if self.child.try_wait().ok().flatten().is_some() {
-                    break;
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while Instant::now() < deadline {
+                    if self.child.try_wait().ok().flatten().is_some() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
                 }
-                std::thread::sleep(Duration::from_millis(20));
             }
             if self.child.try_wait().ok().flatten().is_none() {
                 let _ = self.child.kill();
