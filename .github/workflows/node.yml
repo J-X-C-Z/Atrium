@@ -7,6 +7,10 @@ name: macOS backend acceptance
       - 'crates/atrium-app/src/project.rs'
       - 'crates/atrium-app/src/workspace.rs'
       - 'crates/atrium-app/src/workspace_project.rs'
+      - 'crates/atrium-app/src/workspace_acp.rs'
+      - 'crates/atrium-app/src/notice_delivery.rs'
+      - 'crates/atrium-app/src/notice_dispatch.rs'
+      - 'crates/atrium-app/Cargo.toml'
       - 'crates/agent-rpc/**'
       - 'crates/codex-client/**'
       - 'crates/acp-client/**'
@@ -16,6 +20,8 @@ name: macOS backend acceptance
       - '.github/workflows/node.yml'
       - 'scripts/prepare-node-demo.py'
       - 'scripts/test_prepare_node_demo.py'
+      - 'scripts/test-project-model.py'
+      - 'scripts/test-notice-dispatch.py'
   workflow_dispatch:
 
 permissions:
