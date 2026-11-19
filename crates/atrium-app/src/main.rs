@@ -5,6 +5,7 @@
 
 mod agents;
 mod alerts;
+mod git;
 mod i18n;
 use atrium_project as project;
 mod settings;
