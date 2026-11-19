@@ -1934,6 +1934,101 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
+    mod notice_crash {
+        use super::*;
+        use std::{
+            io::Read,
+            os::unix::process::ExitStatusExt,
+            process::{Command, Stdio},
+        };
+
+        const FIXTURE_ROOT: &str = "ATRIUM_NOTICE_CRASH_FIXTURE_ROOT";
+
+        #[test]
+        fn killed_after_prepare_blocks_replay_and_preserves_unread() {
+            let (root, project) = delivery_fixture("atrium-delivery-crash");
+            drop(project);
+            let executable = std::env::current_exe().unwrap();
+            let (_, module) = module_path!().split_once("::").unwrap();
+            let subprocess = |test: &str| {
+                let mut cmd = Command::new(&executable);
+                cmd.args(["--ignored", "--exact", "--nocapture"])
+                    .arg(format!("{module}::{test}"))
+                    .env(FIXTURE_ROOT, &root);
+                cmd
+            };
+
+            let mut writer = subprocess("prepare_then_wait")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap();
+            let ready = root.join("prepared");
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let prepared = loop {
+                if ready.exists() {
+                    break true;
+                }
+                if writer.try_wait().unwrap().is_some() || Instant::now() >= deadline {
+                    break false;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            let killed = writer.kill();
+            let status = writer.wait().unwrap();
+            assert!(prepared, "writer never finished prepare ({status})");
+            killed.unwrap();
+            assert_eq!(status.signal(), Some(9), "writer must die by SIGKILL");
+
+            let status = subprocess("reopen_and_verify").status().unwrap();
+            assert!(status.success(), "recovery subprocess failed ({status})");
+            assert!(root.join("verified").exists(), "recovery test did not run");
+            fs::remove_dir_all(root).unwrap();
+        }
+
+        #[test]
+        #[ignore = "subprocess entry point for the notice crash test"]
+        fn prepare_then_wait() {
+            let Some(root) = std::env::var_os(FIXTURE_ROOT).map(PathBuf::from) else {
+                return;
+            };
+            let mut project = Project::open(&root).unwrap();
+            reserve_delivery(&mut project);
+            fs::write(root.join("prepared"), []).unwrap();
+            // Keep the reservation live until killed, or exit if the supervisor disappears.
+            let _ = std::io::stdin().read(&mut [0]);
+        }
+
+        #[test]
+        #[ignore = "subprocess entry point for the notice crash test"]
+        fn reopen_and_verify() {
+            let Some(root) = std::env::var_os(FIXTURE_ROOT).map(PathBuf::from) else {
+                return;
+            };
+            let mut project = Project::open(&root).unwrap();
+            assert_eq!(
+                project.file.notice_deliveries["lead"].phase,
+                DeliveryPhase::Reserved
+            );
+            project.recover_notice_deliveries().unwrap();
+            assert!(project.notice_delivery_uncertain("lead"));
+            let lead = project.stream("lead").unwrap();
+            assert_eq!(lead.thread_id.as_deref(), Some("mock-session"));
+            assert_eq!(lead.notices_seen, 0);
+            assert!(matches!(
+                project
+                    .prepare_notice_delivery("lead", "mock-session")
+                    .unwrap(),
+                NoticePreparation::Blocked
+            ));
+            let unread = project.unread("lead");
+            assert_eq!(unread.len(), 1);
+            assert_eq!(unread[0].text, "first notice");
+            fs::write(root.join("verified"), []).unwrap();
+        }
+    }
+
     #[test]
     fn changed_notice_prefix_remains_unread_despite_accepted_rpc() {
         let (root, mut p) = delivery_fixture("atrium-delivery-prefix-edit");
