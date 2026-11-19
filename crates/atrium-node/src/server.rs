@@ -447,6 +447,67 @@ async fn blocking<T: Send + 'static>(
         })?
         .map_err(Into::into)
 }
+
+#[cfg(all(test, windows))]
+#[tokio::test]
+async fn windows_discovered_cmd_is_launched() {
+    struct Fixture(std::path::PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let dir = Fixture(std::env::temp_dir().join(format!("atrium shim & {}", uuid::Uuid::new_v4())));
+    std::fs::create_dir(&dir.0).unwrap();
+    std::fs::write(dir.0.join("agent.cmd"), "@echo off\r\necho shim-ready\r\n").unwrap();
+    let config = Config {
+        roots: vec![dir.0.clone()],
+        agents: [(
+            "shim".into(),
+            crate::config::Agent {
+                command: vec!["agent".into()],
+                protocol: "acp".into(),
+            },
+        )]
+        .into(),
+        ..Config::default()
+    };
+    let path = std::env::join_paths([&dir.0])
+        .unwrap()
+        .into_string()
+        .unwrap();
+    let state = State::new(Arc::new(config), path).await.unwrap();
+    let (_, Json(created)) = spawn(
+        AxState(state.clone()),
+        Json(Spawn {
+            agent: "shim".into(),
+            cwd: dir.0.to_str().unwrap().into(),
+            owner: "fixture".into(),
+            args: vec![],
+            env: HashMap::new(),
+        }),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{}", error.2));
+    let child = state
+        .procs
+        .get(created["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    let ended = tokio::time::timeout(Duration::from_secs(10), child.wait_ended()).await;
+    state.procs.shutdown().await;
+    ended.unwrap();
+    assert_eq!(child.json().await["exit"]["code"], 0);
+    assert!(
+        child
+            .snapshot(0)
+            .await
+            .frames
+            .iter()
+            .any(|frame| frame["line"] == "shim-ready")
+    );
+}
 async fn fs_list(
     AxState(s): AxState<Arc<State>>,
     Query(q): Query<FsQuery>,

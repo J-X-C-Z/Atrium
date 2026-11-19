@@ -131,39 +131,76 @@ pub(super) fn spawn(cmd: &mut Command) -> Result<(Child, Job)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{process::Stdio, time::Duration};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
     use windows_sys::Win32::System::JobObjects::IsProcessInJob;
 
     #[test]
     #[ignore = "fixture invoked only by owned_job_is_assigned_and_close_terminates"]
     fn job_child_fixture() {
-        if std::env::var_os("ATRIUM_JOB_TEST_FIXTURE").is_some() {
-            // Finite fallback even if the parent test fails unexpectedly.
-            std::thread::sleep(std::time::Duration::from_secs(30));
+        match std::env::var("ATRIUM_JOB_TEST_FIXTURE").as_deref() {
+            Ok("child") => {
+                let mut grandchild = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(FIXTURE_ARGS)
+                    .env("ATRIUM_JOB_TEST_FIXTURE", "grandchild")
+                    .spawn()
+                    .unwrap();
+                grandchild.wait().unwrap();
+            }
+            Ok("grandchild") => {
+                use std::io::Write;
+                println!("grandchild-ready");
+                std::io::stdout().flush().unwrap();
+                // Finite fallback even if job termination fails.
+                std::thread::sleep(Duration::from_secs(25));
+            }
+            _ => {}
         }
     }
+
+    const FIXTURE_ARGS: [&str; 4] = [
+        "--ignored",
+        "--exact",
+        "procs::windows_process::tests::job_child_fixture",
+        "--nocapture",
+    ];
 
     #[tokio::test]
     async fn owned_job_is_assigned_and_close_terminates() {
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
-            .args([
-                "--ignored",
-                "--exact",
-                "procs::windows_process::tests::job_child_fixture",
-            ])
-            .env("ATRIUM_JOB_TEST_FIXTURE", "1")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
+            .args(FIXTURE_ARGS)
+            .env("ATRIUM_JOB_TEST_FIXTURE", "child")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped());
         let (mut child, job) = spawn(&mut command).unwrap();
         let mut member = 0;
         let queried =
             unsafe { IsProcessInJob(child.raw_handle().unwrap(), job.raw(), &mut member) };
-        // Dropping our non-inherited last Job handle must terminate the fixture.
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        let ready = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut line = String::new();
+            while stdout.read_line(&mut line).await.unwrap() != 0 {
+                if line.contains("grandchild-ready") {
+                    return true;
+                }
+                line.clear();
+            }
+            false
+        })
+        .await;
+        // EOF requires both the direct child and its grandchild to close stdout.
         drop(job);
-        let ended = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
+        let (ended, eof) = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut trailing = Vec::new();
+            tokio::join!(child.wait(), stdout.read_to_end(&mut trailing))
+        })
+        .await
+        .unwrap();
+        assert!(ready.unwrap());
         assert_ne!(queried, 0);
         assert_ne!(member, 0);
-        assert!(!ended.unwrap().unwrap().success());
+        assert!(!ended.unwrap().success());
+        eof.unwrap();
     }
 }

@@ -61,7 +61,7 @@ fn render_windows(exe: &Path, config: &Path) -> Result<String> {
 const TASK_SCRIPT: &str = r#"
 $ErrorActionPreference = 'Stop'
 $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-$name = "AtriumNode-$sid"
+$name = 'AtriumNode-' + $sid
 $service = New-Object -ComObject Schedule.Service
 $service.Connect()
 $folder = $service.GetFolder('\')
@@ -92,7 +92,11 @@ try {
     throw
 }
 if ($task.Definition.RegistrationInfo.Description -ne 'Atrium per-user agent node (managed v2)') {
-    throw "Refusing to operate on an unmanaged task: $name"
+    throw ('Refusing to operate on an unmanaged task: ' + $name)
+}
+$principal = $task.Definition.Principal.UserId
+if ($principal -ne $sid -and ([Security.Principal.NTAccount]::new($principal)).Translate([Security.Principal.SecurityIdentifier]).Value -ne $sid) {
+    throw ('Refusing to operate on a task owned by a different principal: ' + $name)
 }
 if ($action -eq 'uninstall') {
     if ($task.State -eq 2 -or $task.State -eq 4) { $task.Stop(0) }
