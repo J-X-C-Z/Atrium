@@ -54,6 +54,39 @@ pub struct SessionStart {
     pub options: Vec<ConfigOption>,
 }
 
+/// Reliable delivery evidence from a completed prompt RPC. Errors cannot prove
+/// that the agent did not already act, even if a standard refusal code arrives.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PromptDelivery {
+    Accepted { stop_reason: String },
+    Uncertain { error: RpcError },
+}
+
+/// The normal closing events plus delivery evidence, without changing the wire.
+pub struct PromptOutcome {
+    pub events: Vec<AgentEvent>,
+    pub delivery: PromptDelivery,
+}
+
+fn prompt_delivery(result: &std::result::Result<Value, RpcError>) -> PromptDelivery {
+    match result {
+        Ok(value) => match value["stopReason"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+        {
+            Some(reason) => PromptDelivery::Accepted {
+                stop_reason: reason.to_owned(),
+            },
+            None => PromptDelivery::Uncertain {
+                error: RpcError::Decode("prompt reply lacks a nonempty stopReason".into()),
+            },
+        },
+        Err(error) => PromptDelivery::Uncertain {
+            error: error.clone(),
+        },
+    }
+}
+
 /// A permission option: `(option id, kind)`, kind such as `allow_once`.
 type PermissionOption = (String, String);
 
@@ -372,6 +405,20 @@ impl AcpClient {
         images: &[PathBuf],
         mentions: &[PathBuf],
     ) -> Vec<AgentEvent> {
+        self.prompt_with_outcome(session_id, text, images, mentions)
+            .await
+            .events
+    }
+
+    /// Like `prompt`, but preserves reliable acceptance versus uncertainty.
+    /// All errors are uncertain: streaming updates can precede an RPC error.
+    pub async fn prompt_with_outcome(
+        &self,
+        session_id: &str,
+        text: &str,
+        images: &[PathBuf],
+        mentions: &[PathBuf],
+    ) -> PromptOutcome {
         let mut blocks = vec![json!({ "type": "text", "text": text })];
         for path in images {
             match image_block(path) {
@@ -389,15 +436,17 @@ impl AcpClient {
                 "session/prompt",
                 json!({ "sessionId": session_id, "prompt": blocks }),
             )
-            .await
-            .map_err(|e| self.explain(e).to_string());
+            .await;
+        let delivery = prompt_delivery(&result);
+        let result = result.map_err(|e| self.explain(e).to_string());
         let usage = result.as_ref().ok().map(|r| r["usage"].clone());
         let result = result.map(|r| str_of(&r, "stopReason"));
-        self.translator.lock().expect("translator").finish_prompt(
+        let events = self.translator.lock().expect("translator").finish_prompt(
             session_id,
             result,
             usage.as_ref(),
-        )
+        );
+        PromptOutcome { events, delivery }
     }
 
     /// Asks the running turn to stop; its prompt then ends as cancelled.
@@ -521,4 +570,115 @@ fn image_block(path: &Path) -> Result<Value> {
         "data": base64::engine::general_purpose::STANDARD.encode(bytes),
         "uri": format!("file://{}", path.display()),
     }))
+}
+
+#[cfg(test)]
+mod prompt_outcome_tests {
+    use super::*;
+    use std::{
+        io::{Read, Write},
+        net::{Shutdown, TcpListener, TcpStream},
+        time::Duration,
+    };
+
+    #[test]
+    fn typed_prompt_preserves_events_and_never_retries_uncertain_delivery() {
+        let (done, finished) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            for case in 0..5 {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+                let (mut peer, _) = listener.accept().unwrap();
+                peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+                peer.set_write_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                let server = thread::spawn(move || {
+                    let mut reader = BufReader::new(peer.try_clone().unwrap());
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    let request: Value = serde_json::from_str(&line).unwrap();
+                    assert_eq!(request["method"], "session/prompt");
+                    if case == 2 {
+                        writeln!(peer, "{}", json!({"jsonrpc":"2.0", "method":"session/update", "params":{"sessionId":"session", "update":{"sessionUpdate":"agent_message_chunk", "content":{"type":"text", "text":"already acted"}}}})).unwrap();
+                    }
+                    if case != 3 {
+                        let response = if case == 1 || case == 2 {
+                            json!({"jsonrpc":"2.0", "id":request["id"], "error":{"code":-32602,"message":"refused"}})
+                        } else {
+                            json!({"jsonrpc":"2.0", "id":request["id"], "result":if case == 0 {json!({"stopReason":"end_turn"})} else {json!({})}})
+                        };
+                        writeln!(peer, "{response}").unwrap();
+                    }
+                    peer.shutdown(Shutdown::Write).unwrap();
+                    let mut remainder = String::new();
+                    match reader.read_to_string(&mut remainder) {
+                        Ok(_) => {}
+                        Err(e)
+                            if matches!(
+                                e.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                            ) => {}
+                        Err(e) => panic!("unexpected read: {e}"),
+                    }
+                    assert!(remainder.is_empty(), "prompt retried or cancelled on wire");
+                });
+                let (connection, mut incoming) = Connection::jsonrpc2(
+                    BufReader::new(stream.try_clone().unwrap()),
+                    stream,
+                    "test",
+                );
+                let client = AcpClient {
+                    connection,
+                    _process: None,
+                    backend: "test".into(),
+                    info: AgentInfo::default(),
+                    translator: Arc::new(Mutex::new(Translator::new("test"))),
+                    permissions: Arc::default(),
+                };
+                client.begin_turn("session");
+                let outcome = futures::executor::block_on(client.prompt_with_outcome(
+                    "session",
+                    "hello",
+                    &[],
+                    &[],
+                ));
+                assert!(!outcome.events.is_empty());
+                match (case, outcome.delivery) {
+                    (0, PromptDelivery::Accepted { stop_reason }) => {
+                        assert_eq!(stop_reason, "end_turn")
+                    }
+                    (
+                        1 | 2,
+                        PromptDelivery::Uncertain {
+                            error: RpcError::Server { code: -32602, .. },
+                        },
+                    ) => {}
+                    (
+                        3,
+                        PromptDelivery::Uncertain {
+                            error: RpcError::Closed,
+                        },
+                    ) => {}
+                    (
+                        4,
+                        PromptDelivery::Uncertain {
+                            error: RpcError::Decode(_),
+                        },
+                    ) => {}
+                    other => panic!("unexpected outcome: {other:?}"),
+                }
+                if case == 2 {
+                    assert!(
+                        matches!(incoming.try_recv(), Ok(Incoming::Notification { method, .. }) if method == "session/update")
+                    );
+                }
+                drop(client);
+                server.join().unwrap();
+            }
+            done.send(()).unwrap();
+        });
+        finished
+            .recv_timeout(Duration::from_secs(10))
+            .expect("prompt cases completed before deadline");
+    }
 }

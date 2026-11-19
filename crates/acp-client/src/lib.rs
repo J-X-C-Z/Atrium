@@ -12,5 +12,5 @@
 mod client;
 mod translate;
 
-pub use client::{AcpClient, AcpConfig, AgentInfo, SessionStart};
+pub use client::{AcpClient, AcpConfig, AgentInfo, PromptDelivery, PromptOutcome, SessionStart};
 pub use translate::{Translator, config_options};
