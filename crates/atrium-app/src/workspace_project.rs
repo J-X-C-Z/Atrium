@@ -148,6 +148,7 @@ impl Workspace {
     }
 
     pub fn enter_chats(&mut self, cx: &mut Context<Self>) {
+        self.nav += 1;
         self.room = Room::Chats;
         self.settings.active_project = None;
         self.settings.save();
@@ -188,6 +189,7 @@ impl Workspace {
 
     /// Shows a project's overview.
     pub fn enter_project(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        self.nav += 1;
         self.room = Room::Project {
             root: root.clone(),
             stream: None,
@@ -204,6 +206,7 @@ impl Workspace {
 
     /// Opens a workstream's chat.
     pub fn show_stream(&mut self, stream: &str, cx: &mut Context<Self>) {
+        self.nav += 1;
         let Some(root) = self.project_root() else {
             return;
         };
@@ -222,6 +225,7 @@ impl Workspace {
     }
 
     pub fn show_overview(&mut self, cx: &mut Context<Self>) {
+        self.nav += 1;
         if let Some(root) = self.project_root() {
             self.room = Room::Project { root, stream: None };
             cx.notify();

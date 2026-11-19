@@ -120,6 +120,9 @@ pub struct Workspace {
     client: Option<CodexClient>,
     pub threads: Vec<ThreadMeta>,
     pub view: View,
+    /// Counts the user's moves between chats and project views, so the
+    /// main column can play its entrance on a move and not on other changes.
+    pub nav: u64,
     transcripts: HashMap<String, Transcript>,
     /// The draft's transcript, shown while its thread is being created.
     draft: Transcript,
@@ -197,6 +200,7 @@ impl Workspace {
             client: None,
             threads: Vec::new(),
             view: View::Draft,
+            nav: 0,
             transcripts: HashMap::new(),
             draft: Transcript::new(),
             loading: HashSet::new(),
@@ -667,6 +671,7 @@ impl Workspace {
     }
 
     pub fn new_chat(&mut self, cx: &mut Context<Self>) {
+        self.nav += 1;
         if !self.draft.is_running() {
             self.draft = Transcript::new();
             self.born.remove(DRAFT);
@@ -677,6 +682,7 @@ impl Workspace {
     }
 
     pub fn open_thread(&mut self, thread_id: String, cx: &mut Context<Self>) {
+        self.nav += 1;
         self.view = View::Thread(thread_id.clone());
         cx.notify();
         self.load_thread(thread_id, cx);

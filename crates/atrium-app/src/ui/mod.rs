@@ -5,6 +5,7 @@ mod chat;
 mod composer;
 mod context;
 mod devices;
+mod motion;
 mod project;
 mod rows;
 mod sidebar;
@@ -1074,6 +1075,22 @@ impl Render for RootView {
                 cx.entity(),
                 collapsed,
                 window,
+                cx,
+            )
+        };
+        // A move between chats, a project's overview and its workstreams
+        // plays an entrance; updates inside a view do not.
+        let main = {
+            let ws = self.workspace.read(cx);
+            let how = match ws.room {
+                crate::workspace::Room::Chats => motion::Enter::Fade,
+                crate::workspace::Room::Project { .. } => motion::Enter::Rise,
+            };
+            motion::enter(
+                div().flex_1().min_w_0().h_full().flex().child(main),
+                "main",
+                ws.nav,
+                how,
                 cx,
             )
         };
