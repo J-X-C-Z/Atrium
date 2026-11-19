@@ -1,0 +1,18 @@
+{
+  "environment": "Linux-6.18.57-x86_64-with-glibc2.41",
+  "toolchain": "Rust/Cargo 1.100.0",
+  "profile": "release optimized",
+  "filesystem": "Linux workspace overlay; backing durability unknown",
+  "samples_per_path": 100,
+  "quantiles": "nearest rank: sorted[49] and sorted[94]",
+  "order": "reservation then cursor_reference; no warmup discarded",
+  "source_revision": "37c86bfe96ac3e0fc29af7308bb3cbabaaba2ec9 plus unpublished notice-delivery model; exact source hashes below, not a benchmark of the baseline commit",
+  "source_sha256": {
+    "crates/atrium-app/src/project.rs": "e0308668cbc912ff3796c7cf28bf50e63660abc1e0e878453c9f86ab1c5ee7ea",
+    "crates/atrium-app/src/notice_delivery.rs": "5d72a6ad36ca81a9ced9e4faf1300688e9661b60f26e901d70e334943c198b20"
+  },
+  "binary_sha256": "aef4b6b123ec3de26bbc88b3f635f890616d01bce03848dfef97a0b1223b0ecd",
+  "dependencies": "independent Cargo.lock in this evidence directory; not workspace lock",
+  "fixture_cleanup": "only UUID-named own fixture directory removed after successful completion",
+  "publication_note": "Portable driver rerun; supersedes initial exploratory absolute-path driver measurements."
+}
