@@ -16,8 +16,8 @@ use ely_gpui_component::{
 };
 use gpui::{
     AnyElement, App, AppContext, Context, Entity, Hsla, InteractiveElement, IntoElement,
-    ParentElement, PathPromptOptions, SharedString, StatefulInteractiveElement, Styled, Window,
-    div, prelude::*, px,
+    ParentElement, PathPromptOptions, PromptButton, PromptLevel, SharedString,
+    StatefulInteractiveElement, Styled, Window, div, prelude::*, px,
 };
 
 use super::{Overlay, RootView, TITLE_BAR_HEIGHT, composer::short_path};
@@ -1965,6 +1965,9 @@ pub fn stream_bar(workspace: &Entity<Workspace>, cx: &App) -> Option<AnyElement>
     let ws = workspace.read(cx);
     let (project, stream) = ws.open_stream()?;
     let unread = project.unread(&stream.id).len();
+    let uncertain = project.notice_delivery_uncertain(&stream.id);
+    let blocked = project.notice_delivery_blocked(&stream.id);
+    let resolution = (workspace.clone(), project.root.clone(), stream.id.clone());
     let back = workspace.clone();
     let deliver = (workspace.clone(), stream.id.clone());
     let tiny = theme.text_size(TextSize::Xs);
@@ -2015,7 +2018,48 @@ pub fn stream_bar(workspace: &Entity<Workspace>, cx: &App) -> Option<AnyElement>
                         ws.update(cx, |ws, cx| ws.remove_stream(&id, cx))
                     })
             })
-            .when(unread > 0, |bar| {
+            .when(uncertain, |bar| {
+                bar.child(
+                    Button::new("resolve-notice-delivery", t("Review notice delivery"))
+                        .size(ControlSize::Sm)
+                        .icon(IconName::TriangleAlert)
+                        .on_click(move |_, window, cx| {
+                            let (workspace, root, stream) = resolution.clone();
+                            let choice = window.prompt(
+                                PromptLevel::Warning,
+                                t("Notice delivery is uncertain"),
+                                Some(t("Check the conversation first. Retry can send duplicate notices. It will never resend your earlier message.")),
+                                &[
+                                    PromptButton::cancel(t("Cancel")),
+                                    PromptButton::new(t("Mark notices received")),
+                                    PromptButton::new(t("Retry notices only")),
+                                ],
+                                cx,
+                            );
+                            cx.spawn(async move |cx| {
+                                let outcome = match choice.await {
+                                    Ok(1) => false,
+                                    Ok(2) => true,
+                                    _ => return,
+                                };
+                                workspace.update(cx, |ws, cx| {
+                                    let result = ws.resolve_stream_notice_delivery(&root, &stream, outcome, cx);
+                                    match result {
+                                        Ok(true) => (),
+                                        Ok(false) => cx.emit(crate::workspace::Notice::Info(
+                                            t("Notice delivery changed. Check the current status and try again.").into(),
+                                        )),
+                                        Err(error) => cx.emit(crate::workspace::Notice::Error(tf(
+                                            "Could not resolve notice delivery: {error}",
+                                            &[("error", &format!("{error:#}"))],
+                                        ))),
+                                    }
+                                });
+                            }).detach();
+                        }),
+                )
+            })
+            .when(unread > 0 && !blocked, |bar| {
                 bar.child(
                     Button::new(
                         "bar-deliver",

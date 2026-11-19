@@ -172,7 +172,7 @@ impl Workspace {
                         .filter(|stream| project.notice_delivery_blocked(&stream.id))
                         .count();
                     if held > 0 {
-                        cx.emit(Notice::Info(format!("{}: {held} workstream(s) have unresolved notice delivery. Automatic notice retries are paused; explicit resolution is available through the backend integration API.", root.display())));
+                        cx.emit(Notice::Info(format!("{}: {held} workstream(s) have unresolved notice delivery. Automatic notice retries are paused; review notice delivery in each affected workstream.", root.display())));
                     }
                     match project.recover_unbound_tasks() {
                         Ok(parents) => {
