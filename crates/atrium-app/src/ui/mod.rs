@@ -1,6 +1,7 @@
 //! The window: a ChatGPT-style sidebar of conversations beside the chat,
 //! with a command palette, settings and toasts over it.
 
+mod changes;
 mod chat;
 mod composer;
 mod context;
@@ -54,6 +55,7 @@ actions!(
         ReviewChanges,
         AttachFiles,
         ShowContext,
+        ToggleChanges,
     ]
 );
 
@@ -119,6 +121,7 @@ pub fn register_actions(cx: &mut App) {
             this.open_context(cx);
         }
     });
+    forward::<ToggleChanges>(cx, |this, _, cx| this.toggle_changes(cx));
     forward::<FocusComposer>(cx, |this, window, cx| {
         Composer::focus_entity(&this.composer, window, cx)
     });
@@ -176,6 +179,9 @@ pub struct RootView {
     pub(super) overview_cards: bool,
     notice_input: Entity<TextInput>,
     notice_to: String,
+    /// The changes pane: open or not, and the comments being written.
+    pub(super) review: changes::Review,
+    comment_input: Entity<TextInput>,
     /// The theme last applied, so a change of preference or system appearance re-applies.
     applied: Option<(ThemePref, bool)>,
     /// Whether the long-lived inputs show Chinese placeholders.
@@ -193,6 +199,11 @@ impl RootView {
             TextInput::new(window, cx)
                 .multi_line(2, 5)
                 .placeholder(t("Tell the workstreams something…"))
+        });
+        let comment_input = cx.new(|cx| {
+            TextInput::new(window, cx)
+                .multi_line(1, 4)
+                .placeholder(t("Comment on this line…"))
         });
         let subscriptions = vec![
             cx.observe_in(&workspace, window, |this, _, window, cx| {
@@ -215,6 +226,10 @@ impl RootView {
                     .update(cx, |composer, cx| composer.fill(composed, window, cx));
             }),
             cx.observe_window_appearance(window, |this, window, cx| this.apply_theme(window, cx)),
+            cx.observe_window_activation(window, |this, window, cx| {
+                let active = window.is_window_active();
+                this.workspace.update(cx, |ws, _| ws.window_active = active);
+            }),
         ];
         cx.set_global(RootHandle(cx.entity().downgrade()));
         let focus = cx.focus_handle();
@@ -229,6 +244,8 @@ impl RootView {
             overview_cards: false,
             notice_input,
             notice_to: "all".into(),
+            review: changes::Review::default(),
+            comment_input,
             applied: None,
             placeholders_chinese: crate::i18n::chinese(),
             _subscriptions: subscriptions,
@@ -1003,6 +1020,23 @@ impl RootView {
                         .into_any_element(),
                 ))
                 .child(section(
+                    t("Notifications"),
+                    t("A system notification when a conversation you are not looking at finishes, fails or needs you."),
+                    Switch::new("notify", !ws.settings.quiet_notifications)
+                        .label(t("Notify me"))
+                        .on_change({
+                            let workspace = self.workspace.clone();
+                            move |on, _, cx| {
+                                workspace.update(cx, |ws, cx| {
+                                    ws.settings.quiet_notifications = !on;
+                                    ws.settings.save();
+                                    cx.notify();
+                                })
+                            }
+                        })
+                        .into_any_element(),
+                ))
+                .child(section(
                     t("Agents"),
                     t("Claude Code, DeepSeek Harness and Antigravity run over the Agent Client Protocol. Set a command per agent with `agent_commands` in settings.json."),
                     agents,
@@ -1069,14 +1103,26 @@ impl Render for RootView {
             };
             project::render_overview(&self.workspace, cx.entity(), panel, collapsed, window, cx)
         } else {
-            chat::render(
+            let chat = chat::render(
                 &self.workspace,
                 &self.composer,
                 cx.entity(),
                 collapsed,
+                self.review.open,
                 window,
                 cx,
-            )
+            );
+            match self.changes_pane(cx) {
+                Some(pane) => div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .child(chat)
+                    .child(pane)
+                    .into_any_element(),
+                None => chat,
+            }
         };
         // A move between chats, a project's overview and its workstreams
         // plays an entrance; updates inside a view do not.

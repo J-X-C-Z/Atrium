@@ -58,6 +58,9 @@ pub struct Settings {
     pub node_token: Option<String>,
     /// Names this install to nodes, so it finds its own processes.
     pub install_id: String,
+    /// No system notifications when a conversation you are not looking at
+    /// finishes, fails or needs you.
+    pub quiet_notifications: bool,
     /// The interface's language.
     pub language: crate::i18n::Language,
     /// Where new chats run on each device, by device id.

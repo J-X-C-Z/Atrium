@@ -39,11 +39,19 @@ pub fn render(
     composer: &Entity<Composer>,
     root: Entity<RootView>,
     sidebar_collapsed: bool,
+    changes_open: bool,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     let colors = cx.theme().colors.clone();
-    let header = header(workspace, root.clone(), sidebar_collapsed, window, cx);
+    let header = header(
+        workspace,
+        root.clone(),
+        sidebar_collapsed,
+        changes_open,
+        window,
+        cx,
+    );
     let goal = goal_banner(workspace, root, cx);
     let body = body(workspace, composer, window, cx);
     div()
@@ -64,6 +72,7 @@ fn header(
     workspace: &Entity<Workspace>,
     root: Entity<RootView>,
     sidebar_collapsed: bool,
+    open: bool,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -404,6 +413,25 @@ fn header(
         }))
         .children(quick_view)
         .children(usage_meter)
+        .children({
+            let files = workspace
+                .read(cx)
+                .transcript()
+                .map(|t| super::changes::changed_files(t).len())
+                .unwrap_or(0);
+            (files > 0 || open).then(|| {
+                let toggle = root.clone();
+                Button::new("header-changes", files.to_string())
+                    .icon(IconName::GitBranch)
+                    .variant(if open {
+                        ButtonVariant::Secondary
+                    } else {
+                        ButtonVariant::Ghost
+                    })
+                    .size(ControlSize::Sm)
+                    .on_click(move |_, _, cx| toggle.update(cx, |r, cx| r.toggle_changes(cx)))
+            })
+        })
         .children(chat_menu)
         .when(thread_id.is_some(), |bar| {
             bar.child(
