@@ -8,6 +8,8 @@ name: macOS node-only package acceptance
       - 'Cargo.lock'
       - 'scripts/node-package.py'
       - 'scripts/test_node_package.py'
+      - 'scripts/node-portable-load.py'
+      - 'scripts/test_node_portable_load.py'
       - '.github/workflows/node-package.yml'
   workflow_dispatch:
 
@@ -33,6 +35,7 @@ jobs:
         run: |
           python3 -c 'import sys; assert sys.version_info >= (3, 11)'
           python3 -m unittest discover -s scripts -p test_node_package.py -v
+          python3 -m unittest discover -s scripts -p test_node_portable_load.py -v
       - name: Native node build, archive, verify, smoke and reproducible repack
         shell: bash
         run: |
@@ -51,6 +54,8 @@ jobs:
           import importlib.util
           import json
           import os
+          import subprocess
+          import sys
           from pathlib import Path
           spec = importlib.util.spec_from_file_location("node_package", "scripts/node-package.py")
           package = importlib.util.module_from_spec(spec)
@@ -64,6 +69,24 @@ jobs:
           assert repacked == hashes, "same-input archive repack differed"
           print(json.dumps({"manifest": manifest, "hashes": hashes, "repack": "identical"}, indent=2))
           print(json.dumps(package.smoke(archive, expected), indent=2))
+          # All runs use this one verified native release archive. Retention
+          # profiles are separate correctness cases, not a speed comparison.
+          cases = [(f"{n}-{mode}", mode == "small", 2)
+                   for n in range(1, 4) for mode in ("default", "small")]
+          cases.append(("bounded-60-rounds", True, 60))
+          for label, small, rounds in cases:
+              result_path = root / f"load-{label}.json"
+              command = [sys.executable, "scripts/node-portable-load.py",
+                         "--archive", str(archive), "--expected-sha256", expected,
+                         "--output", str(result_path), "--rounds", str(rounds)]
+              if small:
+                  command.append("--small-retention")
+              subprocess.run(command, check=True, timeout=210)
+              result = json.loads(result_path.read_text())
+              assert result["status"] == "completed"
+              assert result["hashes"] == hashes
+              print(json.dumps({"case": label, **{k: v for k, v in result.items()
+                               if k != "samples"}}, indent=2))
           PY
           # No uploads, service installation, accounts, signing or publication.
           # RUNNER_TEMP is runner-owned and removed by the hosted runner lifecycle.
