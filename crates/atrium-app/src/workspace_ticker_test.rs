@@ -263,3 +263,110 @@ fn assert_reopened_workspace_holds_notice(cx: &mut TestAppContext, root: &PathBu
     assert_eq!(persisted.stream("controller").unwrap().notices_seen, 0);
     assert_eq!(persisted.unread("controller").len(), 1);
 }
+
+#[gpui::test(iterations = 1)]
+fn restart_resumes_with_project_mcp_and_reactivates_goal_before_wake(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let dir = Fixture(std::env::temp_dir().join(uuid::Uuid::new_v4().to_string()));
+    fs::create_dir(&dir.0).unwrap();
+    let mut p = Project::open(&dir.0).unwrap();
+    p.file.streams.push(Workstream {
+        id: "boss".into(),
+        role: Role::Controller,
+        backend: "codex".into(),
+        ..Default::default()
+    });
+    let key = "boss/fix";
+    p.create_task(
+        "boss",
+        &crate::project::agent::NewTask {
+            title: "Fix".into(),
+            goal: "Pass the tests".into(),
+            phases: vec![("Check".into(), vec!["Test".into()])],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut lead = p.stream_from_task(p.task(key).unwrap(), "codex").unwrap();
+    lead.thread_id = Some("persisted".into());
+    p.file.streams.push(lead);
+    p.set_task_status(key, crate::project::TaskStatus::Running)
+        .unwrap();
+    p.file.autopilot.on = true;
+    p.save().unwrap();
+
+    let (client, mut socket) = UnixStream::pair().unwrap();
+    let (connection, _events) =
+        Connection::new(BufReader::new(client.try_clone().unwrap()), client);
+    let root = dir.0.clone();
+    let (sent, received) = mpsc::channel();
+    let mock = thread::spawn(move || {
+        socket
+            .set_read_timeout(Some(Duration::from_secs(6)))
+            .unwrap();
+        let mut reader = BufReader::new(socket.try_clone().unwrap());
+        for method in [
+            "thread/resume",
+            "thread/goal/get",
+            "thread/goal/set",
+            "turn/start",
+        ] {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let rpc: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(rpc["method"], method);
+            let params = &rpc["params"];
+            assert_eq!(params["threadId"], "persisted");
+            let result = match method {
+                "thread/resume" => {
+                    assert_eq!(params["sandbox"], "workspace-write");
+                    assert_eq!(params["approvalPolicy"], "on-request");
+                    assert_eq!(
+                        params["config"]["mcp_servers.atrium"]["args"],
+                        json!(["mcp", "--project", root, "--stream", "fix"])
+                    );
+                    json!({"thread": {"id": "persisted", "cwd": root, "turns": []}})
+                }
+                "thread/goal/get" => json!({"goal": {"objective":"Fix","status":"paused"}}),
+                "thread/goal/set" => {
+                    assert_eq!(params["status"], "active");
+                    json!({})
+                }
+                _ => {
+                    assert!(
+                        params["input"][0]["text"]
+                            .as_str()
+                            .unwrap()
+                            .contains("Atrium restarted")
+                    );
+                    json!({"turn":{"id":"after-restart"}})
+                }
+            };
+            writeln!(socket, "{}", json!({"id":rpc["id"],"result":result})).unwrap();
+        }
+        sent.send(()).unwrap();
+    });
+    let ws = cx.new(|cx| {
+        let mut ws = Workspace::with_settings(Settings {
+            projects: vec![dir.0.clone()],
+            mode: codex_client::AccessMode::FullAccess,
+            ..Default::default()
+        });
+        ws.client = Some(CodexClient::over(connection));
+        ws.init_projects(cx);
+        ws
+    });
+    cx.run_until_parked();
+    let deadline = Instant::now() + Duration::from_secs(6);
+    while received.try_recv().is_err() {
+        assert!(
+            Instant::now() < deadline,
+            "restart did not reach the existing thread"
+        );
+        cx.executor().advance_clock(Duration::from_secs(2));
+        cx.run_until_parked();
+        thread::sleep(Duration::from_millis(5));
+    }
+    mock.join().unwrap();
+    drop(ws);
+}

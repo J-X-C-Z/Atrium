@@ -31,6 +31,13 @@ fn minutes(n: u32) -> Duration {
 }
 
 impl StreamClock {
+    pub fn restart_at(&self) -> Option<Instant> {
+        match self.due {
+            Some((at, Wake::Restarted)) => Some(at),
+            _ => None,
+        }
+    }
+
     pub fn restarted(&mut self, at: Instant) {
         self.due = Some((at, Wake::Restarted));
     }
@@ -268,6 +275,7 @@ mod tests {
         let mut now = Instant::now();
         let mut s = StreamClock::default();
         s.restarted(now + Duration::from_secs(5));
+        assert_eq!(s.restart_at(), Some(now + Duration::from_secs(5)));
         assert!(!s.may_wake(now));
         now += Duration::from_secs(5);
         assert_eq!(

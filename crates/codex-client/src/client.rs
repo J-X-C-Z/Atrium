@@ -349,7 +349,22 @@ impl CodexClient {
         thread_id: &str,
         mcp_servers: &[McpServer],
     ) -> Result<(ThreadMeta, Vec<(String, TurnStatus, Vec<Item>)>)> {
+        self.thread_resume_in_mode(thread_id, mcp_servers, None)
+            .await
+    }
+
+    /// Restore a project session with its unattended sandbox before any goal can resume.
+    pub async fn thread_resume_in_mode(
+        &self,
+        thread_id: &str,
+        mcp_servers: &[McpServer],
+        mode: Option<AccessMode>,
+    ) -> Result<(ThreadMeta, Vec<(String, TurnStatus, Vec<Item>)>)> {
         let mut params = json!({ "threadId": thread_id });
+        if let Some(mode) = mode {
+            params["sandbox"] = json!(mode.sandbox_mode());
+            params["approvalPolicy"] = json!(mode.approval_policy());
+        }
         if let Some(config) = mcp_config(mcp_servers) {
             params["config"] = config;
         }

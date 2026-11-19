@@ -797,8 +797,17 @@ impl Workspace {
         };
         self.loading.insert(thread_id.clone());
         let mcp = self.mcp_for_thread(&thread_id, self.backend_of(&thread_id));
+        let mode = self
+            .stream_of(&thread_id)
+            .filter(|(p, _)| p.file.autopilot.on)
+            .map(|_| self.project_access_mode(true));
         cx.spawn(async move |this, cx| {
-            let resumed = client.thread_resume_with(&thread_id, &mcp).await;
+            let resumed = client.thread_resume_in_mode(&thread_id, &mcp, mode).await;
+            let goal = if mode.is_some() && resumed.is_ok() {
+                client.goal_get(&thread_id).await.ok().flatten()
+            } else {
+                None
+            };
             let _ = this.update(cx, |ws, cx| {
                 ws.loading.remove(&thread_id);
                 match resumed {
@@ -806,7 +815,13 @@ impl Workspace {
                         ws.upsert_thread(meta);
                         ws.transcripts
                             .insert(thread_id.clone(), Transcript::from_history(turns));
-                        ws.load_goal(thread_id, cx);
+                        if mode.is_none() {
+                            ws.load_goal(thread_id, cx);
+                        } else if let Some(goal) = goal {
+                            ws.goals.insert(thread_id, goal);
+                        } else {
+                            ws.goals.remove(&thread_id);
+                        }
                     }
                     Err(error) => {
                         ws.pilot_failure(&thread_id, true);

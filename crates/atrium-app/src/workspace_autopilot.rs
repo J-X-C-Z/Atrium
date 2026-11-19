@@ -8,6 +8,7 @@ use crate::workspace::{AgentStatus, Status};
 pub(super) struct Pilot {
     streams: HashMap<(PathBuf, String), PilotStream>,
     last_restart: Option<Instant>,
+    last_resume: Option<Instant>,
     reconnect: HashMap<String, (Instant, u32)>,
 }
 
@@ -37,6 +38,28 @@ impl Workspace {
                 }
             }
         }
+    }
+
+    /// Manual opens stay immediate. Stagger automatic resume RPCs as well as wakes,
+    /// including when a backend becomes ready after several deadlines have passed.
+    pub(super) fn pilot_resume_slot(&mut self, root: &Path, id: &str, now: Instant) -> bool {
+        let pilot = &mut self.project_schedule.pilot;
+        let Some(at) = pilot
+            .streams
+            .get(&(root.to_owned(), id.to_owned()))
+            .and_then(|s| s.clock.restart_at())
+        else {
+            return true;
+        };
+        if now < at
+            || pilot
+                .last_resume
+                .is_some_and(|last| now.duration_since(last) < Duration::from_secs(5))
+        {
+            return false;
+        }
+        pilot.last_resume = Some(now);
+        true
     }
 
     pub(super) fn clear_autopilot(&mut self, root: &Path) {

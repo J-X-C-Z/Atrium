@@ -801,7 +801,7 @@ impl Workspace {
         let Some(project) = self.projects.iter().find(|p| p.root == *root) else {
             return;
         };
-        let threads: Vec<(String, String)> = project
+        let threads: Vec<_> = project
             .file
             .streams
             .iter()
@@ -812,14 +812,14 @@ impl Workspace {
                     .starting
                     .contains(&(root.clone(), s.id.clone()))
             })
-            .filter_map(|s| Some((s.thread_id.clone()?, s.backend.clone())))
+            .filter_map(|s| Some((s.thread_id.clone()?, s.backend.clone(), s.id.clone())))
             .collect();
-        for (thread, backend) in threads {
+        for (thread, backend, id) in threads {
             if self.transcripts.contains_key(&thread) || self.loading.contains(&thread) {
                 continue;
             }
             let ready = self.backend_ready(&backend);
-            if ready {
+            if ready && self.pilot_resume_slot(root, &id, Instant::now()) {
                 self.load_thread(thread, cx);
             }
         }
