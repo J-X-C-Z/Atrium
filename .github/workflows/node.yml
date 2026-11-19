@@ -1,10 +1,12 @@
-name: macOS backend acceptance
+name: Native backend acceptance
 
 "on":
   pull_request:
     paths:
       - 'crates/atrium-node/**'
       - 'crates/atrium-app/src/project.rs'
+      - 'crates/atrium-app/src/i18n.rs'
+      - 'crates/atrium-app/src/ui/project.rs'
       - 'crates/atrium-app/src/workspace.rs'
       - 'crates/atrium-app/src/workspace_ticker_test.rs'
       - 'crates/atrium-app/src/workspace_project.rs'
@@ -34,11 +36,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest]
+        os: [macos-latest, ubuntu-24.04, windows-2025]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
       CARGO_TERM_COLOR: always
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
       RUST_BACKTRACE: '1'
     steps:
       - name: Checkout without persistent credentials
@@ -48,15 +52,18 @@ jobs:
       - name: Official stable Rust toolchain
         run: rustup toolchain install stable --profile minimal --component clippy
       - name: Isolated demo configuration tests
+        if: runner.os != 'Windows'
         run: python3 scripts/test_prepare_node_demo.py
       - name: Strict native-node lint
         run: cargo +stable clippy -p atrium-node --all-targets --locked -- -D warnings
       - name: Workspace tests including scheduler and native protocol
+        if: runner.os == 'macOS'
         run: |
           cargo +stable test --workspace --locked --features atrium-app/workspace-ticker-test \
             -- --skip workspace::ticker_test::scheduler_tick_sends_notice_and_commits_rpc_acceptance \
             --skip workspace::ticker_test::scheduler_tick_holds_notice_on_rpc_error_and_does_not_retry
       - name: Headless Workspace ticker with mock RPC
+        if: runner.os == 'macOS'
         timeout-minutes: 12
         run: |
           set -o pipefail
@@ -68,6 +75,9 @@ jobs:
               "$test_name" -- --exact --nocapture | tee -a "$test_log"
             grep -Fx "test $test_name ... ok" "$test_log"
           done
+      - name: Headless backend and client tests on Linux and Windows
+        if: runner.os != 'macOS'
+        run: cargo +stable test --locked -p atrium-node -p agent-rpc -p atrium-core -p codex-client -p acp-client
       - name: Build scripted agents (no real accounts)
         run: cargo +stable build -p codex-client --bin mock-codex -p acp-client --bin mock-acp --locked
       - name: Native remote clients with scripted agents

@@ -1,4 +1,4 @@
-name: macOS node-only package acceptance
+name: Native node package acceptance
 
 "on":
   pull_request:
@@ -7,18 +7,28 @@ name: macOS node-only package acceptance
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'scripts/node-package.py'
+      - 'scripts/node-package-windows.ps1'
       - 'scripts/test_node_package.py'
       - 'scripts/node-portable-load.py'
       - 'scripts/test_node_portable_load.py'
       - '.github/workflows/node-package.yml'
   workflow_dispatch:
+    inputs:
+      paced-baseline:
+        description: Run the two paced macOS performance measurements
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   package:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
       CARGO_TERM_COLOR: always
@@ -88,6 +98,9 @@ jobs:
               print(json.dumps({"case": label, **{k: v for k, v in result.items()
                                if k != "samples"}}, indent=2))
           PY
+          if [[ '${{ runner.os }}' != 'macOS' || '${{ inputs.paced-baseline }}' != 'true' ]]; then
+            exit 0
+          fi
           # Same newly built archive, same fixed profile: two current-baseline
           # repeats, not an A/B or an optimization comparison.
           python3 - <<'PYBASELINE'
@@ -130,3 +143,17 @@ jobs:
           PYBASELINE
           # No uploads, service installation, accounts, signing or publication.
           # RUNNER_TEMP is runner-owned and removed by the hosted runner lifecycle.
+  package-windows:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - name: Checkout without persistent credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # official v4
+        with:
+          persist-credentials: false
+      - name: Official stable Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+      - name: Build and smoke the packaged Windows node
+        shell: pwsh
+        run: |
+          ./scripts/node-package-windows.ps1 -Output "$env:RUNNER_TEMP/atrium-node-windows-x64.zip"

@@ -24,7 +24,7 @@ impl Node {
             std::env::var_os("SystemRoot")
                 .map(std::path::PathBuf::from)
                 .unwrap()
-                .join(r"System32\WindowsPowerShell1.0\powershell.exe"),
+                .join(r"System32\WindowsPowerShell\v1.0\powershell.exe"),
             "-NoProfile",
             "-NonInteractive",
             "-Command",
@@ -48,7 +48,9 @@ impl Node {
         node
     }
     fn spawn_node(config: &std::path::Path) -> std::process::Child {
-        Command::new(env!("CARGO_BIN_EXE_atrium-node"))
+        let binary = std::env::var_os("ATRIUM_TEST_NODE_BINARY")
+            .unwrap_or_else(|| env!("CARGO_BIN_EXE_atrium-node").into());
+        Command::new(binary)
             .args(["serve", "--config"])
             .arg(config)
             .stdout(Stdio::piped())
