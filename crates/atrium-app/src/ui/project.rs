@@ -423,7 +423,13 @@ pub fn render_overview(
             let pilot = workspace.clone();
             let worktrees = project.file.worktrees;
             let trees = workspace.clone();
+            let previews = preview_menu_item(
+                workspace,
+                &project.root,
+                ws.settings.preview_commands.contains_key(&project.root),
+            );
             let menu = Menu::new()
+                .item(previews)
                 .item(
                     MenuItem::new(t("Run unattended, around the clock"))
                         .icon(if autopilot {
@@ -1545,6 +1551,63 @@ fn proposals_strip(workspace: &Entity<Workspace>, cx: &App) -> Option<AnyElement
         );
     }
     Some(strip.into_any_element())
+}
+
+fn preview_menu_item(
+    workspace: &Entity<Workspace>,
+    root: &std::path::Path,
+    enabled: bool,
+) -> MenuItem {
+    let workspace = workspace.clone();
+    let root = root.to_owned();
+    MenuItem::new(if enabled {
+        t("Disable local preview commands")
+    } else {
+        t("Review local preview commands…")
+    })
+    .on_click(move |window, cx| {
+        if enabled {
+            workspace.update(cx, |ws, cx| ws.set_preview_commands(&root, None, cx));
+            return;
+        }
+        let commands = match project::preview::launches(&root) {
+            Ok(entries) => entries,
+            Err(e) => {
+                workspace.update(cx, |_, cx| {
+                    cx.emit(crate::workspace::Notice::Error(tf(
+                        "Could not read preview commands: {error}",
+                        &[("error", &e)],
+                    )))
+                });
+                return;
+            }
+        };
+        let detail = format!(
+            "{}\n\n{}",
+            root.display(),
+            serde_json::to_string_pretty(&commands).unwrap()
+        );
+        let choice = window.prompt(
+            PromptLevel::Warning,
+            t("Allow these commands to run locally after lead phases?"),
+            Some(&detail),
+            &[
+                PromptButton::cancel(t("Cancel")),
+                PromptButton::new(t("Allow for this project")),
+            ],
+            cx,
+        );
+        let workspace = workspace.clone();
+        let root = root.clone();
+        cx.spawn(async move |cx| {
+            if matches!(choice.await, Ok(1)) {
+                workspace.update(cx, |ws, cx| {
+                    ws.set_preview_commands(&root, Some(commands), cx)
+                });
+            }
+        })
+        .detach();
+    })
 }
 
 /// "PR #12 · CI passing", linking to the pull request.

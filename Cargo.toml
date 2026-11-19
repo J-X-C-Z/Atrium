@@ -3,6 +3,7 @@ resolver = "3"
 exclude = ["third_party"]
 members = [
     "crates/atrium-node",
+    "crates/atrium-process",
     "crates/atrium-core",
     "crates/agent-rpc",
     "crates/codex-client",
@@ -33,6 +34,7 @@ base64 = "0.22"
 ureq = { version = "2", default-features = false, features = ["json"] }
 tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
 
+atrium-process = { path = "crates/atrium-process" }
 atrium-core = { path = "crates/atrium-core" }
 codex-client = { path = "crates/codex-client" }
 agent-rpc = { path = "crates/agent-rpc" }

@@ -30,6 +30,8 @@ use notice_dispatch::{NoticeSendResult, NoticeTarget, codex_notice_outcome};
 mod acp;
 #[path = "workspace_devices.rs"]
 mod devices;
+#[path = "workspace_preview.rs"]
+mod preview;
 #[path = "workspace_project.rs"]
 mod projects;
 pub use acp::{AcpAgent, AgentStatus, CODEX};
@@ -185,6 +187,7 @@ pub struct Workspace {
     pub room: Room,
     _atrium_poll: Option<Task<()>>,
     project_schedule: projects::ScheduleState,
+    previews: HashMap<PathBuf, preview::ProjectPreviews>,
     /// Other devices of the tailnet that run `atrium-node`.
     pub devices: Vec<Device>,
     pub discovering: bool,
@@ -265,6 +268,7 @@ impl Workspace {
             room: Room::Chats,
             _atrium_poll: None,
             project_schedule: projects::ScheduleState::default(),
+            previews: HashMap::new(),
             devices: Vec::new(),
             discovering: false,
             remote_dirs: HashMap::new(),

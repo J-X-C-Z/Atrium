@@ -50,6 +50,8 @@ pub struct Settings {
     pub hidden_sessions: Vec<String>,
     /// Project folders, in the order they were added.
     pub projects: Vec<PathBuf>,
+    /// Launch configurations explicitly approved on this device, keyed by project.
+    pub preview_commands: std::collections::HashMap<PathBuf, Vec<atrium_project::preview::Launch>>,
     /// The project the user was in, to come back to it.
     pub active_project: Option<PathBuf>,
     /// Nodes added by address, besides those found on the tailnet.
@@ -175,6 +177,7 @@ mod tests {
         let settings: Settings = serde_json::from_str(r#"{"cwd": "/x", "model": "m"}"#).unwrap();
         assert_eq!(settings.mode, AccessMode::Auto);
         assert_eq!(settings.theme, ThemePref::System);
+        assert!(settings.preview_commands.is_empty());
     }
 }
 

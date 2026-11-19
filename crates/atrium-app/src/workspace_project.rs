@@ -265,6 +265,11 @@ impl BackgroundDispatch {
 
 impl Workspace {
     pub(super) fn init_projects(&mut self, cx: &mut Context<Self>) {
+        cx.on_app_quit(|ws, _| {
+            ws.previews.clear();
+            async {}
+        })
+        .detach();
         let roots = self.settings.projects.clone();
         for root in roots {
             match Project::open(&root) {
@@ -330,6 +335,12 @@ impl Workspace {
             let Some(project) = self.projects.iter().find(|p| p.root == root) else {
                 continue;
             };
+            if let Some(approved) = self.settings.preview_commands.get(&root) {
+                self.previews
+                    .entry(root.clone())
+                    .or_default()
+                    .tick(project, approved, cx);
+            }
             let seen = self
                 .project_schedule
                 .seen
@@ -711,6 +722,8 @@ impl Workspace {
 
     /// Forgets a project here. Its folder and atrium stay as they are.
     pub fn remove_project(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        self.previews.remove(&root);
+        self.settings.preview_commands.remove(&root);
         self.projects.retain(|p| p.root != root);
         self.settings.projects.retain(|p| *p != root);
         if self.project_root().as_ref() == Some(&root) {

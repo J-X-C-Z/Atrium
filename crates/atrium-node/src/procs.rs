@@ -744,26 +744,7 @@ async fn exited_unreaped(pid: u32) -> std::io::Result<()> {
 }
 
 #[cfg(unix)]
-fn probe_owned_exit(pid: u32) -> std::io::Result<bool> {
-    loop {
-        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-        let rc = unsafe {
-            libc::waitid(
-                libc::P_PID,
-                pid as libc::id_t,
-                &mut info,
-                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-            )
-        };
-        if rc == 0 {
-            return Ok(unsafe { info.si_pid() } == pid as libc::pid_t);
-        }
-        let error = std::io::Error::last_os_error();
-        if error.kind() != std::io::ErrorKind::Interrupted {
-            return Err(error);
-        }
-    }
-}
+use atrium_process::probe_owned_exit;
 
 #[cfg(unix)]
 async fn wait_owned_group(

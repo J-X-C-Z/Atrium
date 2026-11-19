@@ -292,7 +292,7 @@ impl Project {
         let finished_phase = (!was_done && phase.done()).then(|| phase.title.clone());
         if let (Some(title), Some(parent)) = (&finished_phase, &own.parent) {
             let phases_done = task.phases.iter().filter(|p| p.done()).count();
-            self.post(
+            self.post_at(
                 me,
                 vec![parent.clone()],
                 &format!(
@@ -300,6 +300,7 @@ impl Project {
                     task.phases.len(),
                     task.rel_path()
                 ),
+                jiff::Timestamp::now().to_string(),
             )?;
         }
         Ok(Ticked {

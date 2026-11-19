@@ -28,6 +28,7 @@ mod git;
 pub mod mcp;
 pub mod notice_delivery;
 pub mod pool;
+pub mod preview;
 pub mod skill;
 pub mod worktrees;
 
@@ -1230,8 +1231,12 @@ impl Project {
 
     /// Appends a notice and reads it back.
     pub fn post(&mut self, from: &str, to: Vec<String>, text: &str) -> Result<()> {
+        self.post_at(from, to, text, now_label())
+    }
+
+    fn post_at(&mut self, from: &str, to: Vec<String>, text: &str, at: String) -> Result<()> {
         let notice = ProjectNotice {
-            at: now_label(),
+            at,
             from: from.to_string(),
             to,
             text: text.trim().to_string(),
