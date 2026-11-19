@@ -470,8 +470,10 @@ fn instance_identity_detects_restart_without_replaying_queued_input() {
     wait_for(&link.state, |s| matches!(s, LinkState::Reconnecting { .. }));
     link.writer.write_all(b"must-not-replay\n").unwrap();
     n.restart();
+    // Observe the new listener on a fresh HTTP connection after the forced kill.
+    let restarted = NodeClient::new(&n.url, Some("test-only-token".into()));
     assert_ne!(
-        client.info().unwrap().instance_id.as_deref(),
+        restarted.info().unwrap().instance_id.as_deref(),
         Some(instance.as_str())
     );
     wait_for(
@@ -484,7 +486,7 @@ fn instance_identity_detects_restart_without_replaying_queued_input() {
     );
     assert!(link.writer.write_all(b"closed\n").is_err());
     assert!(
-        client.procs(None).unwrap().is_empty(),
+        restarted.procs(None).unwrap().is_empty(),
         "no commands replayed on restart"
     );
     refused(
@@ -493,7 +495,7 @@ fn instance_identity_detects_restart_without_replaying_queued_input() {
         "node_restarted",
     );
     refused(ws_request(&n, &p.id, None, true), 404, "not_found");
-    // Fresh metadata must not overwrite the original proc pin.
+    // A new attachment on the original client must still use the original proc pin.
     let retry = client.attach(&p.id, 0);
     wait_for(
         &retry.state,
@@ -562,7 +564,8 @@ async fn restart_closes_rpc_waiters_and_discards_disconnected_requests() {
     assert!(futures::poll!(queued_two.as_mut()).is_pending());
 
     node.restart();
-    assert_ne!(client.info().unwrap().instance_id, original_instance);
+    let restarted = NodeClient::new(&node.url, Some("test-only-token".into()));
+    assert_ne!(restarted.info().unwrap().instance_id, original_instance);
     state_matches(
         &state,
         |s| matches!(s, LinkState::Gone(why) if why.contains("node restarted")),
@@ -598,7 +601,7 @@ async fn restart_closes_rpc_waiters_and_discards_disconnected_requests() {
         Err(RpcError::Closed)
     );
     assert!(
-        client.procs(None).unwrap().is_empty(),
+        restarted.procs(None).unwrap().is_empty(),
         "restart must not recreate a process or execute queued requests"
     );
     #[cfg(windows)]

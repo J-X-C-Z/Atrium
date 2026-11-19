@@ -188,17 +188,14 @@ pub async fn login_path() -> String {
 }
 fn executable(p: &Path) -> bool {
     let Ok(m) = p.metadata() else { return false };
-    if !m.is_file() {
-        return false;
-    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        m.permissions().mode() & 0o111 != 0
+        m.is_file() && m.permissions().mode() & 0o111 != 0
     }
     #[cfg(not(unix))]
     {
-        true
+        m.is_file()
     }
 }
 #[cfg(not(windows))]
