@@ -24,6 +24,9 @@ impl Drop for Fixture {
 
 #[gpui::test(iterations = 1)]
 fn scheduler_tick_sends_notice_and_commits_rpc_acceptance(cx: &mut TestAppContext) {
+    // This fixture deliberately combines a virtual GPUI timer with real
+    // socket I/O: the RPC reader thread wakes the foreground future.
+    cx.executor().allow_parking();
     let fixture = Fixture(
         std::env::temp_dir().join(format!("atrium-workspace-ticker-{}", uuid::Uuid::new_v4())),
     );
