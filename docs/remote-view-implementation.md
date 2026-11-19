@@ -47,6 +47,33 @@ serve a placeholder `index.html` that lists the projects from
 from the same data the overview uses (`stream_views`, `Project::pool`,
 `Task`), so nothing new is computed.
 
+## The app
+
+The phone side ships as an app, not just a web page. The screens are
+designed in the canvas "Atrium 手机 App": connect, projects, project
+progress, lead, needs-you inbox, conversation and notices.
+
+- **One UI, two shells.** The UI side builds the screens as a web app
+  against the API above. It is served at `/` for any browser and wrapped as
+  a native app with **Tauri 2** (iOS and Android; Rust, like the rest of
+  Atrium). The shell adds what a page cannot do:
+  - find computers on the tailnet (`/api/projects` on each peer that
+    `tailscale status --json` lists, port 7879);
+  - remember the chosen computer;
+  - background refresh;
+  - notifications.
+- **Notifications.** A phone app in the background cannot hold the event
+  stream open. When something needs the user (an approval, a question, a
+  lead finished, a failure loop), the server also sends a push. Default:
+  [ntfy](https://ntfy.sh)-compatible, to a topic the user sets (self-hosted
+  ntfy keeps it off third-party servers). The payload is a title and the
+  project and stream names only, never code or commands. Tapping it opens
+  the matching screen through `atrium://project/<ix>/stream/<id>`. Add
+  `Settings.push_topic` and send pushes from the same place as the desktop
+  notifications (`alerts.rs`).
+- **Answering from the lock screen** (later): approvals as actionable
+  notifications that POST `/api/approvals` through the app.
+
 ## Tests
 
 1. The snapshot of the demo fixture (`.atrium` with a controller, leads and a
