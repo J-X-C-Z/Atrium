@@ -903,7 +903,14 @@ enum ConnectError {
 }
 
 /// The Tailscale CLI, where the app or a package put it.
-fn tailscale_binary() -> Option<std::path::PathBuf> {
+pub fn tailscale_binary() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    if let Some(path) = std::env::var_os("ProgramFiles")
+        .map(|dir| std::path::PathBuf::from(dir).join("Tailscale/tailscale.exe"))
+        .filter(|path| path.is_file())
+    {
+        return Some(path);
+    }
     crate::process::which("tailscale").or_else(|| {
         [
             "/Applications/Tailscale.app/Contents/MacOS/Tailscale",

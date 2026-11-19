@@ -1,0 +1,11 @@
+<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Atrium</title><h1>Atrium</h1><ul id="projects"></ul>
+<script>
+fetch('/api/projects').then(r => r.json()).then(projects => {
+  for (const project of projects) {
+    const row = document.createElement('li');
+    row.textContent = project.name;
+    document.querySelector('#projects').append(row);
+  }
+});
+</script>

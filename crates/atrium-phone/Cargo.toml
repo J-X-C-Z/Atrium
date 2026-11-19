@@ -1,0 +1,19 @@
+[package]
+name = "atrium-phone"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+agent-rpc.workspace = true
+atrium-project.workspace = true
+atrium-core.workspace = true
+ureq = { workspace = true, features = ["tls"] }
+url = "2"
+axum = "0.8"
+futures.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { version = "1", features = ["net", "process", "rt", "sync", "time", "macros"] }

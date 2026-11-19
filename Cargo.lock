@@ -569,6 +569,7 @@ dependencies = [
  "agent-rpc",
  "anyhow",
  "atrium-core",
+ "atrium-phone",
  "atrium-project",
  "codex-client",
  "dirs 6.0.0",
@@ -625,6 +626,23 @@ dependencies = [
  "anyhow",
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "atrium-phone"
+version = "0.1.0"
+dependencies = [
+ "agent-rpc",
+ "atrium-core",
+ "atrium-project",
+ "axum",
+ "futures",
+ "log",
+ "serde",
+ "serde_json",
+ "tokio",
+ "ureq",
+ "url",
 ]
 
 [[package]]
@@ -6763,6 +6781,7 @@ version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -8433,9 +8452,12 @@ dependencies = [
  "base64 0.22.1",
  "log",
  "once_cell",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "url",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -8894,6 +8916,24 @@ dependencies = [
  "phf_codegen 0.14.0",
  "string_cache 0.11.0",
  "string_cache_codegen 0.11.2",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "0.26.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
+dependencies = [
+ "webpki-roots 1.0.12",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "1.0.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7265c9301c16a8711c992c2d8da90ee77ef54b1ed51482d6dfeb00dc756b1297"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]
