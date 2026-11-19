@@ -9,6 +9,7 @@ mod i18n;
 use atrium_project as project;
 mod settings;
 mod skills;
+mod sleep_inhibitor;
 mod ui;
 mod workspace;
 

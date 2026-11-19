@@ -178,6 +178,8 @@ pub struct StreamView {
 #[derive(Default)]
 pub(super) struct ScheduleState {
     task_pool: pool::TaskPoolSchedule,
+    inhibitor: crate::sleep_inhibitor::SleepInhibitor,
+    inhibitor_failed: bool,
     cleaning: HashSet<(PathBuf, String)>,
     seen: HashMap<PathBuf, usize>,
     pending: HashSet<(PathBuf, String)>,
@@ -494,6 +496,7 @@ impl Workspace {
                 cx.notify();
             }
         }
+        self.update_sleep_request();
         let pending: Vec<_> = self.project_schedule.pending.iter().cloned().collect();
         for (root, stream) in pending {
             let key = (root.clone(), stream.clone());
@@ -514,6 +517,21 @@ impl Workspace {
                 self.project_schedule.pending.remove(&key);
                 self.project_schedule.last_wake.insert(key, Instant::now());
             }
+        }
+    }
+
+    fn update_sleep_request(&mut self) {
+        let needed = self
+            .projects
+            .iter()
+            .any(|p| p.file.autopilot.on && p.file.streams.iter().any(|s| p.has_work(s)));
+        match self.project_schedule.inhibitor.set_needed(needed) {
+            Ok(()) => self.project_schedule.inhibitor_failed = false,
+            Err(error) if !self.project_schedule.inhibitor_failed => {
+                log::warn!("could not inhibit idle sleep: {error}");
+                self.project_schedule.inhibitor_failed = true;
+            }
+            Err(_) => {}
         }
     }
 
@@ -1430,6 +1448,7 @@ impl Workspace {
             project.file.autopilot.on = on;
             let _ = project.save();
         }
+        self.update_sleep_request();
         cx.notify();
     }
 
