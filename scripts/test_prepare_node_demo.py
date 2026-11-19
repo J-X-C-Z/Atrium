@@ -45,9 +45,19 @@ class DemoTests(unittest.TestCase):
         self.assertEqual(len(token), 48)
         self.assertIn('token=' + json.dumps(token), config)
         self.assertNotIn(token, result.stdout + result.stderr)
-        self.assertEqual(settings[0]['cwd'], str(self.dest / 'work'))
+        self.assertEqual(settings[0]['cwd'], str((self.dest / 'work').resolve()))
         if os.name == 'posix':
             self.assertEqual(self.dest.stat().st_mode & 0o777, 0o700)
+
+    @unittest.skipUnless(os.name == 'posix', 'requires symlink fixture')
+    def test_symlinked_parent_uses_canonical_working_root(self):
+        alias = self.root / 'alias'
+        alias.symlink_to(self.root, target_is_directory=True)
+        self.dest = alias / 'canonical-demo'
+        result = self.run_helper()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        settings = json.loads((self.dest / 'home/.config/Atrium/settings.json').read_text())
+        self.assertEqual(settings['cwd'], str((self.root / 'canonical-demo/work').resolve()))
 
     def test_nonempty_destination_is_unchanged(self):
         self.dest.mkdir()
