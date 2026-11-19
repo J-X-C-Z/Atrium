@@ -806,18 +806,22 @@ impl Project {
         let Some(parent) = stream.parent.clone() else {
             return Ok(None);
         };
-        let Some(task) = self.task_of(&stream) else {
-            return Ok(None);
-        };
-        if !task.status.finished() {
-            return Ok(None);
-        }
-        let text = completion_text(&stream, task);
         if !self
             .notices
             .iter()
-            .any(|n| n.from == ATRIUM && n.to == [parent.clone()] && n.text == text)
+            .any(|notice| is_completion_receipt(notice, &stream))
         {
+            let Some(task) = self.task_of(&stream) else {
+                return Ok(None);
+            };
+            if !task.status.finished() {
+                return Ok(None);
+            }
+            let text = format!(
+                "{} {}",
+                completion_text(&stream, task),
+                completion_marker(&stream).expect("task and parent exist")
+            );
             self.post(ATRIUM, vec![parent.clone()], &text)?;
         }
         self.stream_mut(id)
@@ -876,6 +880,22 @@ impl Project {
     /// have been started by our launcher before its Workstream was saved.
     /// Never relaunch automatically: show a failed task and tell its owner.
     pub fn recover_unbound_tasks(&mut self) -> Result<Vec<String>> {
+        // A durable receipt may precede the reported flag and outlive its task
+        // file. Reconcile it before scanning tasks, otherwise archival hides it.
+        let receipts: Vec<_> = self
+            .file
+            .streams
+            .iter()
+            .filter(|s| !s.reported && self.notices.iter().any(|n| is_completion_receipt(n, s)))
+            .map(|s| s.id.clone())
+            .collect();
+        let mut parents = Vec::new();
+        for id in receipts {
+            if let Some(parent) = self.report_finished(&id)? {
+                parents.push(parent);
+            }
+        }
+
         let tasks: Vec<_> = self
             .tasks
             .iter()
@@ -900,7 +920,6 @@ impl Project {
             })
             .map(|s| s.id.clone())
             .collect();
-        let mut parents = Vec::new();
         for id in unstarted {
             if let Some(parent) = self.fail_start(
                 &id,
@@ -937,11 +956,9 @@ impl Project {
             .filter(|s| s.reported)
             .filter_map(|stream| {
                 let parent = stream.parent.as_ref()?;
-                let task = self.task_of(stream)?;
-                let text = completion_text(stream, task);
                 self.unread(parent)
                     .iter()
-                    .any(|n| n.from == ATRIUM && n.text == text)
+                    .any(|notice| is_completion_receipt(notice, stream))
                     .then(|| parent.clone())
             })
             .collect()
@@ -1230,6 +1247,51 @@ pub fn scope_label(scope: &[String]) -> String {
     }
 }
 
+// One workstream owns one task lifecycle. Do not include mutable
+// display name, task status or Result text in its persisted receipt identity.
+// This is single-writer crash/retry deduplication, not cross-process locking.
+fn completion_marker(stream: &Workstream) -> Option<String> {
+    let identity = serde_json::to_string(&(
+        &stream.id,
+        stream.created_at,
+        stream.task.as_ref()?,
+        stream.parent.as_ref()?,
+    ))
+    .expect("receipt identity contains only JSON primitives");
+    Some(format!("[atrium-completion:{identity}]"))
+}
+
+fn is_completion_receipt(notice: &ProjectNotice, stream: &Workstream) -> bool {
+    let Some(parent) = stream.parent.as_ref() else {
+        return false;
+    };
+    if notice.from != ATRIUM || notice.to != [parent.clone()] {
+        return false;
+    }
+    let Some(marker) = completion_marker(stream) else {
+        return false;
+    };
+    if notice.text.ends_with(&format!(" {marker}")) {
+        return true;
+    }
+    // Marker-like text inside a legacy Result is ordinary prose. A different
+    // new marker cannot pass the legacy matcher because it follows its suffix.
+    // Compatibility with receipts written before identity markers. Require
+    // the exact old sender, recipient, role, name, task path and trailing
+    // sentence; never treat an arbitrary mention of a task as its receipt.
+    let path = format!("{DIR}/tasks/{}.md", stream.task.as_ref().unwrap());
+    notice
+        .text
+        .ends_with(". Read its Result and review its changes.")
+        && ["finished", "could not finish"].iter().any(|verb| {
+            notice.text.starts_with(&format!(
+                "{} \"{}\" {verb} {path}: ",
+                stream.role.label(),
+                stream.name
+            ))
+        })
+}
+
 fn completion_text(stream: &Workstream, task: &Task) -> String {
     let verb = if task.status == TaskStatus::Done {
         "finished"
@@ -1396,6 +1458,22 @@ fn match_one(glob: &str, text: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn unique_root(label: &str) -> PathBuf {
+        use std::hash::{BuildHasher, Hasher};
+        for _ in 0..128 {
+            let random = std::collections::hash_map::RandomState::new()
+                .build_hasher()
+                .finish();
+            let path = std::env::temp_dir().join(format!("{label}-{random:016x}"));
+            match fs::create_dir(&path) {
+                Ok(()) => return path,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => panic!("create isolated fixture: {e}"),
+            }
+        }
+        panic!("could not allocate an isolated fixture");
+    }
+
     #[test]
     fn globs() {
         assert!(glob_match("web/**", "web/src/app.tsx"));
@@ -1440,7 +1518,7 @@ mod tests {
 
     #[test]
     fn a_project_round_trips_and_tracks_notices_and_crossings() {
-        let root = std::env::temp_dir().join(format!("atrium-test-{}", std::process::id()));
+        let root = unique_root("atrium-test");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let mut project = Project::open(&root).unwrap();
@@ -1530,7 +1608,7 @@ mod tests {
 
     #[test]
     fn tasks_start_agents_one_level_down_and_report_back() {
-        let root = std::env::temp_dir().join(format!("atrium-tasks-{}", std::process::id()));
+        let root = unique_root("atrium-tasks");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let mut project = Project::open(&root).unwrap();
@@ -1657,8 +1735,200 @@ mod tests {
         assert_eq!(task.body, "Own it.");
     }
     #[test]
+    fn receipt_identity_scopes_lifecycle_and_legacy_matching_is_exact() {
+        let mut worker = stream("worker", &[]);
+        worker.task = Some("lead/job".into());
+        worker.parent = Some("lead".into());
+        worker.thread_id = Some("session-1".into());
+        let task = Task::parse(
+            "lead",
+            "job",
+            "# Job\nstatus: done\n\n## Result\nFirst result",
+        );
+        let legacy = ProjectNotice {
+            at: String::new(),
+            from: ATRIUM.into(),
+            to: vec!["lead".into()],
+            text: completion_text(&worker, &task),
+        };
+        assert!(is_completion_receipt(&legacy, &worker));
+        let mut forged = legacy.clone();
+        forged.from = YOU.into();
+        assert!(!is_completion_receipt(&forged, &worker));
+        forged = legacy.clone();
+        forged.to.push("all".into());
+        assert!(!is_completion_receipt(&forged, &worker));
+        forged = legacy.clone();
+        forged.text = format!("A mention: {}", forged.text);
+        assert!(!is_completion_receipt(&forged, &worker));
+        let marked = ProjectNotice {
+            text: format!("{} {}", legacy.text, completion_marker(&worker).unwrap()),
+            ..legacy
+        };
+        assert!(is_completion_receipt(&marked, &worker));
+        worker.name = "Renamed".into();
+        assert!(is_completion_receipt(&marked, &worker));
+        worker.task = Some("lead/another-job".into());
+        assert!(!is_completion_receipt(&marked, &worker));
+        worker.task = Some("lead/job".into());
+        // Session binding can finish after a manually completed task; it is
+        // not a new task lifecycle and must not invalidate a persisted receipt.
+        worker.thread_id = None;
+        assert!(is_completion_receipt(&marked, &worker));
+        worker.thread_id = Some("session-2".into());
+        assert!(is_completion_receipt(&marked, &worker));
+        worker.created_at += 1;
+        assert!(!is_completion_receipt(&marked, &worker));
+    }
+
+    #[test]
+    fn receipt_after_failed_save_is_recovered_when_task_was_archived() {
+        let root = unique_root("atrium-partial-archive");
+        let mut p = Project::open(&root).unwrap();
+        p.file.streams.push(stream("lead", &[]));
+        let key = p
+            .add_task("lead", "job", "# Job\nstatus: done\n\n## Result\nFinished")
+            .unwrap();
+        let worker = p.stream_from_task(p.task(&key).unwrap(), "codex").unwrap();
+        let id = worker.id.clone();
+        p.file.streams.push(worker);
+        p.save().unwrap();
+        let path = root.join(p.task(&key).unwrap().rel_path());
+        let metadata = p.dir().join("project.json");
+        let backup = p.dir().join("project.backup");
+        fs::rename(&metadata, &backup).unwrap();
+        fs::create_dir(&metadata).unwrap();
+        assert!(p.report_finished(&id).is_err());
+        assert_eq!(p.notices.len(), 1);
+        fs::remove_dir(&metadata).unwrap();
+        fs::rename(&backup, &metadata).unwrap();
+        fs::remove_file(path).unwrap();
+        let mut p = Project::open(&root).unwrap();
+        assert_eq!(p.report_finished(&id).unwrap(), Some("lead".into()));
+        assert!(p.stream(&id).unwrap().reported);
+        assert_eq!(p.notices.len(), 1);
+        assert_eq!(p.pending_report_parents(), vec!["lead"]);
+        // Repeat the missing-flag boundary and exercise the actual startup hook.
+        p.stream_mut(&id).unwrap().reported = false;
+        p.save().unwrap();
+        let mut p = Project::open(&root).unwrap();
+        assert_eq!(p.recover_unbound_tasks().unwrap(), vec!["lead"]);
+        assert!(p.stream(&id).unwrap().reported);
+        assert_eq!(p.notices.len(), 1);
+        assert!(p.recover_unbound_tasks().unwrap().is_empty());
+        // With no receipt and no task, do not manufacture a new completion.
+        p.notices.clear();
+        p.stream_mut(&id).unwrap().reported = false;
+        assert!(p.report_finished(&id).unwrap().is_none());
+        assert!(!p.stream(&id).unwrap().reported);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_receipt_marker_text_in_result_is_not_a_new_identity() {
+        let root = unique_root("atrium-legacy-marker");
+        let mut p = Project::open(&root).unwrap();
+        p.file.streams.push(stream("lead", &[]));
+        let key = p
+            .add_task(
+                "lead",
+                "job",
+                "# Job\nstatus: done\n\n## Result\nDiscussed [atrium-completion:example] syntax",
+            )
+            .unwrap();
+        let task = p.task(&key).unwrap().clone();
+        let worker = p.stream_from_task(&task, "codex").unwrap();
+        let id = worker.id.clone();
+        let legacy_text = completion_text(&worker, &task);
+        p.file.streams.push(worker);
+        p.post(ATRIUM, vec!["lead".into()], &legacy_text).unwrap();
+        p.save().unwrap();
+        let mut p = Project::open(&root).unwrap();
+        assert_eq!(p.report_finished(&id).unwrap(), Some("lead".into()));
+        assert_eq!(
+            p.notices.len(),
+            1,
+            "marker mention in legacy Result must not defeat deduplication"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn completion_retry_after_failed_save_and_result_edit_is_idempotent() {
+        let root = unique_root("atrium-receipt-edit");
+        let mut p = Project::open(&root).unwrap();
+        p.file.streams.push(stream("lead", &[]));
+        let key = p
+            .add_task(
+                "lead",
+                "job",
+                "# Job\nstatus: done\n\n## Result\nFirst result",
+            )
+            .unwrap();
+        let worker = p.stream_from_task(p.task(&key).unwrap(), "codex").unwrap();
+        let id = worker.id.clone();
+        p.file.streams.push(worker);
+        p.save().unwrap();
+        let metadata = p.dir().join("project.json");
+        let backup = p.dir().join("project.backup");
+        fs::rename(&metadata, &backup).unwrap();
+        fs::create_dir(&metadata).unwrap();
+        assert!(p.report_finished(&id).is_err());
+        assert_eq!(p.notices.len(), 1);
+        fs::remove_dir(&metadata).unwrap();
+        fs::rename(&backup, &metadata).unwrap();
+        let task_path = root.join(p.task(&key).unwrap().rel_path());
+        fs::write(
+            &task_path,
+            "# Job\nstatus: done\n\n## Result\nRevised result",
+        )
+        .unwrap();
+        let mut p = Project::open(&root).unwrap();
+        assert!(p.report_finished(&id).unwrap().is_some());
+        assert_eq!(
+            p.notices.len(),
+            1,
+            "editing Result must not create a second completion receipt"
+        );
+        assert_eq!(p.pending_report_parents(), vec!["lead"]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unread_completion_survives_task_archival_and_stream_rename() {
+        let root = unique_root("atrium-receipt-archive");
+        let mut p = Project::open(&root).unwrap();
+        p.file.streams.push(stream("lead", &[]));
+        let key = p
+            .add_task("lead", "job", "# Job\nstatus: done\n\n## Result\nFinished")
+            .unwrap();
+        let worker = p.stream_from_task(p.task(&key).unwrap(), "codex").unwrap();
+        let id = worker.id.clone();
+        p.file.streams.push(worker);
+        p.report_finished(&id).unwrap();
+        fs::remove_file(root.join(p.task(&key).unwrap().rel_path())).unwrap();
+        p.stream_mut(&id).unwrap().name = "Renamed after completion".into();
+        p.save().unwrap();
+        let mut p = Project::open(&root).unwrap();
+        assert_eq!(
+            p.pending_report_parents(),
+            vec!["lead"],
+            "unread persisted receipt must not depend on its task still existing"
+        );
+        p.mark_read("lead");
+        p.save().unwrap();
+        assert!(
+            Project::open(&root)
+                .unwrap()
+                .pending_report_parents()
+                .is_empty()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn completion_receipt_survives_reload_and_partial_save() {
-        let root = std::env::temp_dir().join(format!("atrium-receipt-{}", std::process::id()));
+        let root = unique_root("atrium-receipt");
         let _ = fs::remove_dir_all(&root);
         let mut project = Project::open(&root).unwrap();
         project.file.streams.push(stream("lead", &[]));
@@ -1694,7 +1964,7 @@ mod tests {
 
     #[test]
     fn claiming_two_tasks_then_finishing_one_releases_a_slot() {
-        let root = std::env::temp_dir().join(format!("atrium-slots-{}", std::process::id()));
+        let root = unique_root("atrium-slots");
         let _ = fs::remove_dir_all(&root);
         let mut project = Project::open(&root).unwrap();
         project.file.max_workers = 2;
@@ -1725,8 +1995,7 @@ mod tests {
     }
     #[test]
     fn atomic_write_collision_never_removes_someone_elses_file() {
-        let root =
-            std::env::temp_dir().join(format!("atrium-write-collision-{}", std::process::id()));
+        let root = unique_root("atrium-write-collision");
         fs::create_dir_all(&root).unwrap();
         let path = root.join("document");
         let tmp = root.join("occupied.tmp");
@@ -1742,7 +2011,7 @@ mod tests {
     #[test]
     fn atomic_write_is_private_for_new_files_and_preserves_existing_permissions() {
         use std::os::unix::fs::PermissionsExt;
-        let root = std::env::temp_dir().join(format!("atrium-write-mode-{}", std::process::id()));
+        let root = unique_root("atrium-write-mode");
         fs::create_dir_all(&root).unwrap();
         let path = root.join("document");
         atomic_write_at(&path, b"new", &root.join("new.tmp")).unwrap();
@@ -1761,8 +2030,7 @@ mod tests {
 
     #[test]
     fn failed_metadata_save_does_not_lose_binding_or_completion_receipt() {
-        let root =
-            std::env::temp_dir().join(format!("atrium-metadata-failure-{}", std::process::id()));
+        let root = unique_root("atrium-metadata-failure");
         let mut p = Project::open(&root).unwrap();
         p.file.streams.push(stream("lead", &[]));
         let key = p.add_task("lead", "job", "# Job\n\nDo it").unwrap();
@@ -1799,7 +2067,7 @@ mod tests {
 
     #[test]
     fn unreadable_task_and_notice_never_replace_original_contents() {
-        let root = std::env::temp_dir().join(format!("atrium-read-failure-{}", std::process::id()));
+        let root = unique_root("atrium-read-failure");
         let mut p = Project::open(&root).unwrap();
         let key = p
             .add_task("lead", "job", "# Job\n\nImportant instructions")
@@ -1817,8 +2085,7 @@ mod tests {
 
     #[test]
     fn startup_failure_preserves_evidence_until_status_can_be_written() {
-        let root =
-            std::env::temp_dir().join(format!("atrium-start-failure-{}", std::process::id()));
+        let root = unique_root("atrium-start-failure");
         let mut p = Project::open(&root).unwrap();
         p.file.streams.push(stream("lead", &[]));
         let key = p
@@ -1853,7 +2120,7 @@ mod tests {
 
     #[test]
     fn restart_recovers_an_unbound_persisted_claim_without_relaunch() {
-        let root = std::env::temp_dir().join(format!("atrium-bound-claim-{}", std::process::id()));
+        let root = unique_root("atrium-bound-claim");
         let mut p = Project::open(&root).unwrap();
         p.file.streams.push(stream("lead", &[]));
         let key = p
@@ -1899,7 +2166,7 @@ mod tests {
 
     #[test]
     fn interrupted_unbound_claim_is_reported_not_relaunched() {
-        let root = std::env::temp_dir().join(format!("atrium-unbound-{}", std::process::id()));
+        let root = unique_root("atrium-unbound");
         let _ = fs::remove_dir_all(&root);
         let mut project = Project::open(&root).unwrap();
         project.file.streams.push(stream("lead", &[]));
