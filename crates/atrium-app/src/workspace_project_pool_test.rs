@@ -63,7 +63,7 @@ fn exercise(cx: &mut TestAppContext, backend: &str) {
     let root = fixture.0.clone();
     let peer = thread::spawn(move || serve(peer, &root));
     let reader = BufReader::new(client.try_clone().unwrap());
-    let workspace = cx.new(|cx| {
+    let workspace = cx.new(|cx: &mut gpui::Context<Workspace>| {
         let mut ws = Workspace::with_settings(Settings {
             projects: vec![fixture.0.clone()],
             quiet_notifications: true,
