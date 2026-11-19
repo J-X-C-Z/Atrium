@@ -23,7 +23,7 @@
 //! file asks for and tells the asker when it is done, so nobody polls.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -775,11 +775,19 @@ impl Project {
         } else {
             task.scope.clone()
         };
+        let task_key = task.key();
+        let failed_ids: HashSet<_> = self
+            .notices
+            .iter()
+            .filter_map(|notice| startup_failure(notice, &owner.id))
+            .filter_map(|(key, (id, _))| (key == task_key).then_some(id))
+            .collect();
+        let name = match role {
+            Role::Worker => format!("{}-{}", owner.id, task.id),
+            _ => task.id.clone(),
+        };
         Some(Workstream {
-            id: self.new_id(&match role {
-                Role::Worker => format!("{}-{}", owner.id, task.id),
-                _ => task.id.clone(),
-            }),
+            id: self.new_id_avoiding(&name, |id| failed_ids.contains(id)),
             name: task.title.clone(),
             backend: backend.to_string(),
             thread_id: None,
@@ -789,7 +797,7 @@ impl Project {
             created_at: jiff::Timestamp::now().as_second(),
             role,
             parent: Some(owner.id.clone()),
-            task: Some(task.key()),
+            task: Some(task_key),
             reported: false,
         })
     }
@@ -854,15 +862,11 @@ impl Project {
         let Some(stream) = self.stream(id).cloned() else {
             return Ok(None);
         };
+        if stream.thread_id.is_some() {
+            return Ok(None);
+        }
         if let (Some(task), Some(parent)) = (&stream.task, &stream.parent) {
-            let text = format!("Could not start an agent for {task}: {reason}");
-            if !self
-                .notices
-                .iter()
-                .any(|n| n.from == ATRIUM && n.to == [parent.clone()] && n.text == text)
-            {
-                self.post(ATRIUM, vec![parent.clone()], &text)?;
-            }
+            self.record_start_failure(parent, task, (&stream.id, stream.created_at), reason)?;
             if !self.task(task).is_some_and(|task| task.status.finished()) {
                 self.set_task_status(task, TaskStatus::Failed)?;
             }
@@ -874,6 +878,30 @@ impl Project {
             return Err(e);
         }
         Ok(stream.parent)
+    }
+
+    fn record_start_failure(
+        &mut self,
+        parent: &str,
+        task: &str,
+        claim: (&str, i64),
+        reason: &str,
+    ) -> Result<()> {
+        let marker = start_failure_marker(parent, task, claim);
+        let prefix = format!("Could not start an agent for {task}: ");
+        if !self.notices.iter().any(|notice| {
+            notice.from == ATRIUM
+                && notice.to == [parent]
+                && notice.text.starts_with(&prefix)
+                && notice.text.ends_with(&format!(" {marker}"))
+        }) {
+            self.post(
+                ATRIUM,
+                vec![parent.to_owned()],
+                &format!("{prefix}{reason} {marker}"),
+            )?;
+        }
+        Ok(())
     }
 
     /// Recover an interrupted pre-launch claim conservatively. No thread can
@@ -914,9 +942,20 @@ impl Project {
             .iter()
             .filter(|s| {
                 s.thread_id.is_none()
-                    && self
-                        .task_of(s)
-                        .is_some_and(|t| t.status == TaskStatus::Running)
+                    && self.task_of(s).is_some_and(|t| {
+                        t.status == TaskStatus::Running
+                            || (t.status == TaskStatus::Failed
+                                && s.parent.as_ref().is_some_and(|parent| {
+                                    self.notices.iter().any(|notice| {
+                                        startup_failure(notice, parent).is_some_and(
+                                            |(task, stream)| {
+                                                s.task.as_ref() == Some(&task)
+                                                    && stream == (s.id.clone(), s.created_at)
+                                            },
+                                        )
+                                    })
+                                }))
+                    })
             })
             .map(|s| s.id.clone())
             .collect();
@@ -948,9 +987,10 @@ impl Project {
     }
 
     /// A saved receipt may outlive the in-memory wake queue after restart.
-    /// Re-enqueue only completion notices not yet handed to their parent.
+    /// Re-enqueue only recognized scheduler receipts not yet handed over.
     pub fn pending_report_parents(&self) -> Vec<String> {
-        self.file
+        let mut parents: Vec<_> = self
+            .file
             .streams
             .iter()
             .filter(|s| s.reported)
@@ -961,7 +1001,25 @@ impl Project {
                     .any(|notice| is_completion_receipt(notice, stream))
                     .then(|| parent.clone())
             })
-            .collect()
+            .collect();
+        for parent in self
+            .file
+            .streams
+            .iter()
+            .filter(|s| s.role.child().is_some())
+        {
+            if !parents.contains(&parent.id)
+                && self.unread(&parent.id).iter().any(|notice| {
+                    startup_failure(notice, &parent.id).is_some_and(|(task, _)| {
+                        self.task(&task)
+                            .is_none_or(|task| task.status == TaskStatus::Failed)
+                    })
+                })
+            {
+                parents.push(parent.id.clone());
+            }
+        }
+        parents
     }
 
     /// Appends a notice and reads it back.
@@ -1003,13 +1061,17 @@ impl Project {
 
     /// A new workstream id from its name, unique in the project.
     pub fn new_id(&self, name: &str) -> String {
+        self.new_id_avoiding(name, |_| false)
+    }
+
+    fn new_id_avoiding(&self, name: &str, unavailable: impl Fn(&str) -> bool) -> String {
         let base = match slug(name) {
             Some(base) if base != "all" && base != ATRIUM && base != YOU => base,
             _ => format!("stream-{}", self.file.streams.len() + 1),
         };
         let mut id = base.clone();
         let mut n = 2;
-        while self.stream(&id).is_some() {
+        while self.stream(&id).is_some() || unavailable(&id) {
             id = format!("{base}-{n}");
             n += 1;
         }
@@ -1306,6 +1368,32 @@ fn is_completion_receipt(notice: &ProjectNotice, stream: &Workstream) -> bool {
                 stream.name
             ))
         })
+}
+
+const START_FAILURE_TAG: &str = " [atrium-start-failure:";
+fn start_failure_marker(parent: &str, task: &str, claim: (&str, i64)) -> String {
+    let identity = serde_json::to_string(&(parent, task, claim))
+        .expect("startup failure identity contains only JSON primitives");
+    format!("[atrium-start-failure:{identity}]")
+}
+
+fn startup_failure(notice: &ProjectNotice, parent: &str) -> Option<(String, (String, i64))> {
+    if notice.from != ATRIUM || notice.to != [parent] {
+        return None;
+    }
+    let (text, marker) = notice.text.rsplit_once(START_FAILURE_TAG)?;
+    let (recipient, task, stream): (String, String, (String, i64)) =
+        serde_json::from_str(marker.strip_suffix(']')?).ok()?;
+    let (owner, id) = task.split_once('/')?;
+    if recipient != parent
+        || owner != parent
+        || id.is_empty()
+        || id.contains('/')
+        || !text.starts_with(&format!("Could not start an agent for {task}: "))
+    {
+        return None;
+    }
+    Some((task, stream))
 }
 
 fn completion_text(stream: &Workstream, task: &Task) -> String {
@@ -2096,6 +2184,160 @@ mod tests {
         fs::write(&notices, [0xff, 0xfe]).unwrap();
         assert!(p.post(ATRIUM, vec!["lead".into()], "finished").is_err());
         assert_eq!(fs::read(&notices).unwrap(), vec![0xff, 0xfe]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn startup_failure_wake_survives_restart_and_archival_until_read() {
+        let root = unique_root("atrium-start-wake");
+        let mut p = Project::open(&root).unwrap();
+        p.file.streams.push(stream("lead", &[]));
+        let key = p.add_task("lead", "job", "# Job").unwrap();
+        let worker = p.stream_from_task(p.task(&key).unwrap(), "codex").unwrap();
+        let id = worker.id.clone();
+        let task_path = root.join(p.task(&key).unwrap().rel_path());
+        p.set_task_status(&key, TaskStatus::Running).unwrap();
+        p.file.streams.push(worker);
+        p.save().unwrap();
+        assert_eq!(
+            p.fail_start(&id, "startup refused").unwrap().as_deref(),
+            Some("lead")
+        );
+        assert!(p.stream(&id).is_none());
+        fs::remove_file(&task_path).unwrap();
+        let mut p = Project::open(&root).unwrap();
+        assert!(p.recover_unbound_tasks().unwrap().is_empty());
+        assert_eq!(p.pending_report_parents(), ["lead"]);
+        assert_eq!(p.unread("lead").len(), 1);
+        p.mark_read("lead");
+        p.save().unwrap();
+        assert!(
+            Project::open(&root)
+                .unwrap()
+                .pending_report_parents()
+                .is_empty()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn startup_failure_append_and_metadata_retries_preserve_evidence_and_binding() {
+        let root = unique_root("atrium-start-wake-retry");
+        let mut p = Project::open(&root).unwrap();
+        p.file.streams.push(stream("lead", &[]));
+        let key = p.add_task("lead", "job", "# Job").unwrap();
+        let worker = p.stream_from_task(p.task(&key).unwrap(), "codex").unwrap();
+        let id = worker.id.clone();
+        p.set_task_status(&key, TaskStatus::Running).unwrap();
+        p.file.streams.push(worker);
+        p.save().unwrap();
+        let notices = p.dir().join("notices.md");
+        let backup = p.dir().join("notices.backup");
+        fs::rename(&notices, &backup).unwrap();
+        fs::create_dir(&notices).unwrap();
+        assert!(p.fail_start(&id, "first attempt").is_err());
+        assert!(p.stream(&id).is_some());
+        assert_eq!(p.task(&key).unwrap().status, TaskStatus::Running);
+        fs::remove_dir(&notices).unwrap();
+        fs::rename(&backup, &notices).unwrap();
+
+        // Force final stream-metadata save failure after notice and Failed
+        // task are durable, then restart with the earlier metadata.
+        let metadata = p.dir().join("project.json");
+        let backup = p.dir().join("metadata.backup");
+        fs::rename(&metadata, &backup).unwrap();
+        fs::create_dir(&metadata).unwrap();
+        assert!(p.fail_start(&id, "retry reason").is_err());
+        assert!(p.stream(&id).is_some());
+        assert_eq!(p.task(&key).unwrap().status, TaskStatus::Failed);
+        fs::remove_dir(&metadata).unwrap();
+        fs::rename(&backup, &metadata).unwrap();
+        let mut p = Project::open(&root).unwrap();
+        assert_eq!(p.recover_unbound_tasks().unwrap(), ["lead"]);
+        assert!(p.stream(&id).is_none());
+        assert_eq!(p.notices.len(), 1);
+        assert_eq!(p.pending_report_parents(), ["lead"]);
+
+        let other = p.add_task("lead", "bound", "# Bound").unwrap();
+        let bound = p
+            .stream_from_task(p.task(&other).unwrap(), "codex")
+            .unwrap();
+        let bound_id = bound.id.clone();
+        p.set_task_status(&other, TaskStatus::Running).unwrap();
+        p.file.streams.push(bound);
+        p.bind_thread(&bound_id, "live-agent").unwrap();
+        assert!(p.fail_start(&bound_id, "stale refusal").unwrap().is_none());
+        assert!(p.recover_unbound_tasks().unwrap().is_empty());
+        assert_eq!(
+            p.stream(&bound_id).unwrap().thread_id.as_deref(),
+            Some("live-agent")
+        );
+        assert_eq!(p.task(&other).unwrap().status, TaskStatus::Running);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reopened_start_failure_gets_a_new_receipt_even_in_the_same_second() {
+        let root = unique_root("atrium-start-repeat");
+        let mut p = Project::open(&root).unwrap();
+        p.file.streams.push(stream("lead", &[]));
+        let key = p.add_task("lead", "job", "# Job").unwrap();
+        let first = p.stream_from_task(p.task(&key).unwrap(), "codex").unwrap();
+        let first_id = first.id.clone();
+        let when = first.created_at;
+        p.set_task_status(&key, TaskStatus::Running).unwrap();
+        p.file.streams.push(first);
+        p.save().unwrap();
+        assert!(p.fail_start(&first_id, "first refusal").unwrap().is_some());
+        p.mark_read("lead");
+        p.save().unwrap();
+        let mut p = Project::open(&root).unwrap();
+        p.set_task_status(&key, TaskStatus::Open).unwrap();
+        let mut second = p.stream_from_task(p.task(&key).unwrap(), "codex").unwrap();
+        second.created_at = when;
+        assert_ne!(second.id, first_id);
+        let second_id = second.id.clone();
+        p.set_task_status(&key, TaskStatus::Running).unwrap();
+        p.file.streams.push(second);
+        p.save().unwrap();
+        p.fail_start(&second_id, "second refusal").unwrap();
+        assert_eq!(p.notices.len(), 2);
+        assert_eq!(p.unread("lead").len(), 1);
+        assert_eq!(p.pending_report_parents(), ["lead"]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ordinary_and_mismatched_notices_do_not_become_startup_wakes() {
+        let root = unique_root("atrium-start-wake-foreign");
+        let mut p = Project::open(&root).unwrap();
+        p.file.streams.push(stream("lead", &[]));
+        let marker = start_failure_marker("lead", "lead/job", ("worker", 1));
+        p.post(
+            YOU,
+            vec!["lead".into()],
+            &format!("Could not start an agent for lead/job: prose {marker}"),
+        )
+        .unwrap();
+        p.post(
+            ATRIUM,
+            vec!["lead".into()],
+            "Could not start an agent for lead/job: legacy prose",
+        )
+        .unwrap();
+        p.post(
+            ATRIUM,
+            vec!["lead".into()],
+            &format!("Unrelated scheduler prose {marker}"),
+        )
+        .unwrap();
+        p.post(
+            ATRIUM,
+            vec!["all".into()],
+            &format!("Could not start an agent for lead/job: broadcast {marker}"),
+        )
+        .unwrap();
+        assert!(p.pending_report_parents().is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 
