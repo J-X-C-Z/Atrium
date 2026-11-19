@@ -18,6 +18,7 @@ use std::{
     net::TcpStream,
     sync::{
         Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError},
     },
     thread,
@@ -27,6 +28,39 @@ use std::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tungstenite::{Message, WebSocket, stream::MaybeTlsStream};
+
+#[path = "node_input.rs"]
+mod input;
+use input::{Budget, Credits, InputLine};
+
+struct OutputGate {
+    sender: Mutex<Option<Sender<Vec<u8>>>>,
+    terminal: AtomicBool,
+    state: Arc<Mutex<LinkState>>,
+}
+impl OutputGate {
+    fn stop(&self, reason: &str) {
+        self.terminal.store(true, Ordering::Release);
+        self.sender.lock().expect("output gate").take();
+        let mut state = self.state.lock().expect("link state");
+        if !matches!(*state, LinkState::Gone(_) | LinkState::Ended { .. }) {
+            *state = LinkState::Gone(reason.into());
+        }
+    }
+    fn send(&self, bytes: Vec<u8>) -> bool {
+        self.sender
+            .lock()
+            .expect("output gate")
+            .as_ref()
+            .is_some_and(|tx| tx.send(bytes).is_ok())
+    }
+}
+struct CloseOutput(Arc<OutputGate>);
+impl Drop for CloseOutput {
+    fn drop(&mut self) {
+        self.0.sender.lock().expect("output gate").take();
+    }
+}
 
 /// The node protocol version this client speaks.
 pub const PROTOCOL: u32 = 1;
@@ -149,6 +183,7 @@ pub struct NodeClient {
     token: Option<String>,
     agent: ureq::Agent,
     instances: Arc<Mutex<VecDeque<(String, String)>>>,
+    input_budget: Arc<Budget>,
 }
 
 impl std::fmt::Debug for NodeClient {
@@ -182,6 +217,7 @@ impl NodeClient {
             token: token.filter(|t| !t.is_empty()),
             agent,
             instances: Arc::new(Mutex::new(VecDeque::new())),
+            input_budget: Budget::new(input::CLIENT_BYTES, input::CLIENT_SLOTS),
         }
     }
 
@@ -331,9 +367,33 @@ impl NodeClient {
     /// Optionally pin a saved lifecycle identity, without persisting work content.
     /// Missing identities keep legacy-server behavior until a handshake supplies one.
     pub fn attach_with_instance(&self, id: &str, after: i64, expected: Option<&str>) -> Attachment {
+        self.attach_with_limits(
+            id,
+            after,
+            expected,
+            input::LINK_BYTES,
+            input::LINK_SLOTS,
+            input::MAX_LINE,
+        )
+    }
+
+    fn attach_with_limits(
+        &self,
+        id: &str,
+        after: i64,
+        expected: Option<&str>,
+        bytes: usize,
+        slots: usize,
+        max_line: usize,
+    ) -> Attachment {
         let (to_reader, from_link) = mpsc::channel::<Vec<u8>>();
-        let (to_link, outgoing) = mpsc::channel::<String>();
+        let (to_link, outgoing) = mpsc::channel::<InputLine>();
         let state = Arc::new(Mutex::new(LinkState::Connecting));
+        let output = Arc::new(OutputGate {
+            sender: Mutex::new(Some(to_reader)),
+            terminal: AtomicBool::new(false),
+            state: state.clone(),
+        });
         let link = Link {
             ws_base: self.base.replacen("http", "ws", 1),
             id: id.to_string(),
@@ -341,13 +401,15 @@ impl NodeClient {
             last: after,
             instance: expected.map(str::to_owned),
             state: state.clone(),
+            output: output.clone(),
         };
         let peer = self.base.clone();
         let spawned = thread::Builder::new()
             .name(format!("node-{id}"))
-            .spawn(move || link.run(to_reader, outgoing));
+            .spawn(move || link.run(outgoing));
         if let Err(error) = spawned {
             log::warn!("could not start the link to {peer}: {error}");
+            output.stop("could not start attachment worker");
         }
         Attachment {
             reader: BufReader::new(PipeReader {
@@ -356,8 +418,11 @@ impl NodeClient {
                 at: 0,
             }),
             writer: LineWriter {
-                outgoing: to_link,
+                outgoing: Some(to_link),
                 pending: Vec::new(),
+                credits: Credits::empty(Budget::new(bytes, slots), self.input_budget.clone()),
+                output,
+                max_line,
             },
             state,
         }
@@ -454,25 +519,107 @@ impl Read for PipeReader {
 
 /// Input: whole lines go to the link as they are completed.
 pub struct LineWriter {
-    outgoing: Sender<String>,
+    outgoing: Option<Sender<InputLine>>,
     pending: Vec<u8>,
+    credits: Credits,
+    output: Arc<OutputGate>,
+    max_line: usize,
 }
-
+impl LineWriter {
+    fn refused(&mut self) -> io::Error {
+        self.output.stop(
+            "local input admission refused; prior delivery may be uncertain; no automatic replay",
+        );
+        // Dropping the only writer sender also wakes a backoff recv_timeout.
+        self.outgoing.take();
+        self.pending = Vec::new();
+        self.credits.clear();
+        io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "local input admission closed the attachment; prior input delivery may be uncertain",
+        )
+    }
+}
 impl Write for LineWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.output.terminal.load(Ordering::Acquire) {
+            return Err(self.refused());
+        }
+        // Reject oversized calls before scanning or allocating their payload.
+        let Some(raw_credit) = self.credits.acquire(bytes.len(), 0) else {
+            return Err(self.refused());
+        };
+        let mut length = self.pending.len();
+        let mut completed = 0usize;
+        for byte in bytes {
+            if *byte == b'\n' {
+                completed += 1;
+                length = 0;
+            } else {
+                length += 1;
+                if length > self.max_line {
+                    return Err(self.refused());
+                }
+            }
+        }
+        let slots = completed + usize::from(length > 0) - usize::from(!self.pending.is_empty());
+        let Some(credit) = self.credits.acquire(0, slots) else {
+            return Err(self.refused());
+        };
+        self.credits.merge(raw_credit);
+        self.credits.merge(credit);
         self.pending.extend_from_slice(bytes);
-        while let Some(end) = self.pending.iter().position(|b| *b == b'\n') {
-            let line: Vec<u8> = self.pending.drain(..=end).collect();
-            let line = String::from_utf8_lossy(&line[..line.len() - 1]).into_owned();
-            self.outgoing
-                .send(line)
-                .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "the link is closed"))?;
+        // Compute lossy UTF-8 expansion for every completed line before any
+        // new line from this call enters the channel.
+        let mut extra = 0usize;
+        let mut rest = self.pending.as_slice();
+        while let Some(end) = rest.iter().position(|b| *b == b'\n') {
+            let decoded = input::lossy_len(&rest[..end]);
+            if decoded > self.max_line {
+                return Err(self.refused());
+            }
+            extra += decoded - end;
+            rest = &rest[end + 1..];
+        }
+        let Some(credit) = self.credits.acquire(extra, 0) else {
+            return Err(self.refused());
+        };
+        self.credits.merge(credit);
+        if completed > 0 {
+            // Do not retain a high-water Vec allocation after credits move into
+            // queued strings. Keep only a fresh allocation for the partial tail.
+            let raw = std::mem::take(&mut self.pending);
+            let mut start = 0;
+            for end in raw
+                .iter()
+                .enumerate()
+                .filter_map(|(i, b)| (*b == b'\n').then_some(i))
+            {
+                let line = String::from_utf8_lossy(&raw[start..end]).into_owned();
+                let credits = self.credits.split(line.len() + 1, 1);
+                if self.output.terminal.load(Ordering::Acquire)
+                    || self.outgoing.as_ref().is_none_or(|tx| {
+                        tx.send(InputLine {
+                            line,
+                            _credits: credits,
+                        })
+                        .is_err()
+                    })
+                {
+                    return Err(self.refused());
+                }
+                start = end + 1;
+            }
+            self.pending = raw[start..].to_vec();
         }
         Ok(bytes.len())
     }
-
     fn flush(&mut self) -> io::Result<()> {
-        Ok(())
+        if self.output.terminal.load(Ordering::Acquire) {
+            Err(self.refused())
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -486,6 +633,7 @@ struct Link {
     last: i64,
     instance: Option<String>,
     state: Arc<Mutex<LinkState>>,
+    output: Arc<OutputGate>,
 }
 
 /// How a connected stretch ended.
@@ -498,19 +646,29 @@ enum Stop {
 
 impl Link {
     fn set(&self, state: LinkState) {
-        *self.state.lock().expect("link state") = state;
+        let mut current = self.state.lock().expect("link state");
+        if !self.output.terminal.load(Ordering::Acquire) {
+            *current = state;
+        }
     }
 
-    fn run(mut self, to_reader: Sender<Vec<u8>>, outgoing: Receiver<String>) {
+    fn run(mut self, outgoing: Receiver<InputLine>) {
+        let _close_output = CloseOutput(self.output.clone());
         let mut attempt = 0u32;
         // Lines written while disconnected, sent once back.
-        let mut queued: Vec<String> = Vec::new();
+        let mut queued: Vec<InputLine> = Vec::new();
         loop {
+            if self.output.terminal.load(Ordering::Acquire) {
+                return;
+            }
             match self.connect() {
                 Ok(mut socket) => {
+                    if self.output.terminal.load(Ordering::Acquire) {
+                        return;
+                    }
                     attempt = 0;
                     self.set(LinkState::Connected);
-                    match self.pump(&mut socket, &to_reader, &outgoing, &mut queued) {
+                    match self.pump(&mut socket, &outgoing, &mut queued) {
                         Stop::Done => {
                             let _ = socket.close(None);
                             return;
@@ -530,6 +688,9 @@ impl Link {
                     attempt += 1;
                     self.set(LinkState::Reconnecting { attempt, error });
                 }
+            }
+            if self.output.terminal.load(Ordering::Acquire) {
+                return;
             }
             // Back off, still taking lines to send later; stop when the
             // client let go.
@@ -626,22 +787,32 @@ impl Link {
     fn pump(
         &mut self,
         socket: &mut Socket,
-        to_reader: &Sender<Vec<u8>>,
-        outgoing: &Receiver<String>,
-        queued: &mut Vec<String>,
+        outgoing: &Receiver<InputLine>,
+        queued: &mut Vec<InputLine>,
     ) -> Stop {
         for line in queued.drain(..) {
-            if let Err(error) = socket.send(Message::text(json!({ "line": line }).to_string())) {
+            if self.output.terminal.load(Ordering::Acquire) {
+                return Stop::Done;
+            }
+            if let Err(error) =
+                socket.send(Message::text(json!({ "line": &line.line }).to_string()))
+            {
                 return Stop::Lost(error.to_string());
             }
         }
         loop {
+            if self.output.terminal.load(Ordering::Acquire) {
+                return Stop::Done;
+            }
             // Send what the client wrote.
             loop {
                 match outgoing.try_recv() {
                     Ok(line) => {
+                        if self.output.terminal.load(Ordering::Acquire) {
+                            return Stop::Done;
+                        }
                         if let Err(error) =
-                            socket.send(Message::text(json!({ "line": line }).to_string()))
+                            socket.send(Message::text(json!({ "line": &line.line }).to_string()))
                         {
                             queued.push(line);
                             return Stop::Lost(error.to_string());
@@ -669,7 +840,7 @@ impl Link {
                     if let Some(line) = frame["line"].as_str() {
                         let mut bytes = line.as_bytes().to_vec();
                         bytes.push(b'\n');
-                        if to_reader.send(bytes).is_err() {
+                        if !self.output.send(bytes) {
                             self.set(LinkState::Gone("closed".into()));
                             return Stop::Done;
                         }
@@ -820,6 +991,345 @@ pub fn find_nodes(peers: &[Peer], token: Option<String>) -> Vec<(NodeClient, Nod
 mod tests {
     use super::*;
 
+    fn quota_deadline(work: impl FnOnce() + Send + 'static) {
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            work();
+            let _ = tx.send(());
+        });
+        rx.recv_timeout(Duration::from_secs(6))
+            .expect("quota test deadline");
+    }
+    fn quota_writer(
+        bytes: usize,
+        slots: usize,
+        max_line: usize,
+    ) -> (LineWriter, Receiver<InputLine>, Arc<Budget>) {
+        let shared = Budget::new(bytes, slots);
+        let (tx, rx) = mpsc::channel();
+        (
+            LineWriter {
+                outgoing: Some(tx),
+                pending: Vec::new(),
+                credits: Credits::empty(Budget::new(bytes, slots), shared.clone()),
+                output: test_gate(Arc::new(Mutex::new(LinkState::Connecting))),
+                max_line,
+            },
+            rx,
+            shared,
+        )
+    }
+
+    #[test]
+    fn input_credits_cover_fragments_channel_and_dequeued_ownership() {
+        quota_deadline(|| {
+            let (mut writer, rx, budget) = quota_writer(32, 3, 16);
+            writer.write_all(b"ab").unwrap();
+            assert_eq!(budget.bytes.load(Ordering::Acquire), 2);
+            writer.write_all(b"c\nd\n").unwrap();
+            let first = rx.recv().unwrap();
+            assert_eq!(first.line, "abc");
+            assert_eq!(budget.bytes.load(Ordering::Acquire), 6);
+            drop(first);
+            assert_eq!(budget.bytes.load(Ordering::Acquire), 2);
+            writer.write_all(b"partial").unwrap();
+            assert_eq!(budget.slots.load(Ordering::Acquire), 2);
+            drop(writer);
+            assert_eq!(budget.bytes.load(Ordering::Acquire), 2);
+            drop(rx);
+            assert_eq!(budget.bytes.load(Ordering::Acquire), 0);
+            assert_eq!(budget.slots.load(Ordering::Acquire), 0);
+        });
+    }
+
+    #[test]
+    fn whole_write_preflight_refuses_multiline_fragments_and_utf8_expansion() {
+        quota_deadline(|| {
+            let (mut writer, rx, budget) = quota_writer(8, 2, 8);
+            assert!(writer.write_all(b"one\ntwo\nthree\n").is_err());
+            assert!(rx.try_recv().is_err());
+            assert_eq!(budget.bytes.load(Ordering::Acquire), 0);
+            assert!(writer.write_all(b"suffix\n").is_err());
+            assert!(writer.flush().is_err());
+            let (mut writer, rx, budget) = quota_writer(32, 2, 4);
+            writer.write_all(b"1234").unwrap();
+            assert!(writer.write_all(b"5\n").is_err());
+            assert!(rx.try_recv().is_err());
+            assert_eq!(budget.bytes.load(Ordering::Acquire), 0);
+            let (mut writer, rx, budget) = quota_writer(8, 2, 8);
+            assert!(writer.write_all(b"ok\n\xff\xff\n").is_err()); // 7 raw, 10 expanded: no first line escapes
+            assert!(rx.try_recv().is_err());
+            assert_eq!(budget.bytes.load(Ordering::Acquire), 0);
+            let (mut writer, rx, budget) = quota_writer(16, 2, 8);
+            writer.write_all(b"\xe2").unwrap();
+            writer.write_all(b"\x82\xac\n\xff\n").unwrap();
+            let one = rx.recv().unwrap();
+            let two = rx.recv().unwrap();
+            assert_eq!(one.line, "€");
+            assert_eq!(two.line, "�");
+            assert_eq!(budget.bytes.load(Ordering::Acquire), 8);
+            assert!(writer.pending.is_empty());
+            assert_eq!(writer.pending.capacity(), 0);
+            drop((one, two));
+            assert_eq!(budget.bytes.load(Ordering::Acquire), 0);
+        });
+    }
+
+    #[test]
+    fn shared_client_budget_rejects_other_link_without_releasing_owned_frames() {
+        quota_deadline(|| {
+            let client = NodeClient::new("http://127.0.0.1:1", None);
+            assert!(Arc::ptr_eq(
+                &client.input_budget,
+                &client.clone().input_budget
+            ));
+            let shared = Budget::new(8, 4);
+            let (mut one, rx1, _) = quota_writer(32, 4, 16);
+            let (mut two, rx2, _) = quota_writer(32, 4, 16);
+            one.credits = Credits::empty(Budget::new(32, 4), shared.clone());
+            two.credits = Credits::empty(Budget::new(32, 4), shared.clone());
+            one.write_all(b"abc\n").unwrap();
+            assert!(two.write_all(b"12345\n").is_err());
+            assert_eq!(shared.bytes.load(Ordering::Acquire), 4);
+            assert!(!one.output.terminal.load(Ordering::Acquire));
+            assert!(rx2.try_recv().is_err());
+            drop(rx1.recv().unwrap());
+            assert_eq!(shared.bytes.load(Ordering::Acquire), 0);
+            const {
+                assert!(input::LINK_BYTES > input::MAX_LINE);
+                assert!(input::CLIENT_BYTES >= input::LINK_BYTES);
+            }
+        });
+    }
+
+    #[test]
+    fn send_failure_preserves_existing_drain_loss_and_live_retry_behavior() {
+        quota_deadline(|| {
+            use std::net::{Shutdown, TcpListener};
+            fn closed_socket() -> Socket {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+                let (peer, _) = listener.accept().unwrap();
+                stream.shutdown(Shutdown::Both).unwrap();
+                drop(peer);
+                WebSocket::from_raw_socket(
+                    MaybeTlsStream::Plain(stream),
+                    tungstenite::protocol::Role::Client,
+                    None,
+                )
+            }
+            let state = Arc::new(Mutex::new(LinkState::Connecting));
+            let mut link = Link {
+                ws_base: String::new(),
+                id: "fixture".into(),
+                token: None,
+                last: 0,
+                instance: None,
+                state: state.clone(),
+                output: test_gate(state),
+            };
+            let (mut writer, rx, budget) = quota_writer(128, 8, 64);
+            writer.write_all(b"one\ntwo\nthree\n").unwrap();
+            let mut queued: Vec<_> = rx.try_iter().collect();
+            assert!(matches!(
+                link.pump(&mut closed_socket(), &rx, &mut queued),
+                Stop::Lost(_)
+            ));
+            assert!(
+                queued.is_empty(),
+                "existing drain drops failed replay and remainder"
+            );
+            assert_eq!(budget.bytes.load(Ordering::Acquire), 0);
+            writer.write_all(b"live\n").unwrap();
+            assert!(matches!(
+                link.pump(&mut closed_socket(), &rx, &mut queued),
+                Stop::Lost(_)
+            ));
+            assert_eq!(
+                queued.len(),
+                1,
+                "existing live failure remains queued for reconnect"
+            );
+            assert_eq!(queued[0].line, "live");
+            assert_eq!(budget.bytes.load(Ordering::Acquire), 5);
+            drop(queued);
+            assert_eq!(budget.bytes.load(Ordering::Acquire), 0);
+        });
+    }
+
+    fn actual_quota_network(stalled: bool) {
+        quota_deadline(move || {
+            use crate::{Connection, Incoming, RpcError};
+            use futures::{Future, StreamExt, executor::block_on};
+            use std::{net::TcpListener, time::Instant};
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let address = listener.local_addr().unwrap();
+            let (stop_tx, stop_rx) = mpsc::channel();
+            let (seen_tx, seen_rx) = mpsc::channel();
+            let server = thread::spawn(move || {
+                let until = Instant::now() + Duration::from_secs(4);
+                let mut held = None;
+                loop {
+                    if stop_rx.try_recv().is_ok() {
+                        break;
+                    }
+                    assert!(Instant::now() < until, "server deadline");
+                    match listener.accept() {
+                        Ok((mut socket, _)) => {
+                            socket
+                                .set_read_timeout(Some(Duration::from_millis(500)))
+                                .unwrap();
+                            let mut reader = BufReader::new(socket.try_clone().unwrap());
+                            loop {
+                                let mut line = String::new();
+                                std::io::BufRead::read_line(&mut reader, &mut line).unwrap();
+                                if line == "\r\n" {
+                                    break;
+                                }
+                            }
+                            if stalled {
+                                held = Some(socket);
+                                seen_tx.send(()).unwrap();
+                            } else {
+                                socket.write_all(b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                                seen_tx.send(()).unwrap();
+                            }
+                        }
+                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(2))
+                        }
+                        Err(e) => panic!("accept: {e}"),
+                    }
+                }
+                drop(held);
+            });
+            let client = NodeClient::new(&format!("http://{address}"), None);
+            let attachment = client.attach_with_limits("p", 0, None, 512, 2, 256);
+            seen_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            let state = attachment.state.clone();
+            let (connection, mut events) = Connection::new(attachment.reader, attachment.writer);
+            let mut first = Box::pin(connection.request("one", json!({})));
+            let mut second = Box::pin(connection.request("two", json!({})));
+            let mut cx = std::task::Context::from_waker(futures::task::noop_waker_ref());
+            assert!(first.as_mut().poll(&mut cx).is_pending());
+            assert!(second.as_mut().poll(&mut cx).is_pending());
+            if !stalled {
+                seen_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            }
+            let before = Instant::now();
+            assert!(matches!(
+                block_on(connection.request("refused", json!({}))),
+                Err(RpcError::Write(_))
+            ));
+            assert!(before.elapsed() < Duration::from_millis(250));
+            assert_eq!(block_on(first), Err(RpcError::Closed));
+            assert_eq!(block_on(second), Err(RpcError::Closed));
+            assert_eq!(block_on(events.next()), Some(Incoming::Closed));
+            assert_eq!(
+                block_on(connection.request("after", json!({}))),
+                Err(RpcError::Closed)
+            );
+            assert!(
+                matches!(&*state.lock().unwrap(),LinkState::Gone(why) if why.contains("local input admission"))
+            );
+            if stalled {
+                assert!(
+                    client.input_budget.bytes.load(Ordering::Acquire) > 0,
+                    "blocked worker retains bounded owned queue"
+                );
+            }
+            stop_tx.send(()).unwrap();
+            server.join().unwrap();
+            let until = Instant::now() + Duration::from_secs(1);
+            while client.input_budget.bytes.load(Ordering::Acquire) != 0 {
+                assert!(Instant::now() < until);
+                thread::sleep(Duration::from_millis(2));
+            }
+            assert_eq!(client.input_budget.slots.load(Ordering::Acquire), 0);
+        });
+    }
+    #[test]
+    fn actual_attachment_quota_eof_does_not_wait_for_stalled_handshake() {
+        actual_quota_network(true);
+    }
+    #[test]
+    fn actual_attachment_quota_eof_after_repeated_429() {
+        actual_quota_network(false);
+    }
+
+    #[test]
+    fn quota_terminal_survives_late_successful_upgrade_without_sending_old_input() {
+        quota_deadline(|| {
+            use crate::{Connection, RpcError};
+            use futures::{Future, executor::block_on};
+            use std::{net::TcpListener, time::Instant};
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let (seen_tx, seen_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let server = thread::spawn(move || {
+                let (socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                socket
+                    .set_write_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                seen_tx.send(()).unwrap();
+                // Keep the HTTP upgrade unresolved until local quota EOF.
+                release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                let mut socket = tungstenite::accept(socket).expect("late 101 succeeds");
+                assert!(
+                    !matches!(socket.read(), Ok(Message::Text(_))),
+                    "quota-terminated input escaped after late upgrade"
+                );
+            });
+            let client = NodeClient::new(&format!("http://{address}"), None);
+            let attachment = client.attach_with_limits("p", 0, None, 512, 1, 256);
+            let state = attachment.state.clone();
+            seen_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            let (connection, _events) = Connection::new(attachment.reader, attachment.writer);
+            let mut waiting = Box::pin(connection.request("old", json!({})));
+            let mut cx = std::task::Context::from_waker(futures::task::noop_waker_ref());
+            assert!(waiting.as_mut().poll(&mut cx).is_pending());
+            assert!(matches!(
+                block_on(connection.request("refused", json!({}))),
+                Err(RpcError::Write(_))
+            ));
+            assert_eq!(block_on(waiting), Err(RpcError::Closed));
+            release_tx.send(()).unwrap();
+            server.join().unwrap();
+            let until = Instant::now() + Duration::from_secs(1);
+            while client.input_budget.bytes.load(Ordering::Acquire) != 0 {
+                assert!(Instant::now() < until);
+                thread::sleep(Duration::from_millis(2));
+            }
+            assert!(
+                matches!(&*state.lock().unwrap(), LinkState::Gone(reason) if reason.contains("local input admission"))
+            );
+            assert_eq!(
+                block_on(connection.request("new", json!({}))),
+                Err(RpcError::Closed)
+            );
+        });
+    }
+
+    fn test_gate(state: Arc<Mutex<LinkState>>) -> Arc<OutputGate> {
+        Arc::new(OutputGate {
+            sender: Mutex::new(None),
+            terminal: AtomicBool::new(false),
+            state,
+        })
+    }
+    fn test_line(text: &str) -> InputLine {
+        let credits = Credits::empty(Budget::new(1024, 32), Budget::new(2048, 64));
+        InputLine {
+            line: text.into(),
+            _credits: credits.acquire(text.len() + 1, 1).unwrap(),
+        }
+    }
+
     #[test]
     fn addresses_become_base_urls() {
         assert_eq!(NodeClient::new("studio", None).base, "http://studio:7381");
@@ -969,11 +1479,11 @@ mod tests {
             last: 0,
             instance: Some("previous-runtime".into()),
             state: state.clone(),
+            output: test_gate(state.clone()),
         };
-        let (reader, _incoming) = mpsc::channel();
         let (writer, outgoing) = mpsc::channel();
-        writer.send("must-not-send".into()).unwrap();
-        link.run(reader, outgoing);
+        writer.send(test_line("must-not-send")).unwrap();
+        link.run(outgoing);
         assert_eq!(
             *state.lock().unwrap(),
             LinkState::Gone("node no longer supports pinned lifecycle identity".into())
@@ -1025,11 +1535,11 @@ mod tests {
             last: 0,
             instance: Some("previous-runtime".into()),
             state: state.clone(),
+            output: test_gate(state.clone()),
         };
-        let (reader, _incoming) = mpsc::channel();
         let (writer, outgoing) = mpsc::channel();
-        writer.send("must-not-send".into()).unwrap();
-        link.run(reader, outgoing);
+        writer.send(test_line("must-not-send")).unwrap();
+        link.run(outgoing);
         assert_eq!(
             *state.lock().unwrap(),
             LinkState::Gone("node restarted; previous process state is lost".into())
@@ -1099,6 +1609,7 @@ mod tests {
                 last: 0,
                 instance: Some(identity),
                 state: Arc::new(Mutex::new(LinkState::Connecting)),
+                output: test_gate(Arc::new(Mutex::new(LinkState::Connecting))),
             };
             assert!(
                 matches!(link.connect(), Err(ConnectError::Gone(why)) if why.contains("invalid saved"))
@@ -1131,12 +1642,19 @@ mod tests {
     fn written_lines_go_out_whole() {
         let (tx, rx) = mpsc::channel();
         let mut writer = LineWriter {
-            outgoing: tx,
+            outgoing: Some(tx),
             pending: Vec::new(),
+            credits: Credits::empty(Budget::new(1024, 32), Budget::new(2048, 64)),
+            output: Arc::new(OutputGate {
+                sender: Mutex::new(None),
+                terminal: AtomicBool::new(false),
+                state: Arc::new(Mutex::new(LinkState::Connecting)),
+            }),
+            max_line: 512,
         };
         writer.write_all(b"{\"a\":1}\n{\"b\"").unwrap();
         writer.write_all(b":2}\n").unwrap();
-        assert_eq!(rx.try_recv().unwrap(), "{\"a\":1}");
-        assert_eq!(rx.try_recv().unwrap(), "{\"b\":2}");
+        assert_eq!(rx.try_recv().unwrap().line, "{\"a\":1}");
+        assert_eq!(rx.try_recv().unwrap().line, "{\"b\":2}");
     }
 }
