@@ -1245,10 +1245,20 @@ impl Workspace {
 
     /// Sends `composed` to a thread whatever the main column shows.
     pub fn send_to_thread(&mut self, thread: String, composed: Composed, cx: &mut Context<Self>) {
+        self.submit_to_thread(thread, composed, cx);
+    }
+
+    pub(super) fn submit_to_thread(
+        &mut self,
+        thread: String,
+        composed: Composed,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let state = BackgroundDispatch::enter(&mut self.view, &mut self.editing, thread);
-        self.send(composed, cx);
+        let submitted = self.send_for_notice(composed, None, cx) == NoticeSendResult::Submitted;
         state.restore(&mut self.view, &mut self.editing);
         cx.notify();
+        submitted
     }
 
     /// Reserve a captured prefix immediately before dispatch. Held notices
@@ -1676,6 +1686,27 @@ impl Workspace {
         self.stream_views_for(&root)
     }
 
+    pub(super) fn stream_state(
+        &self,
+        stream: &Workstream,
+        transcript: Option<&Transcript>,
+    ) -> StreamState {
+        let agent_up = self.backend_ready(&stream.backend);
+        let waiting = transcript.map_or(0, waiting_on_user);
+        match (transcript, &stream.thread_id) {
+            (_, None) => StreamState::Starting,
+            (None, Some(_)) if !agent_up => StreamState::Offline,
+            (None, Some(_)) => StreamState::Starting,
+            (Some(_), _) if waiting > 0 => StreamState::NeedsYou(waiting),
+            (Some(t), _) if t.is_running() => StreamState::Working,
+            (Some(t), _) => match last_failure(t) {
+                Some(error) => StreamState::Failed(error),
+                None if !agent_up => StreamState::Offline,
+                None => StreamState::Idle,
+            },
+        }
+    }
+
     fn stream_views_for(&self, root: &PathBuf) -> Vec<StreamView> {
         let Some(project) = self.projects.iter().find(|p| p.root == *root) else {
             return Vec::new();
@@ -1690,20 +1721,7 @@ impl Workspace {
                     .thread_id
                     .as_ref()
                     .and_then(|id| self.transcripts.get(id));
-                let agent_up = self.backend_ready(&stream.backend);
-                let waiting = transcript.map_or(0, waiting_on_user);
-                let state = match (transcript, &stream.thread_id) {
-                    (_, None) => StreamState::Starting,
-                    (None, Some(_)) if !agent_up => StreamState::Offline,
-                    (None, Some(_)) => StreamState::Starting,
-                    (Some(_), _) if waiting > 0 => StreamState::NeedsYou(waiting),
-                    (Some(t), _) if t.is_running() => StreamState::Working,
-                    (Some(t), _) => match last_failure(t) {
-                        Some(error) => StreamState::Failed(error),
-                        None if !agent_up => StreamState::Offline,
-                        None => StreamState::Idle,
-                    },
-                };
+                let state = self.stream_state(stream, transcript);
                 let (plan, step) = transcript.map_or((None, None), latest_plan);
                 let said = transcript.and_then(|t| {
                     t.entries().iter().rev().find_map(|e| match &e.kind {

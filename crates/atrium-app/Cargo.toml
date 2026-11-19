@@ -30,4 +30,7 @@ gpui-kit.workspace = true
 ely-gpui-component.workspace = true
 
 [features]
-workspace-ticker-test = ["gpui/test-support"]
+workspace-ticker-test = ["gpui/test-support", "atrium-phone/test-support"]
+
+[dev-dependencies]
+ureq.workspace = true

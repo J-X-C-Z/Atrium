@@ -85,14 +85,39 @@ pub struct Server {
     pushes: mpsc::Sender<push::Notification>,
 }
 
+pub type Commands = mpsc::Receiver<Command>;
+
 impl Server {
     pub fn notify(&self, notification: push::Notification) {
         if self.pushes.try_send(notification).is_err() {
             log::warn!("phone notification queue unavailable");
         }
     }
-    pub fn start(initial: Snapshot) -> std::io::Result<(Self, mpsc::Receiver<Command>)> {
-        let (snapshots, read) = watch::channel(Arc::new(initial));
+    pub fn start() -> std::io::Result<(Self, Commands)> {
+        Self::spawn(|state| listen(state, 7879))
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn loopback_for_test(listener: std::net::TcpListener) -> std::io::Result<(Self, Commands)> {
+        let addr = listener.local_addr()?;
+        assert!(addr.ip().is_loopback());
+        listener.set_nonblocking(true)?;
+        Self::spawn(move |state| async move {
+            let router = http::router(state, auth::Guard::new(addr.ip(), addr.port(), None));
+            let listener = TcpListener::from_std(listener).unwrap();
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        })
+    }
+
+    fn spawn<F: std::future::Future<Output = ()>>(
+        serve: impl FnOnce(State) -> F + Send + 'static,
+    ) -> std::io::Result<(Self, Commands)> {
+        let (snapshots, read) = watch::channel(Arc::default());
         let (commands, receive) = mpsc::channel(32);
         let (pushes, jobs) = mpsc::channel(16);
         let (stop, stopped) = oneshot::channel();
@@ -107,7 +132,7 @@ impl Server {
                         tokio::spawn(push::deliver(jobs));
                         tokio::select! {
                             _ = stopped => (),
-                            _ = listen(State { snapshots: read, commands }, 7879) => (),
+                            _ = serve(State { snapshots: read, commands }) => (),
                         }
                     }),
                     Err(e) => log::error!("phone server runtime: {e}"),

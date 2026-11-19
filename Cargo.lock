@@ -582,6 +582,7 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
+ "ureq",
  "uuid",
 ]
 

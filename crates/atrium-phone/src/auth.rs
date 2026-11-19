@@ -158,3 +158,72 @@ pub(crate) async fn authorize(
     headers.insert("x-frame-options", "DENY".parse().unwrap());
     response
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_owner_login_and_tailnet_addresses() {
+        let status = json!({"Self":{"UserID":42},"User":{"42":{"LoginName":"owner"}},
+            "TailscaleIPs":["100.64.0.1","fd7a:115c:a1e0::1","192.168.2.1","::","0.0.0.0"]});
+        assert!(owns_peer(
+            &json!({"UserProfile":{"LoginName":"owner"}}),
+            &status
+        ));
+        assert!(!owns_peer(
+            &json!({"UserProfile":{"LoginName":"someone-else"}}),
+            &status
+        ));
+        assert!(!owns_peer(&json!({}), &json!({})));
+        assert_eq!(
+            addresses(&status).collect::<Vec<_>>(),
+            [
+                "100.64.0.1".parse::<IpAddr>().unwrap(),
+                "fd7a:115c:a1e0::1".parse().unwrap()
+            ]
+        );
+    }
+    #[tokio::test]
+    async fn phone_auth_asks_whois_for_the_socket_and_checks_magicdns() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("atrium-phone-whois-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(if cfg!(windows) {
+            "tailscale.cmd"
+        } else {
+            "tailscale"
+        });
+        let status = r#"{"Self":{"UserID":"1","DNSName":"desk.example.ts.net."},"User":{"1":{"LoginName":"owner"}},"TailscaleIPs":["100.64.0.1"]}"#;
+        let owner = r#"{"UserProfile":{"LoginName":"owner"}}"#;
+        let other = r#"{"UserProfile":{"LoginName":"guest"}}"#;
+        let script = if cfg!(windows) {
+            format!(
+                "@echo off\r\nif \"%1\"==\"status\" (echo {status}) else if \"%3\"==\"100.64.0.2:2345\" (echo {owner}) else (echo {other})\r\n"
+            )
+        } else {
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = status ]; then echo '{status}'; elif [ \"$3\" = '100.64.0.2:2345' ]; then echo '{owner}'; else echo '{other}'; fi\n"
+            )
+        };
+        fs::write(&path, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let guard = Guard::new("100.64.0.1".parse().unwrap(), 7879, Some(path));
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, "desk.example.ts.net:7879".parse().unwrap());
+        let peer = "100.64.0.2:2345".parse().unwrap();
+        assert!(guard.allows(peer, &headers).await);
+        assert!(
+            !guard
+                .allows("100.64.0.3:2345".parse().unwrap(), &headers)
+                .await
+        );
+        headers.insert(header::HOST, "unknown.example:7879".parse().unwrap());
+        assert!(!guard.allows(peer, &headers).await);
+        fs::remove_dir_all(dir).unwrap();
+    }
+}

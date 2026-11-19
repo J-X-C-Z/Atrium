@@ -8,10 +8,7 @@ use crate::project::notice_delivery::NoticeOutcome;
 use std::time::Instant;
 
 use acp_client::{AcpClient, AcpConfig, AgentInfo};
-use atrium_core::{
-    AgentCommand, AgentEvent, ApprovalDecision, ConfigOption, Item, RequestId, ThreadMeta,
-    Transcript,
-};
+use atrium_core::{AgentCommand, AgentEvent, ConfigOption, Item, ThreadMeta, Transcript};
 use futures::StreamExt;
 use gpui::{AppContext, Context, Task};
 
@@ -688,27 +685,6 @@ impl Workspace {
         {
             log::warn!("session/cancel failed: {error:#}");
         }
-    }
-
-    pub(super) fn acp_answer(
-        &mut self,
-        session: &str,
-        request_id: RequestId,
-        decision: ApprovalDecision,
-        cx: &mut Context<Self>,
-    ) {
-        let backend = self.backend_of(session).to_string();
-        let Some(client) = self.acp(&backend) else {
-            return;
-        };
-        if let Err(error) = client.answer_permission(request_id.clone(), decision) {
-            log::warn!("answering the permission request failed: {error:#}");
-            return;
-        }
-        if let Some(transcript) = self.transcripts.get_mut(session) {
-            transcript.answer_approval(&request_id, decision);
-        }
-        cx.notify();
     }
 
     /// Reopens an agent session: its history replays into the transcript

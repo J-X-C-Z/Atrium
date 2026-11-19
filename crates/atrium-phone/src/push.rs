@@ -76,3 +76,29 @@ fn publish(
             }
         })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{Router, http::HeaderMap, routing::post};
+    #[tokio::test]
+    async fn phone_push_local_topic_receives_only_names_and_deep_link() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/my/topic", listener.local_addr().unwrap());
+        let router = Router::new().route(
+            "/my/topic",
+            post(|headers: HeaderMap, body: String| async move {
+                assert_eq!(headers["title"], "Approval requested");
+                assert_eq!(headers["click"], "atrium://project/3/stream/lead%20one");
+                assert_eq!(body, "Project · Lead");
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        tokio::task::spawn_blocking(move || {
+            publish(&url, "Approval requested", "Project", "Lead", 3, "lead one")
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    }
+}

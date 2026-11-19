@@ -1236,13 +1236,25 @@ impl Project {
     }
 
     fn post_at(&mut self, from: &str, to: Vec<String>, text: &str, at: String) -> Result<()> {
+        let result = Self::append_notice_at(&self.root, from, to, text, at);
+        self.stamp = None;
+        self.reload();
+        result
+    }
+
+    /// Append without touching the in-memory project, for background writers.
+    pub fn append_notice(root: &Path, from: &str, to: Vec<String>, text: &str) -> Result<()> {
+        Self::append_notice_at(root, from, to, text, now_label())
+    }
+
+    fn append_notice_at(root: &Path, from: &str, to: Vec<String>, text: &str, at: String) -> Result<()> {
         let notice = ProjectNotice {
             at,
             from: from.to_string(),
             to,
             text: text.trim().to_string(),
         };
-        let path = self.dir().join("notices.md");
+        let path = root.join(DIR).join("notices.md");
         let body =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         let separator = if !body.is_empty() && !body.ends_with('\n') {
@@ -1253,14 +1265,9 @@ impl Project {
         let line = format!("{separator}{}\n", notice.line());
         // Append rather than replacing other agents' concurrent notices.
         let mut file = fs::OpenOptions::new().append(true).open(&path)?;
-        let result = file
-            .write_all(line.as_bytes())
-            .and_then(|()| file.sync_all());
-        // An error (notably fsync) can follow a visible append. Refresh before
-        // returning so a retry can recognize that receipt instead of duplicating it.
-        self.stamp = None;
-        self.reload();
-        result.with_context(|| format!("appending {}", path.display()))
+        file.write_all(line.as_bytes())
+            .and_then(|()| file.sync_all())
+            .with_context(|| format!("appending {}", path.display()))
     }
 
     pub fn stream(&self, id: &str) -> Option<&Workstream> {

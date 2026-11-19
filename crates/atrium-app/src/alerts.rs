@@ -51,10 +51,43 @@ pub fn alert_for(event: &AgentEvent) -> Option<(&str, Alert)> {
 #[derive(Default)]
 pub struct Alerts {
     last: HashMap<String, Instant>,
+    failures: HashMap<String, (String, bool)>,
 }
 
 impl Alerts {
     const QUIET: Duration = Duration::from_secs(10);
+
+    /// Alert once on the second distinct failed turn until a turn succeeds.
+    pub fn phone_title(
+        &mut self,
+        thread: &str,
+        event: &AgentEvent,
+        alert: Alert,
+        lead_done: bool,
+    ) -> Option<&'static str> {
+        match (alert, event) {
+            (Alert::NeedsApproval, _) => Some("Approval requested"),
+            (Alert::NeedsAnswer, _) => Some("Question from agent"),
+            (Alert::Finished, _) => {
+                self.failures.remove(thread);
+                lead_done.then_some("Lead finished")
+            }
+            (Alert::Failed, AgentEvent::TurnCompleted { turn_id, .. }) => {
+                if let Some((previous, notified)) = self.failures.get_mut(thread) {
+                    if previous == turn_id || *notified {
+                        return None;
+                    }
+                    *notified = true;
+                    Some("Repeated turn failure")
+                } else {
+                    self.failures
+                        .insert(thread.to_owned(), (turn_id.clone(), false));
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
 
     /// Whether `thread` may notify now. Something that needs the user always
     /// may; finishing and failing at most once per ten seconds.

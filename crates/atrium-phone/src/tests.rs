@@ -158,3 +158,76 @@ async fn unvouched_tailnet_socket_gets_403() {
     .await
     .unwrap();
 }
+
+#[test]
+fn project_fixture_matches_overview_and_pool() {
+    use crate::snapshot::{Chat, project_snapshot};
+    use atrium_core::{AgentEvent, ApprovalKind, ApprovalRequest, Transcript};
+    use atrium_project::{Project, Role, Workstream};
+    use std::fs;
+    let root = std::env::temp_dir().join(format!("atrium-snapshot-{}", std::process::id()));
+    let mut p = Project::open(&root).unwrap();
+    p.file.streams = vec![
+        Workstream {
+            id: "controller".into(),
+            role: Role::Controller,
+            ..Default::default()
+        },
+        Workstream {
+            id: "lead".into(),
+            role: Role::Lead,
+            parent: Some("controller".into()),
+            task: Some("controller/ui".into()),
+            thread_id: Some("t".into()),
+            ..Default::default()
+        },
+        Workstream {
+            id: "worker".into(),
+            role: Role::Worker,
+            parent: Some("lead".into()),
+            ..Default::default()
+        },
+    ];
+    p.save().unwrap();
+    let dir = p.dir();
+    for owner in ["controller", "lead"] {
+        fs::create_dir_all(dir.join("tasks").join(owner)).unwrap()
+    }
+    fs::write(
+        dir.join("tasks/controller/ui.md"),
+        "# UI\nstatus: running\n\n## Roadmap\n### Build\n- [x] Model\n- [ ] View\n",
+    )
+    .unwrap();
+    fs::write(dir.join("tasks/lead/polish.md"), "# Polish\nstatus: open\n").unwrap();
+    fs::write(dir.join("plan.md"), "Night shift").unwrap();
+    let p = Project::open(&root).unwrap();
+    let mut t = Transcript::new();
+    t.apply(&AgentEvent::ApprovalRequested(ApprovalRequest {
+        request_id: 7.into(),
+        thread_id: "t".into(),
+        turn_id: "1".into(),
+        item_id: "i".into(),
+        kind: ApprovalKind::Tool {
+            title: "Run".into(),
+            detail: None,
+        },
+    }));
+    let snap = project_snapshot(&p, |s| match s.id.as_str() {
+        "lead" => ("needs_you", Arc::new(Chat::from_transcript(&t))),
+        "worker" => ("working", Arc::default()),
+        _ => ("idle", Arc::default()),
+    });
+    assert_eq!(snap.summary["streams"], 3);
+    assert_eq!(snap.summary["working"], 1);
+    assert_eq!(snap.summary["needs_you"], 1);
+    assert_eq!(snap.detail["plan"].as_str().unwrap().trim(), "Night shift");
+    let lead = &snap.detail["streams"][1];
+    assert_eq!(lead["pool"]["total"], p.pool("lead").total());
+    assert_eq!(lead["pool"]["ready"], json!(["lead/polish"]));
+    assert_eq!(
+        lead["task"]["phases"][0]["steps"],
+        json!([{"text":"Model","done":true},{"text":"View","done":false}])
+    );
+    assert_eq!(lead["needs_you"][0]["text"], "Run");
+    fs::remove_dir_all(root).unwrap();
+}

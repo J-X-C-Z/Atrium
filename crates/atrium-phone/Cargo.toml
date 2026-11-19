@@ -17,3 +17,6 @@ log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { version = "1", features = ["net", "process", "rt", "sync", "time", "macros"] }
+
+[features]
+test-support = []

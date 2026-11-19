@@ -74,6 +74,10 @@ pub struct Settings {
     /// No system notifications when a conversation you are not looking at
     /// finishes, fails or needs you.
     pub quiet_notifications: bool,
+    /// Serve project snapshots to this user on loopback and the tailnet.
+    pub remote_view: bool,
+    /// Optional ntfy topic name or self-hosted topic URL.
+    pub push_topic: Option<String>,
     /// The interface's language.
     pub language: crate::i18n::Language,
     /// Where new chats run on each device, by device id.
@@ -179,6 +183,8 @@ mod tests {
         assert_eq!(settings.mode, AccessMode::Auto);
         assert_eq!(settings.theme, ThemePref::System);
         assert!(settings.preview_commands.is_empty());
+        assert!(!settings.remote_view);
+        assert!(settings.push_topic.is_none());
     }
 }
 

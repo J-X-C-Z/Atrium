@@ -32,6 +32,8 @@ mod acp;
 mod devices;
 #[path = "workspace_preview.rs"]
 mod preview;
+#[path = "workspace_phone.rs"]
+mod phone;
 #[path = "workspace_project.rs"]
 mod projects;
 pub use acp::{AcpAgent, AgentStatus, CODEX};
@@ -133,6 +135,8 @@ pub struct Workspace {
     /// not notify.
     pub window_active: bool,
     alerts: crate::alerts::Alerts,
+    phone: Option<phone::Phone>,
+    answering: HashSet<(String, String)>,
     /// Conversations whose suggested follow-ups the user dismissed or used.
     dismissed_next: std::collections::HashSet<String>,
     transcripts: HashMap<String, Transcript>,
@@ -214,6 +218,8 @@ impl Workspace {
         workspace.init_agents(cx);
         workspace.init_projects(cx);
         workspace.init_devices(cx);
+        workspace.sync_phone(cx);
+        cx.observe_self(|ws, cx| ws.sync_phone(cx)).detach();
         if let Some(agent) = workspace.settings.default_agent.clone()
             && (agent == CODEX
                 || workspace
@@ -234,6 +240,8 @@ impl Workspace {
             nav: 0,
             window_active: true,
             alerts: Default::default(),
+            phone: None,
+            answering: HashSet::new(),
             dismissed_next: Default::default(),
             transcripts: HashMap::new(),
             draft: Transcript::new(),
@@ -553,6 +561,38 @@ impl Workspace {
         let Some((thread, alert)) = crate::alerts::alert_for(event) else {
             return;
         };
+        if !self.loading.contains(thread)
+            && self.settings.remote_view
+            && let Some(phone) = &self.phone
+            && let Some(topic) = self
+                .settings
+                .push_topic
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+            && let Some((ix, project, stream)) =
+                self.projects.iter().enumerate().find_map(|(ix, p)| {
+                    p.file
+                        .streams
+                        .iter()
+                        .find(|s| s.thread_id.as_deref() == Some(thread))
+                        .map(|s| (ix, p, s))
+                })
+        {
+            let lead_done = stream.role == crate::project::Role::Lead
+                && project
+                    .task_of(stream)
+                    .is_none_or(|task| task.status == crate::project::TaskStatus::Done);
+            if let Some(title) = self.alerts.phone_title(thread, event, alert, lead_done) {
+                phone.server.notify(atrium_phone::push::Notification {
+                    topic: topic.to_owned(),
+                    title,
+                    ix,
+                    project: project.file.name.clone(),
+                    stream: stream.name.clone(),
+                    id: stream.id.clone(),
+                });
+            }
+        }
         let shown = self.window_active && self.active_thread_id() == Some(thread);
         if self.settings.quiet_notifications || shown || self.loading.contains(thread) {
             return;
@@ -1255,17 +1295,11 @@ impl Workspace {
         answers: Answers,
         cx: &mut Context<Self>,
     ) {
-        let Some(client) = self.thread_codex(thread_id) else {
-            return;
-        };
-        if let Err(error) = client.answer_user_input(request_id.clone(), answers.clone()) {
-            log::warn!("answering questions failed: {error:#}");
-            return;
+        if let Ok(task) =
+            self.submit_answer(thread_id, request_id, phone::Answer::Questions(answers), cx)
+        {
+            task.detach();
         }
-        if let Some(transcript) = self.transcripts.get_mut(thread_id) {
-            transcript.answer_questions(&request_id, answers);
-        }
-        cx.notify();
     }
 
     // ---- Account -------------------------------------------------------
@@ -1608,21 +1642,11 @@ impl Workspace {
         decision: ApprovalDecision,
         cx: &mut Context<Self>,
     ) {
-        if !crate::agents::is_codex(self.backend_of(thread_id)) {
-            self.acp_answer(thread_id, request_id, decision, cx);
-            return;
+        if let Ok(task) =
+            self.submit_answer(thread_id, request_id, phone::Answer::Approval(decision), cx)
+        {
+            task.detach();
         }
-        let Some(client) = self.thread_codex(thread_id) else {
-            return;
-        };
-        if let Err(error) = client.answer_approval(request_id.clone(), decision) {
-            log::warn!("answering approval failed: {error:#}");
-            return;
-        }
-        if let Some(transcript) = self.transcripts.get_mut(thread_id) {
-            transcript.answer_approval(&request_id, decision);
-        }
-        cx.notify();
     }
 
     pub fn archive(&mut self, thread_id: String, cx: &mut Context<Self>) {

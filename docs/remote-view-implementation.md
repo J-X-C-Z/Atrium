@@ -47,6 +47,46 @@ serve a placeholder `index.html` that lists the projects from
 from the same data the overview uses (`stream_views`, `Project::pool`,
 `Task`), so nothing new is computed.
 
+### Desktop backend contract
+
+The server follows the live `remote_view` setting. To enable it before the
+settings switch ships, set `"remote_view": true` in the desktop
+`settings.json` and restart Atrium. On macOS this file is in
+`~/Library/Application Support/Atrium`, on Windows in `%APPDATA%/Atrium`.
+An omitted or false setting leaves the server off.
+
+Snapshots refresh about once per second. The project list counts streams
+in the working and needs-you states. Each detail stream supplies its
+`thread_id` for transcript and action URLs, and a `needs_you` array with
+the original numeric or string `request_id`. Stream states are `starting`,
+`offline`, `working`, `needs_you`, `failed` and `idle`. Pool fields
+`ready`, `waiting`, `running` and `workers` are arrays, `done`, `failed`
+and `total` are counts. Transcript rows have a zero-based `index`, `role`,
+`text`, `tool_title` and `status`. Omitting `after` reads all rows.
+A changed event can also update a previously streamed row.
+
+Send POSTs as `application/json`. For a question, `answers` is an object
+such as `{"color":["Blue"]}` with one selection or free-text answer per
+question. Notice recipients are an array of stream IDs or `["all"]`.
+Approvals, questions and persisted notices return 204. Submitting a message
+returns 202, with the eventual backend result in the transcript. A stale
+request returns 409. Only threads bound to workstreams are addressable.
+
+The browser uses the page's own HTTP origin and port. A native shell can
+use its native HTTP client. Loopback hosts, the bound tailnet IP, and the
+desktop's own MagicDNS name (full or short) are checked against the socket.
+SSE messages are ordinary `data:` JSON events. On reconnect the server
+announces current projects and outstanding requests. It renews the
+connection every minute to recheck authorization.
+
+Pushes require remote view and a nonempty `push_topic`, either a full
+ntfy topic URL such as `https://notify.example/atrium-private` or a topic
+name on ntfy.sh. The notification title identifies the event, the body
+contains the project and stream names, and the Click header contains the
+`atrium://project/<ix>/stream/<id>` link. The second distinct failed turn
+alerts once until a successful turn resets the streak. A lead with an
+assigned task alerts on completion when its task status is done.
+
 ## The app
 
 The phone side ships as an app, not just a web page. The screens are
