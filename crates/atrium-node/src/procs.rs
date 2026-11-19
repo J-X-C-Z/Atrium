@@ -13,7 +13,7 @@ use std::{
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     process::{Child, Command},
-    sync::{Mutex, mpsc, watch},
+    sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc, watch},
     task::JoinHandle,
 };
 
@@ -207,13 +207,71 @@ struct State {
     detached_at: Instant,
     ended_at: Option<Instant>,
 }
+#[derive(Debug)]
+pub struct InputCapacity;
+impl std::fmt::Display for InputCapacity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("stdin capacity exhausted; current input was not accepted")
+    }
+}
+impl std::error::Error for InputCapacity {}
+#[derive(Debug)]
+pub struct InputReplaced;
+impl std::fmt::Display for InputReplaced {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("attachment replaced or detached")
+    }
+}
+impl std::error::Error for InputReplaced {}
+struct BytePermit {
+    counter: Arc<AtomicUsize>,
+    size: usize,
+}
+impl BytePermit {
+    fn acquire(counter: &Arc<AtomicUsize>, limit: usize, size: usize) -> Result<Self> {
+        let mut queued = counter.load(Ordering::Acquire);
+        loop {
+            let next = queued
+                .checked_add(size)
+                .filter(|n| *n <= limit)
+                .ok_or(InputCapacity)?;
+            match counter.compare_exchange_weak(queued, next, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => {
+                    return Ok(Self {
+                        counter: counter.clone(),
+                        size,
+                    });
+                }
+                Err(actual) => queued = actual,
+            }
+        }
+    }
+}
+impl Drop for BytePermit {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(self.size, Ordering::AcqRel);
+    }
+}
 struct Input {
     line: String,
-    budget: Arc<AtomicUsize>,
+    _local: BytePermit,
+    _global: BytePermit,
 }
-impl Drop for Input {
-    fn drop(&mut self) {
-        self.budget.fetch_sub(self.line.len(), Ordering::AcqRel);
+impl Input {
+    fn admitted(
+        line: String,
+        local: &Arc<AtomicUsize>,
+        local_limit: usize,
+        global: &Arc<AtomicUsize>,
+        global_limit: usize,
+    ) -> Result<Self> {
+        let local = BytePermit::acquire(local, local_limit, line.len())?;
+        let global = BytePermit::acquire(global, global_limit, line.len())?;
+        Ok(Self {
+            line,
+            _local: local,
+            _global: global,
+        })
     }
 }
 
@@ -228,11 +286,21 @@ pub struct Process {
     changed: watch::Sender<u64>,
     input: mpsc::Sender<Input>,
     input_bytes: Arc<AtomicUsize>,
+    total_input_bytes: Arc<AtomicUsize>,
+    total_input_limit: usize,
+    ws_slots: Arc<Semaphore>,
     stop: watch::Sender<bool>,
     #[cfg(windows)]
     job: windows_process::Job,
 }
 impl Process {
+    pub fn reserve_ws(&self) -> Result<OwnedSemaphorePermit> {
+        self.ws_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| anyhow::anyhow!("process WebSocket capacity exhausted"))
+    }
+
     async fn push(&self, value: Value) {
         self.state.lock().await.ring.push(value);
         self.changed.send_modify(|v| *v = v.wrapping_add(1));
@@ -268,7 +336,7 @@ impl Process {
     pub async fn try_input_for(&self, generation: u64, line: String) -> Result<()> {
         let state = self.state.lock().await;
         if !state.attached || state.generation != generation {
-            bail!("attachment replaced or detached");
+            return Err(InputReplaced.into());
         }
         self.try_input(line)
     }
@@ -279,32 +347,21 @@ impl Process {
         if *self.stop.borrow() {
             bail!("process is stopping");
         }
-        let size = line.len();
-        // Explicit CAS keeps compatibility with the workspace MSRV and newer
-        // Rust releases that deprecated AtomicUsize::fetch_update.
-        let mut queued = self.input_bytes.load(Ordering::Acquire);
-        loop {
-            let Some(next) = queued.checked_add(size).filter(|n| *n <= INPUT_BUDGET) else {
-                bail!("stdin byte queue full");
-            };
-            match self.input_bytes.compare_exchange_weak(
-                queued,
-                next,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => break,
-                Err(actual) => queued = actual,
-            }
-        }
-        let input = Input {
+        let input = Input::admitted(
             line,
-            budget: self.input_bytes.clone(),
-        };
-        self.input
-            .try_send(input)
-            .map_err(|_| anyhow::anyhow!("stdin queue full or closed"))
+            &self.input_bytes,
+            INPUT_BUDGET,
+            &self.total_input_bytes,
+            self.total_input_limit,
+        )?;
+        self.input.try_send(input).map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => anyhow::anyhow!(InputCapacity),
+            mpsc::error::TrySendError::Closed(_) => {
+                anyhow::anyhow!("stdin is closed; current input was not accepted")
+            }
+        })
     }
+
     pub fn request_stop(&self) {
         self.stop.send_replace(true);
     }
@@ -333,6 +390,9 @@ pub struct ProcessManager {
     keep_bytes: usize,
     output: Arc<StdMutex<OutputStore>>,
     timeout: Duration,
+    input_bytes: Arc<AtomicUsize>,
+    input_limit: usize,
+    ws_limit: usize,
 }
 impl ProcessManager {
     #[cfg(test)]
@@ -354,7 +414,15 @@ impl ProcessManager {
                 ..OutputStore::default()
             })),
             timeout: Duration::from_secs(timeout_secs.max(1)),
+            input_bytes: Arc::new(AtomicUsize::new(0)),
+            input_limit: 256 * 1024 * 1024,
+            ws_limit: 2,
         }
+    }
+    pub fn with_admission_limits(mut self, input_bytes: usize, per_process_ws: usize) -> Self {
+        self.input_limit = input_bytes;
+        self.ws_limit = per_process_ws;
+        self
     }
     pub async fn spawn(
         &self,
@@ -417,6 +485,9 @@ impl ProcessManager {
             changed,
             input,
             input_bytes: Arc::new(AtomicUsize::new(0)),
+            total_input_bytes: self.input_bytes.clone(),
+            total_input_limit: self.input_limit,
+            ws_slots: Arc::new(Semaphore::new(self.ws_limit)),
             stop,
             #[cfg(windows)]
             job,
@@ -1181,12 +1252,51 @@ mod tests {
         assert_eq!(c.snapshot(0, false).latest, 1);
     }
     #[test]
+    fn shared_input_budget_rolls_back_and_releases_queued_and_inflight() {
+        let global = Arc::new(AtomicUsize::new(0));
+        let a = Arc::new(AtomicUsize::new(0));
+        let b = Arc::new(AtomicUsize::new(0));
+        let accepted = Input::admitted("abc".into(), &a, 4, &global, 5).unwrap();
+        assert!(Input::admitted("xyz".into(), &b, 4, &global, 5).is_err());
+        assert_eq!(b.load(Ordering::Acquire), 0);
+        assert_eq!(global.load(Ordering::Acquire), 3);
+        assert!(Input::admitted("zz".into(), &a, 4, &global, 5).is_err());
+        assert_eq!(a.load(Ordering::Acquire), 3);
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.try_send(accepted).unwrap_or_else(|_| panic!("queue"));
+        let inflight = rx.try_recv().unwrap();
+        assert_eq!(
+            global.load(Ordering::Acquire),
+            3,
+            "dequeue must not release before write completes"
+        );
+        let queued = Input::admitted("de".into(), &b, 4, &global, 5).unwrap();
+        tx.try_send(queued).unwrap_or_else(|_| panic!("queue"));
+        drop(inflight);
+        let rejected = Input::admitted("f".into(), &a, 4, &global, 5).unwrap();
+        drop(tx.try_send(rejected).unwrap_err());
+        assert_eq!(
+            a.load(Ordering::Acquire),
+            0,
+            "failed try_send returns both permits"
+        );
+        assert_eq!(global.load(Ordering::Acquire), 2);
+        drop(rx);
+        assert_eq!(global.load(Ordering::Acquire), 0);
+        let closed = Input::admitted("z".into(), &a, 4, &global, 5).unwrap();
+        drop(tx.try_send(closed).unwrap_err());
+        assert_eq!(global.load(Ordering::Acquire), 0);
+        // Maximum legal payload can be budgeted without allocating its bytes.
+        let max = BytePermit::acquire(&global, MAX_LINE_BYTES, MAX_LINE_BYTES).unwrap();
+        drop(max);
+        assert_eq!(global.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
     fn dropping_input_releases_byte_budget() {
-        let budget = Arc::new(AtomicUsize::new(4));
-        let input = Input {
-            line: "test".into(),
-            budget: budget.clone(),
-        };
+        let budget = Arc::new(AtomicUsize::new(0));
+        let global = Arc::new(AtomicUsize::new(0));
+        let input = Input::admitted("test".into(), &budget, 8, &global, 8).unwrap();
         drop(input);
         assert_eq!(budget.load(Ordering::Acquire), 0);
     }

@@ -25,6 +25,9 @@ pub struct Config {
     pub keep_output_lines: usize,
     pub keep_output_bytes: usize,
     pub total_output_bytes: usize,
+    pub total_input_bytes: usize,
+    pub max_ws_connections: usize,
+    pub max_ws_connections_per_process: usize,
     pub detached_timeout_secs: u64,
     pub agents: BTreeMap<String, Agent>,
     #[serde(skip)]
@@ -44,6 +47,9 @@ impl Default for Config {
             keep_output_lines: 20_000,
             keep_output_bytes: 128 * 1024 * 1024,
             total_output_bytes: 128 * 1024 * 1024,
+            total_input_bytes: 256 * 1024 * 1024,
+            max_ws_connections: 256,
+            max_ws_connections_per_process: 2,
             detached_timeout_secs: 86400,
             agents: BTreeMap::new(),
             auto_claude: true,
@@ -60,6 +66,17 @@ pub fn path() -> PathBuf {
     base.join("atrium-node/config.toml")
 }
 impl Config {
+    fn validate_admission(&self) -> Result<()> {
+        if self.total_input_bytes < crate::procs::MAX_LINE_BYTES {
+            bail!("total input budget must allow one 64 MiB frame");
+        }
+        for limit in [self.max_ws_connections, self.max_ws_connections_per_process] {
+            if !(2..=tokio::sync::Semaphore::MAX_PERMITS).contains(&limit) {
+                bail!("WebSocket limits must be between 2 and Semaphore::MAX_PERMITS");
+            }
+        }
+        Ok(())
+    }
     pub fn load(path: &Path) -> Result<Self> {
         let mut c: Self = match std::fs::read_to_string(path) {
             Ok(text) => toml::from_str(&text).context("invalid node config")?,
@@ -72,6 +89,7 @@ impl Config {
         if c.total_output_bytes < 64 * 1024 * 1024 + 128 {
             bail!("total output budget must retain at least one 64 MiB frame with metadata");
         }
+        c.validate_admission()?;
         if c.detached_timeout_secs == 0 {
             bail!("detached timeout must be positive");
         }
@@ -226,6 +244,29 @@ mod tests {
         assert_eq!(legacy.keep_output_bytes, 256 * 1024 * 1024);
         assert_eq!(legacy.total_output_bytes, 128 * 1024 * 1024);
     }
+    #[test]
+    fn admission_limits_validate_without_allocating_payloads_or_semaphores() {
+        let mut config = Config::default();
+        assert_eq!(config.total_input_bytes, 256 * 1024 * 1024);
+        assert_eq!(config.max_ws_connections, 256);
+        config.total_input_bytes = crate::procs::MAX_LINE_BYTES;
+        assert!(config.validate_admission().is_ok());
+        config.total_input_bytes -= 1;
+        assert!(config.validate_admission().is_err());
+        config.total_input_bytes += 1;
+        for limit in [0, 1, tokio::sync::Semaphore::MAX_PERMITS + 1] {
+            config.max_ws_connections = limit;
+            assert!(config.validate_admission().is_err());
+        }
+        config.max_ws_connections = 2;
+        for limit in [0, 1, tokio::sync::Semaphore::MAX_PERMITS + 1] {
+            config.max_ws_connections_per_process = limit;
+            assert!(config.validate_admission().is_err());
+        }
+        config.max_ws_connections_per_process = 2;
+        assert!(config.validate_admission().is_ok());
+    }
+
     #[test]
     fn unknown_security_keys_are_not_silently_ignored() {
         assert!(toml::from_str::<Config>("tokne = 'secret'").is_err());

@@ -2,7 +2,7 @@ use crate::{
     auth::Auth,
     config::{Config, find_binary},
     fs::{FsError, Roots},
-    procs::{MAX_LINE_BYTES, Process, ProcessManager},
+    procs::{InputCapacity, InputReplaced, MAX_LINE_BYTES, Process, ProcessManager},
 };
 use anyhow::Result;
 use axum::{
@@ -20,7 +20,7 @@ use futures::SinkExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{collections::HashMap, sync::Arc, time::Duration};
-use tokio::sync::RwLock;
+use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
 pub struct State {
     pub config: Arc<Config>,
     pub path: String,
@@ -28,6 +28,7 @@ pub struct State {
     pub procs: ProcessManager,
     info: RwLock<Value>,
     instance_id: String,
+    ws_slots: Arc<Semaphore>,
 }
 impl State {
     pub async fn new(config: Arc<Config>, path: String) -> Result<Arc<Self>> {
@@ -38,7 +39,12 @@ impl State {
                 config.keep_output_bytes,
                 config.detached_timeout_secs,
                 config.total_output_bytes,
+            )
+            .with_admission_limits(
+                config.total_input_bytes,
+                config.max_ws_connections_per_process,
             ),
+            ws_slots: Arc::new(Semaphore::new(config.max_ws_connections)),
             config,
             path,
             roots,
@@ -149,7 +155,13 @@ async fn json_errors(req: axum::extract::Request, next: axum::middleware::Next) 
 struct ApiError(StatusCode, &'static str, String);
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.0, Json(json!({"error":self.1,"message":self.2}))).into_response()
+        let mut response = (self.0, Json(json!({"error":self.1,"message":self.2}))).into_response();
+        if self.0 == StatusCode::TOO_MANY_REQUESTS {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+        }
+        response
     }
 }
 impl From<anyhow::Error> for ApiError {
@@ -295,10 +307,25 @@ async fn attach(
             "invalid after".into(),
         ));
     }
+    // Fail before changing generation: saturation must not replace the old link.
+    let global_slot = s.ws_slots.clone().try_acquire_owned().map_err(|_| {
+        ApiError(
+            StatusCode::TOO_MANY_REQUESTS,
+            "capacity_exhausted",
+            "node WebSocket capacity exhausted".into(),
+        )
+    })?;
+    let process_slot = p.reserve_ws().map_err(|_| {
+        ApiError(
+            StatusCode::TOO_MANY_REQUESTS,
+            "capacity_exhausted",
+            "process WebSocket capacity exhausted".into(),
+        )
+    })?;
     let mut response = ws
         .max_message_size(MAX_LINE_BYTES * 6 + 1024)
         .max_frame_size(MAX_LINE_BYTES * 6 + 1024)
-        .on_upgrade(move |socket| socket_loop(socket, p, after));
+        .on_upgrade(move |socket| socket_loop(socket, p, after, (global_slot, process_slot)));
     response.headers_mut().insert(
         "x-atrium-instance-id",
         HeaderValue::from_str(&s.instance_id).expect("UUID header"),
@@ -313,7 +340,12 @@ async fn send_message(socket: &mut WebSocket, m: Message) -> bool {
 async fn send(socket: &mut WebSocket, v: Value) -> bool {
     send_message(socket, Message::Text(v.to_string().into())).await
 }
-async fn socket_loop(mut socket: WebSocket, p: Arc<Process>, mut after: i64) {
+async fn socket_loop(
+    mut socket: WebSocket,
+    p: Arc<Process>,
+    mut after: i64,
+    _slots: (OwnedSemaphorePermit, OwnedSemaphorePermit),
+) {
     let (generation, mut changed) = p.attach().await;
     let mut ping = tokio::time::interval(Duration::from_secs(15));
     ping.tick().await;
@@ -373,7 +405,11 @@ async fn socket_loop(mut socket: WebSocket, p: Arc<Process>, mut after: i64) {
                 continue;
             }
         }
-        tokio::select! {r=changed.changed()=>{if r.is_err(){break}replay=true;},_=ping.tick()=>{if missed>=2{break}missed+=1;if !send_message(&mut socket,Message::Ping(Bytes::new())).await{break}},msg=socket.recv()=>{match msg{Some(Ok(Message::Text(text)))=>{if let Ok(v)=serde_json::from_str::<Value>(&text)&& let Some(line)=v["line"].as_str()&& p.try_input_for(generation,line.into()).await.is_err(){break}},Some(Ok(Message::Pong(_)))=>missed=0,Some(Ok(Message::Ping(p)))=>{if !send_message(&mut socket,Message::Pong(p)).await{break}},Some(Ok(Message::Close(_)))|None|Some(Err(_))=>break,_=>{}}}}
+        tokio::select! {r=changed.changed()=>{if r.is_err(){break}replay=true;},_=ping.tick()=>{if missed>=2{break}missed+=1;if !send_message(&mut socket,Message::Ping(Bytes::new())).await{break}},msg=socket.recv()=>{match msg{Some(Ok(Message::Text(text)))=>{if let Ok(v)=serde_json::from_str::<Value>(&text)&& let Some(line)=v["line"].as_str()&& let Err(error) = p.try_input_for(generation,line.into()).await {
+            let (code, reason) = if error.is::<InputReplaced>() { (4001, "replaced") } else if error.is::<InputCapacity>() { (1013, "stdin capacity exhausted; current input not accepted") } else { (1008, "current input not accepted; invalid or closed stream") };
+            let _ = send_message(&mut socket, Message::Close(Some(CloseFrame { code, reason: reason.into() }))).await;
+            break
+        }},Some(Ok(Message::Pong(_)))=>missed=0,Some(Ok(Message::Ping(p)))=>{if !send_message(&mut socket,Message::Pong(p)).await{break}},Some(Ok(Message::Close(_)))|None|Some(Err(_))=>break,_=>{}}}}
     }
     p.detach(generation).await;
     let _ = tokio::time::timeout(Duration::from_secs(2), socket.close()).await;
@@ -446,4 +482,175 @@ async fn fs_changes(
     blocking(move || s.roots.changes(&q.path, q.since))
         .await
         .map(Json)
+}
+
+#[cfg(all(test, unix))]
+mod admission_tests {
+    use super::*;
+    use tungstenite::client::IntoClientRequest;
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bounded_websocket_admission_preserves_old_link_and_releases_every_slot() {
+        let config = Config {
+            roots: vec![std::env::temp_dir()],
+            loopback_only: true,
+            discover_magpie: false,
+            token: "admission-fixture".into(),
+            total_input_bytes: 4,
+            max_ws_connections: 2,
+            max_ws_connections_per_process: 2,
+            ..Config::default()
+        };
+        let state = State::new(Arc::new(config), "/usr/bin:/bin".into())
+            .await
+            .unwrap();
+        let process = state
+            .procs
+            .spawn(
+                "echo".into(),
+                vec!["/bin/cat".into()],
+                std::env::temp_dir(),
+                "test".into(),
+                HashMap::new(),
+                "/usr/bin:/bin".into(),
+            )
+            .await
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = router(state.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let s = state.clone();
+        let p = process.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let request = || {
+                let mut r = format!("ws://{address}/v1/procs/{}/attach?after=-1", p.id)
+                    .into_client_request()
+                    .unwrap();
+                r.headers_mut()
+                    .insert("Authorization", "Bearer admission-fixture".parse().unwrap());
+                r
+            };
+            let connect = || {
+                let (ws, _) = tungstenite::connect(request()).unwrap();
+                if let tungstenite::stream::MaybeTlsStream::Plain(stream) = ws.get_ref() {
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(3)))
+                        .unwrap();
+                }
+                ws
+            };
+            let reject = || match tungstenite::connect(request()) {
+                Err(tungstenite::Error::Http(r)) => {
+                    assert_eq!(r.status(), 429);
+                    assert_eq!(r.headers()["retry-after"], "1");
+                    let body: Value = serde_json::from_slice(r.body().as_ref().unwrap()).unwrap();
+                    assert_eq!(body["error"], "capacity_exhausted");
+                }
+                _ => panic!("expected 429"),
+            };
+            let echo = |ws: &mut tungstenite::WebSocket<
+                tungstenite::stream::MaybeTlsStream<std::net::TcpStream>,
+            >| {
+                ws.send(tungstenite::Message::text("{\"line\":\"ok\"}"))
+                    .unwrap();
+                loop {
+                    if let tungstenite::Message::Text(t) = ws.read().unwrap() {
+                        let v: Value = serde_json::from_str(&t).unwrap();
+                        assert_eq!(v["line"], "ok");
+                        break;
+                    }
+                }
+            };
+            let pending_global = s.ws_slots.clone().try_acquire_owned().unwrap();
+            let mut old = connect();
+            reject();
+            echo(&mut old);
+            drop(pending_global);
+            let pending_process = p.reserve_ws().unwrap();
+            reject();
+            assert_eq!(
+                s.ws_slots.available_permits(),
+                1,
+                "per-process failure rolls back global slot"
+            );
+            echo(&mut old);
+            drop(pending_process);
+            let mut replacement = connect();
+            loop {
+                if let tungstenite::Message::Close(frame) = old.read().unwrap() {
+                    assert_eq!(u16::from(frame.unwrap().code), 4001);
+                    break;
+                }
+            }
+            drop(old);
+            echo(&mut replacement);
+            replacement
+                .send(tungstenite::Message::text(
+                    "{\"line\":\"too-large-for-tiny-test-budget\"}",
+                ))
+                .unwrap();
+            loop {
+                if let tungstenite::Message::Close(frame) = replacement.read().unwrap() {
+                    let frame = frame.unwrap();
+                    assert_eq!(u16::from(frame.code), 1013);
+                    assert!(frame.reason.contains("not accepted"));
+                    break;
+                }
+            }
+            drop(replacement);
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while s.ws_slots.available_permits() != 2 {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let a = p.reserve_ws().unwrap();
+            let b = p.reserve_ws().unwrap();
+            assert!(p.reserve_ws().is_err());
+            drop((a, b));
+            // Abandon a valid upgrade immediately after its response. The
+            // on_upgrade task must return both captured permits on socket EOF.
+            for _ in 0..3 {
+                use std::io::{BufRead, Write};
+                let mut stream=std::net::TcpStream::connect(address).unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                write!(stream,"GET /v1/procs/{}/attach HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer admission-fixture\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",p.id).unwrap();
+                let mut reader=std::io::BufReader::new(stream);
+                let mut line=String::new();reader.read_line(&mut line).unwrap();assert!(line.contains("101"));
+                loop { line.clear();reader.read_line(&mut line).unwrap();if line=="\r\n" {break;} }
+                reader.get_ref().shutdown(std::net::Shutdown::Both).unwrap();drop(reader);
+                let deadline=std::time::Instant::now()+Duration::from_secs(5);
+                while s.ws_slots.available_permits()!=2 { assert!(std::time::Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10)); }
+            }
+            // Invalid HTTP upgrade is rejected before admission; cannot consume slots.
+            assert!(
+                ureq::get(&format!("http://{address}/v1/procs/{}/attach", p.id))
+                    .set("Authorization", "Bearer admission-fixture")
+                    .call()
+                    .is_err()
+            );
+            assert_eq!(s.ws_slots.available_permits(), 2);
+        })
+        .await;
+        state.procs.shutdown().await;
+        server.abort();
+        let _ = server.await;
+        result.unwrap();
+        let snapshot = process.snapshot(0).await;
+        assert_eq!(
+            snapshot
+                .frames
+                .iter()
+                .filter(|f| f.get("line").is_some())
+                .count(),
+            3,
+            "accepted input preserved, rejected input absent"
+        );
+    }
 }

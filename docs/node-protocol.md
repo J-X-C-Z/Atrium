@@ -294,3 +294,42 @@ them. Existing queued-input retry/send-failure behavior is unchanged by the
 lifecycle-identity extension, and callers must not infer reliable delivery or
 automatically retry consequential commands from a reconnect alone. Output
 replay covers only retained sequences and may report a `gap`.
+
+### Native input and attachment admission bounds
+
+`total_input_bytes` defaults to 256 MiB across the node; it must be at least
+64 MiB so an otherwise empty node can admit one maximum legal payload. Existing
+per-process 128 MiB and 32-message stdin limits remain. Accounting covers UTF-8
+payload bytes in queued **and currently writing** inputs, not newline or object
+metadata. Two RAII reservations use checked atomic counters and rollback: failure
+of the global budget, a full/closed queue, cancellation, or completed write
+returns reservations. Already accepted messages are not undone by rejecting a
+later input. This is fail-fast admission/backpressure, not unlimited waiting.
+
+`max_ws_connections` defaults to 256 node-wide and
+`max_ws_connections_per_process` to 2. Each must be between 2 and Tokio's
+`Semaphore::MAX_PERMITS`, inclusive. Two per-process slots allow an existing
+client and one pending replacement. Both permits are reserved after normal
+authentication, identity and process/query validation, before changing the
+attachment generation. They remain held through upgrade and socket lifetime.
+Saturation returns HTTP 429 `capacity_exhausted` and `Retry-After: 1`, leaving
+the existing attachment intact. Failed/abandoned upgrades, replacement and
+socket teardown release permits. No unbounded semaphore waiter queue exists.
+“Pending” here means upgrade candidates that reached the authenticated handler;
+TCP sockets and partially received HTTP headers are outside this admission cap.
+
+A full input budget/queue closes that WebSocket with code 1013 and the specific
+reason `stdin capacity exhausted; current input not accepted`. This says only
+the rejected current line was not enqueued. Previously accepted inputs may
+still execute; uncertain network delivery is not rolled back. Updated clients
+recognize this application-specific reason as terminal `Gone`, close their RPC
+reader and do not automatically replay queued input. Other generic 1013 closes
+keep their existing reconnect behavior; handshake 429 remains retryable.
+Invalid/closed input uses code 1008 with a distinct terminal application reason;
+attachment replacement remains 4001. Old clients can still connect and operate
+normally below the limits, but may retry these newly explicit refusals and
+cannot be promised the updated terminal behavior.
+
+These are queue/connection admission bounds, **not an RSS hard limit**. The
+current WebSocket/JSON frame, parsing/escaping buffers, output replay snapshots,
+HTTP/TCP buffers, and allocator overhead have separate lifetimes and limits.

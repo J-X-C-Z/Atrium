@@ -684,6 +684,19 @@ impl Link {
                     }
                 }
                 Ok(Message::Close(frame)) => {
+                    if frame.as_ref().is_some_and(|f| {
+                        (u16::from(f.code) == 1013
+                            && f.reason.starts_with(
+                                "stdin capacity exhausted; current input not accepted",
+                            ))
+                            || (u16::from(f.code) == 1008
+                                && f.reason.starts_with(
+                                    "current input not accepted; invalid or closed stream",
+                                ))
+                    }) {
+                        self.set(LinkState::Gone("node rejected current input; prior input delivery may be uncertain; no automatic replay".into()));
+                        return Stop::Done;
+                    }
                     if frame.as_ref().is_some_and(|f| u16::from(f.code) == 4001) {
                         self.set(LinkState::Gone("attached elsewhere".into()));
                         return Stop::Done;
@@ -1021,6 +1034,53 @@ mod tests {
             *state.lock().unwrap(),
             LinkState::Gone("node restarted; previous process state is lost".into())
         );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn capacity_close_is_terminal_but_upgrade_429_can_retry() {
+        use tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+                assert!(request.len() < 8192);
+            }
+            stream.write_all(b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nRetry-After: 1\r\n\r\n").unwrap();
+            drop(stream);
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut ws = tungstenite::accept(stream).unwrap();
+            assert!(matches!(ws.read().unwrap(), Message::Text(_)));
+            ws.close(Some(CloseFrame {
+                code: CloseCode::Again,
+                reason: "stdin capacity exhausted; current input not accepted".into(),
+            }))
+            .unwrap();
+        });
+        let client = NodeClient::new(&format!("http://{address}"), None);
+        let mut attached = client.attach("p", 0);
+        let wait = |predicate: fn(&LinkState) -> bool| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(8);
+            while !predicate(&attached.state.lock().unwrap()) {
+                assert!(std::time::Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(10));
+            }
+        };
+        wait(|s| matches!(s, LinkState::Reconnecting { .. }));
+        attached.writer.write_all(b"once\n").unwrap();
+        wait(|s| matches!(s,LinkState::Gone(why) if why.contains("rejected current input")));
+        assert!(attached.writer.write_all(b"never-retry\n").is_err());
         server.join().unwrap();
     }
 
