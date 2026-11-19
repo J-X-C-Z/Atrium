@@ -31,6 +31,7 @@ use gpui::{
 };
 
 use crate::i18n::{t, tf};
+use crate::settings::TranscriptMode;
 use crate::workspace::{Workspace, is_image};
 
 /// The reading column's width.
@@ -407,6 +408,8 @@ fn note(icon: IconName, text: String, ok: bool, cx: &App) -> AnyElement {
 }
 
 fn item(workspace: &Entity<Workspace>, item: &Item, live: bool, cx: &App) -> AnyElement {
+    let mode = workspace.read(cx).settings.transcript_mode;
+    let verbose = mode == TranscriptMode::Verbose;
     match item {
         Item::User {
             id,
@@ -445,7 +448,12 @@ fn item(workspace: &Entity<Workspace>, item: &Item, live: bool, cx: &App) -> Any
             .into_any_element(),
         Item::Reasoning { id, text } => {
             let took = workspace.read(cx).thought_for(id);
-            ThinkingBlock::new(key("thinking", id), text.clone(), live, took).into_any_element()
+            let block = ThinkingBlock::new(key("thinking", id), text.clone(), live, took);
+            match mode {
+                TranscriptMode::Normal => block,
+                _ => block.expanded(true),
+            }
+            .into_any_element()
         }
         Item::Command {
             id,
@@ -474,6 +482,9 @@ fn item(workspace: &Entity<Workspace>, item: &Item, live: bool, cx: &App) -> Any
             }
             if let Some(ms) = duration_ms {
                 card = card.took(Duration::from_millis(*ms));
+            }
+            if verbose {
+                card = card.expanded(true);
             }
             card.into_any_element()
         }
@@ -516,6 +527,9 @@ fn item(workspace: &Entity<Workspace>, item: &Item, live: bool, cx: &App) -> Any
             }
             if let Some(ms) = duration_ms {
                 card = card.took(Duration::from_millis(*ms));
+            }
+            if verbose {
+                card = card.expanded(true);
             }
             card.into_any_element()
         }

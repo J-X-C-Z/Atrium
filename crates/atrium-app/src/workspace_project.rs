@@ -8,7 +8,8 @@ use std::{
 };
 
 use atrium_core::{
-    AgentEvent, EntryKind, GoalStatus, Item, McpServer, ThreadMeta, Transcript, TurnStatus,
+    AgentEvent, EntryKind, GoalStatus, Item, ItemStatus, McpServer, ThreadMeta, Transcript,
+    TurnStatus,
 };
 use codex_client::StartThread;
 use gpui::Context;
@@ -43,6 +44,103 @@ pub enum StreamState {
     NeedsYou(usize),
     Failed(String),
     Idle,
+}
+
+/// What the watch pane shows of a conversation.
+#[derive(Clone, Debug)]
+pub struct Glance {
+    pub title: String,
+    pub state: StreamState,
+    pub said: Option<String>,
+    pub running: Vec<Activity>,
+}
+
+/// Something a conversation is doing in the background, or did lately.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Activity {
+    pub kind: ActivityKind,
+    pub label: String,
+    pub detail: Option<String>,
+    pub live: bool,
+    pub failed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActivityKind {
+    Command,
+    Tool,
+    SubAgent,
+    Search,
+}
+
+/// Commands, tools, sub-agents and searches of `transcript`, newest first:
+/// the running ones, then the last few finished.
+pub fn activities(transcript: &Transcript) -> Vec<Activity> {
+    let mut out: Vec<Activity> = transcript
+        .entries()
+        .iter()
+        .rev()
+        .filter_map(|e| {
+            let EntryKind::Item(item) = &e.kind else {
+                return None;
+            };
+            let (kind, label, detail, status) = match item {
+                Item::Command {
+                    command,
+                    status,
+                    exit_code,
+                    ..
+                } => (
+                    ActivityKind::Command,
+                    command.clone(),
+                    exit_code.filter(|c| *c != 0).map(|c| format!("exit {c}")),
+                    *status,
+                ),
+                Item::Tool { name, status, .. } => {
+                    (ActivityKind::Tool, name.clone(), None, *status)
+                }
+                Item::SubAgent {
+                    label,
+                    status,
+                    detail,
+                    ..
+                } => (
+                    ActivityKind::SubAgent,
+                    label.clone(),
+                    detail.clone(),
+                    *status,
+                ),
+                Item::WebSearch { query, .. } => (
+                    ActivityKind::Search,
+                    query.clone(),
+                    None,
+                    if e.live {
+                        ItemStatus::InProgress
+                    } else {
+                        ItemStatus::Completed
+                    },
+                ),
+                _ => return None,
+            };
+            Some(Activity {
+                kind,
+                label,
+                detail,
+                live: status == ItemStatus::InProgress,
+                failed: matches!(status, ItemStatus::Failed | ItemStatus::Declined),
+            })
+        })
+        .take(40)
+        .collect();
+    out.sort_by_key(|a| !a.live);
+    out
+}
+
+fn running_now(transcript: &Transcript) -> Vec<Activity> {
+    activities(transcript)
+        .into_iter()
+        .filter(|a| a.live)
+        .collect()
 }
 
 /// What a workstream's card shows.
@@ -153,8 +251,47 @@ impl Workspace {
         }]
     }
 
-    /// The `atrium` MCP server for the workstream `thread` belongs to, if any.
+    /// The MCP servers the user set up in Atrium for every agent. None for
+    /// agents on other devices, where their commands may not exist.
+    pub fn user_mcp(&self, backend: &str) -> Vec<McpServer> {
+        if agents::split_backend(backend).1.is_some() {
+            return Vec::new();
+        }
+        self.settings
+            .mcp_servers
+            .iter()
+            .filter(|m| !m.off)
+            .map(|m| McpServer {
+                name: m.name.clone(),
+                command: m.command.clone(),
+                args: m.args.clone(),
+                env: m.env.clone(),
+            })
+            .collect()
+    }
+
+    /// The variables of the environment new sessions run with.
+    pub fn session_env(&self) -> Vec<(String, String)> {
+        let Some(name) = &self.settings.environment else {
+            return Vec::new();
+        };
+        self.settings
+            .environments
+            .iter()
+            .find(|e| &e.name == name)
+            .map(|e| e.vars.clone())
+            .unwrap_or_default()
+    }
+
+    /// The MCP servers a session of `thread` gets: the user's own, plus the
+    /// `atrium` server for the workstream it belongs to, if any.
     pub fn mcp_for_thread(&self, thread: &str, backend: &str) -> Vec<McpServer> {
+        let mut servers = self.user_mcp(backend);
+        servers.extend(self.project_mcp_for_thread(thread, backend));
+        servers
+    }
+
+    fn project_mcp_for_thread(&self, thread: &str, backend: &str) -> Vec<McpServer> {
         self.projects
             .iter()
             .find_map(|p| {
@@ -306,6 +443,91 @@ impl Workspace {
     }
 
     /// Starts a new workstream: its session, its goal and its kickoff.
+    /// Starts a conversation with `text` in the background, with the shown
+    /// conversation's agent and folder, without leaving the shown one. For
+    /// "start all" on suggested follow-ups. Agents on other devices get a
+    /// new chat with the text filled in instead.
+    pub fn start_chat(&mut self, text: String, cx: &mut Context<Self>) {
+        let backend = self.view_backend().to_string();
+        let cwd = PathBuf::from(
+            self.active_thread()
+                .map(|t| t.cwd.clone())
+                .unwrap_or_else(|| self.settings.working_dir().display().to_string()),
+        );
+        let title: String = text.chars().take(60).collect();
+        if backend == CODEX {
+            let Some(client) = self.client.clone() else {
+                return;
+            };
+            let options = StartThread {
+                cwd: Some(cwd.display().to_string()),
+                model: self.settings.model.clone(),
+                approval_policy: Some(self.settings.mode.approval_policy().into()),
+                sandbox: Some(self.settings.mode.sandbox_mode().into()),
+                mcp_servers: self.user_mcp(&backend),
+                env: self.session_env(),
+            };
+            cx.spawn(async move |this, cx| {
+                let meta = match client.thread_start(options).await {
+                    Ok(meta) => meta,
+                    Err(error) => {
+                        let _ =
+                            this.update(cx, |_, cx| cx.emit(Notice::Error(format!("{error:#}"))));
+                        return;
+                    }
+                };
+                let thread = meta.id.clone();
+                let _ = client.thread_set_name(&thread, &title).await;
+                let _ = this.update(cx, |ws, cx| {
+                    ws.upsert_thread(ThreadMeta {
+                        name: Some(title.clone()),
+                        ..meta
+                    });
+                    ws.transcripts.insert(thread.clone(), Transcript::new());
+                    ws.send_to_thread(thread, Composed::text(text), cx);
+                });
+            })
+            .detach();
+            return;
+        }
+        let Some(client) = self.acp(&backend) else {
+            self.new_chat(cx);
+            cx.emit(super::Fill(Composed::text(text)));
+            return;
+        };
+        let mcp = self.user_mcp(&backend);
+        cx.spawn(async move |this, cx| {
+            let start = match client.new_session_with(&cwd, &mcp).await {
+                Ok(start) => start,
+                Err(error) => {
+                    let _ = this.update(cx, |_, cx| cx.emit(Notice::Error(format!("{error:#}"))));
+                    return;
+                }
+            };
+            let _ = this.update(cx, |ws, cx| {
+                let now = jiff::Timestamp::now().as_second();
+                let thread = start.session_id.clone();
+                ws.upsert_thread(ThreadMeta {
+                    id: thread.clone(),
+                    backend: backend.clone(),
+                    name: Some(title.clone()),
+                    preview: title.clone(),
+                    cwd: cwd.display().to_string(),
+                    model: None,
+                    created_at: now,
+                    updated_at: now,
+                });
+                ws.session_options.insert(thread.clone(), start.options);
+                if let Some(commands) = ws.agent_commands.get(&backend).cloned() {
+                    ws.commands.insert(thread.clone(), commands);
+                }
+                ws.transcripts.insert(thread.clone(), Transcript::new());
+                ws.send_to_thread(thread, Composed::text(text), cx);
+            });
+        })
+        .detach();
+    }
+
     pub fn create_stream(
         &mut self,
         name: String,
@@ -371,7 +593,12 @@ impl Workspace {
                 model: self.settings.model.clone(),
                 approval_policy: Some(self.settings.mode.approval_policy().into()),
                 sandbox: Some(self.settings.mode.sandbox_mode().into()),
-                mcp_servers: Self::mcp_servers(&root, &id, &backend),
+                mcp_servers: {
+                    let mut servers = self.user_mcp(&backend);
+                    servers.extend(Self::mcp_servers(&root, &id, &backend));
+                    servers
+                },
+                env: self.session_env(),
             };
             let objective = stream.goal.clone();
             cx.spawn(async move |this, cx| {
@@ -410,7 +637,8 @@ impl Workspace {
             let Some(client) = self.acp(&backend) else {
                 return;
             };
-            let mcp = Self::mcp_servers(&root, &id, &backend);
+            let mut mcp = self.user_mcp(&backend);
+            mcp.extend(Self::mcp_servers(&root, &id, &backend));
             cx.spawn(async move |this, cx| {
                 let start = match client.new_session_with(&cwd, &mcp).await {
                     Ok(start) => start,
@@ -753,6 +981,42 @@ impl Workspace {
     }
 
     /// What each workstream of the shown project is doing.
+    /// A conversation at a glance, for watching it beside another: its
+    /// title, state, last words and what it is running now.
+    pub fn glance(&self, thread: &str) -> Option<Glance> {
+        let meta = self.threads.iter().find(|t| t.id == thread);
+        let stream = self.projects.iter().find_map(|p| {
+            p.file
+                .streams
+                .iter()
+                .find(|s| s.thread_id.as_deref() == Some(thread))
+                .map(|s| format!("{} · {}", p.file.name, s.name))
+        });
+        let title =
+            stream.or_else(|| meta.map(|m| m.name.clone().unwrap_or_else(|| m.preview.clone())))?;
+        let transcript = self.transcripts.get(thread);
+        let state = match transcript {
+            None => StreamState::Idle,
+            Some(t) if waiting_on_user(t) > 0 => StreamState::NeedsYou(waiting_on_user(t)),
+            Some(t) if t.is_running() => StreamState::Working,
+            Some(t) => last_failure(t).map_or(StreamState::Idle, StreamState::Failed),
+        };
+        let said = transcript.and_then(|t| {
+            t.entries().iter().rev().find_map(|e| match &e.kind {
+                EntryKind::Item(Item::Agent { text, .. }) if !text.trim().is_empty() => {
+                    Some(text.trim().to_string())
+                }
+                _ => None,
+            })
+        });
+        Some(Glance {
+            title,
+            state,
+            said,
+            running: transcript.map(running_now).unwrap_or_default(),
+        })
+    }
+
     pub fn stream_views(&self) -> Vec<StreamView> {
         let Some(project) = self.active_project() else {
             return Vec::new();

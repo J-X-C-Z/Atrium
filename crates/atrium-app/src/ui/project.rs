@@ -65,7 +65,7 @@ impl AtriumTab {
     }
 }
 
-fn state_color(state: &StreamState, cx: &App) -> Hsla {
+pub(super) fn state_color(state: &StreamState, cx: &App) -> Hsla {
     let colors = &cx.theme().colors;
     match state {
         StreamState::Working => colors.info,
@@ -76,7 +76,7 @@ fn state_color(state: &StreamState, cx: &App) -> Hsla {
     }
 }
 
-fn state_label(state: &StreamState) -> String {
+pub(super) fn state_label(state: &StreamState) -> String {
     match state {
         StreamState::Starting => t("Starting…").into(),
         StreamState::Offline => t("Agent not running").into(),
@@ -1195,6 +1195,7 @@ fn flow_view(workspace: &Entity<Workspace>, views: &[StreamView], cx: &App) -> A
                     .child(lead.stream.name.clone()),
             )
             .child(Badge::new(agent_short(ws, &lead.stream.backend)))
+            .children(lead.stream.pr.as_ref().map(|pr| pr_badge(pr, cx)))
             .child(
                 div()
                     .text_size(tiny)
@@ -1365,7 +1366,12 @@ fn flow_view(workspace: &Entity<Workspace>, views: &[StreamView], cx: &App) -> A
                         .pb_1()
                         .child(row),
                 )
-                .children(pool_strip(workspace, lead, &workers, &pool, cx)),
+                .children(pool_strip(workspace, lead, &workers, &pool, cx))
+                .children(
+                    ws.active_project()
+                        .and_then(|p| p.preview_of(&lead.stream.id))
+                        .map(|path| preview_strip(path, cx)),
+                ),
             "lane",
             0,
             Enter::Rise,
@@ -1526,6 +1532,82 @@ fn proposals_strip(workspace: &Entity<Workspace>, cx: &App) -> Option<AnyElement
         );
     }
     Some(strip.into_any_element())
+}
+
+/// "PR #12 · CI passing", linking to the pull request.
+fn pr_badge(pr: &project::PullRequest, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let (color, checks) = match pr.checks {
+        project::Checks::Passing => (colors.success, t("CI passing")),
+        project::Checks::Failing => (colors.danger, t("CI failing")),
+        project::Checks::Pending => (colors.warning, t("CI running")),
+        project::Checks::None => (colors.fg_subtle, ""),
+    };
+    let url = pr.url.clone();
+    div()
+        .id(SharedString::from(format!("pr-{}", pr.number)))
+        .flex()
+        .items_center()
+        .gap_1()
+        .px_1p5()
+        .rounded_full()
+        .border_1()
+        .border_color(color.opacity(0.5))
+        .text_size(theme.text_size(TextSize::Xs))
+        .text_color(color)
+        .cursor_pointer()
+        .on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            cx.open_url(&url)
+        })
+        .child(
+            Icon::new(IconName::GitBranch)
+                .size(IconSize::Xs)
+                .color(color),
+        )
+        .child(format!("#{}", pr.number))
+        .when(pr.state == "merged", |el| el.child(t("merged")))
+        .when(!checks.is_empty() && pr.state != "merged", |el| {
+            el.child(checks)
+        })
+        .into_any_element()
+}
+
+/// The lead's latest preview screenshot, from `.atrium/previews/<id>.png`.
+fn preview_strip(path: std::path::PathBuf, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let open = path.clone();
+    div()
+        .id(SharedString::from(format!("preview-{}", path.display())))
+        .flex()
+        .items_start()
+        .gap_2()
+        .pt_2()
+        .border_t_1()
+        .border_color(colors.border)
+        .child(
+            div()
+                .flex_none()
+                .rounded(theme.radius(Radius::Md))
+                .overflow_hidden()
+                .border_1()
+                .border_color(colors.border)
+                .cursor_pointer()
+                .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
+                    cx.stop_propagation();
+                    cx.open_with_system(&open)
+                })
+                .child(gpui::img(path).h(px(96.)).max_w(px(180.))),
+        )
+        .child(
+            div()
+                .text_size(theme.text_size(TextSize::Xs))
+                .text_color(colors.fg_subtle)
+                .child(t("Latest preview. Click to open it full size.")),
+        )
+        .into_any_element()
 }
 
 /// Under a lead's phases: its task pool and what each sub-agent is on.
@@ -2451,7 +2533,7 @@ fn scope_text(scope: &[String]) -> String {
 }
 
 /// At most `max` characters, ending in an ellipsis when cut.
-fn clip(text: &str, max: usize) -> String {
+pub(super) fn clip(text: &str, max: usize) -> String {
     let text = text.trim();
     if text.chars().count() <= max {
         return text.to_string();

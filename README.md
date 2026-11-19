@@ -247,9 +247,20 @@ cargo test --workspace
 
 ## 下一步
 
-借鉴 Claude 桌面版（[文档](https://code.claude.com/docs/en/desktop.md)）：
+借鉴 Claude 桌面版（[文档](https://code.claude.com/docs/en/desktop.md)），界面这边已全部做完：
 
-- 已做：系统通知（没在看的对话做完、失败、需要你时弹出，设置里可关）；改动面板（`Ctrl/⌘+Shift+D`，按文件看 diff、点行写批注、一次发回给 agent）
-- 交给 Codex：每条工作线独立 worktree（[`docs/worktree-implementation.md`](docs/worktree-implementation.md)）；手机通过 tailnet 查看和批准（[`docs/remote-view-implementation.md`](docs/remote-view-implementation.md)，网页部分由界面这边做）
-- 之后：分屏和多窗口同时看几条工作线；每条工作线的后台任务面板（正在跑的命令、子 agent）；负责人建议的下一批任务一键开工；PR 与 CI 状态挂在负责人卡片上；前端负责人的应用预览截图；按文件夹记住权限模式；保存的环境（文件夹 + 环境变量）；统一管理所有 agent 的 MCP 和 skill；对话显示档位（普通 / 思考 / 详细）；上下文卡片里的"压缩"按钮
+- 系统通知：没在看的对话做完、失败、需要你时弹出（设置里可关）
+- 右侧面板（`Ctrl/⌘+Shift+D` 或顶栏按钮），三个视图：
+  - **改动**：按文件看 diff，点行写批注，一次发回给 agent
+  - **活动**：正在跑的命令、工具、子 agent，可"停止这一轮"；工作线的子 agent 一览
+  - **并排**：同时盯最多四段对话（状态、正在跑什么、最后说了什么），一键跳过去
+- 建议的下一步：agent 回答末尾的"下一步"列表变成一组按钮：发到这里、在新对话里开始、全部开始
+- 对话显示档位（`Ctrl+O`）：普通 / 显示思考 / 详细（展开所有工具卡片）
+- 上下文卡片的"压缩"按钮，ACP agent 也能用（通过它的 `/compact` 命令）
+- 每个文件夹记住上次的权限模式
+- 设置里统一管理：所有 agent 共用的 **MCP 服务器**、命名的 **环境变量集**、两边的 **Skill**（一键安装 Atrium skill，一键共享给另一个 agent）
+- 负责人卡片上的 **PR / CI 状态**和 **最新预览截图**（`.atrium/previews/<id>.png`）
+
+交给 Codex（见 `AGENTS.md` 的清单）：每条工作线独立 worktree；手机查看的接口；PR/CI 轮询与 CI 失败自动修、按 `.atrium/launch.json` 自动截预览图、ACP agent 使用所选环境。
+
 - 原有：中庭写入的 MCP 工具已完成；编排内核独立为 daemon；ACP agent 的插话、agent 内登录；场景（Scene）配置与网格面板

@@ -364,8 +364,9 @@ impl Workspace {
         // Claim the slot so a second call does not make another session.
         self.warm
             .insert(backend.clone(), (String::new(), cwd.clone()));
+        let mcp = self.user_mcp(&backend);
         cx.spawn(async move |this, cx| {
-            let started = client.new_session(&cwd).await;
+            let started = client.new_session_with(&cwd, &mcp).await;
             let _ = this.update(cx, |ws, cx| match started {
                 Ok(start) => {
                     ws.known_options
@@ -469,13 +470,14 @@ impl Workspace {
                 let warm_options = warm
                     .as_ref()
                     .and_then(|id| self.session_options.get(id).cloned());
+                let mcp = self.user_mcp(&backend);
                 cx.spawn(async move |this, cx| {
                     let started = match (warm, warm_options) {
                         (Some(session_id), Some(options)) => Ok(acp_client::SessionStart {
                             session_id,
                             options,
                         }),
-                        _ => client.new_session(&cwd).await,
+                        _ => client.new_session_with(&cwd, &mcp).await,
                     };
                     let start = match started {
                         Ok(start) => start,

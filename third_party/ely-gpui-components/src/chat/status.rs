@@ -327,6 +327,7 @@ pub struct ThinkingBlock {
     reasoning: SharedString,
     thinking: bool,
     took: Duration,
+    expanded: Option<bool>,
 }
 
 impl ThinkingBlock {
@@ -342,14 +343,21 @@ impl ThinkingBlock {
             reasoning: reasoning.into(),
             thinking,
             took,
+            expanded: None,
         }
+    }
+
+    /// Opens (or folds) the reasoning regardless of the reader's last click.
+    pub fn expanded(mut self, open: bool) -> Self {
+        self.expanded = Some(open);
+        self
     }
 }
 
 impl RenderOnce for ThinkingBlock {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let open = window.use_keyed_state((self.id.clone(), "open"), cx, |_, _| false);
-        let opened = *open.read(cx);
+        let opened = self.expanded.unwrap_or(*open.read(cx));
         let theme = cx.theme();
         let colors = theme.colors.clone();
         let header: gpui::AnyElement = if self.thinking {

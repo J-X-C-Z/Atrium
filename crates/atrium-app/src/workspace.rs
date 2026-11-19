@@ -30,7 +30,7 @@ mod devices;
 mod projects;
 pub use acp::{AcpAgent, AgentStatus, CODEX};
 pub use devices::{Device, DeviceStatus};
-pub use projects::{Room, StreamState, StreamView};
+pub use projects::{Activity, ActivityKind, Room, StreamState, StreamView, activities};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
@@ -127,6 +127,8 @@ pub struct Workspace {
     /// not notify.
     pub window_active: bool,
     alerts: crate::alerts::Alerts,
+    /// Conversations whose suggested follow-ups the user dismissed or used.
+    dismissed_next: std::collections::HashSet<String>,
     transcripts: HashMap<String, Transcript>,
     /// The draft's transcript, shown while its thread is being created.
     draft: Transcript,
@@ -207,6 +209,7 @@ impl Workspace {
             nav: 0,
             window_active: true,
             alerts: Default::default(),
+            dismissed_next: Default::default(),
             transcripts: HashMap::new(),
             draft: Transcript::new(),
             loading: HashSet::new(),
@@ -457,6 +460,7 @@ impl Workspace {
                 }
             }
             AgentEvent::TurnStarted { thread_id, .. } => {
+                self.dismissed_next.remove(thread_id);
                 self.turn_started
                     .entry(thread_id.clone())
                     .or_insert_with(Instant::now);
@@ -609,6 +613,37 @@ impl Workspace {
     }
 
     /// How long a reasoning item thought, or has been thinking.
+    /// The follow-ups the agent proposed at the end of its last answer in the
+    /// shown conversation, once it has finished, unless dismissed.
+    pub fn suggested_next(&self) -> Vec<String> {
+        let Some(thread) = self.active_thread_id() else {
+            return Vec::new();
+        };
+        let Some(transcript) = self.transcripts.get(thread) else {
+            return Vec::new();
+        };
+        if transcript.is_running() || self.dismissed_next.contains(thread) {
+            return Vec::new();
+        }
+        match transcript.entries().last().map(|e| &e.kind) {
+            Some(atrium_core::EntryKind::Item(Item::Agent { text, .. })) => next_steps(text),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Hides the shown conversation's suggested follow-ups until its next answer.
+    pub fn dismiss_next(&mut self, cx: &mut Context<Self>) {
+        if let Some(thread) = self.active_thread_id().map(str::to_owned) {
+            self.dismissed_next.insert(thread);
+            cx.notify();
+        }
+    }
+
+    /// The transcript of `thread`, when loaded.
+    pub fn transcript_of(&self, thread: &str) -> Option<&Transcript> {
+        self.transcripts.get(thread)
+    }
+
     pub fn thought_for(&self, item_id: &str) -> Duration {
         match self.timings.get(item_id) {
             Some((_, Some(took))) => *took,
@@ -1346,7 +1381,8 @@ impl Workspace {
                     },
                     approval_policy: Some(self.settings.mode.approval_policy().into()),
                     sandbox: Some(self.settings.mode.sandbox_mode().into()),
-                    mcp_servers: Vec::new(),
+                    mcp_servers: self.user_mcp(&backend),
+                    env: self.session_env(),
                 };
                 let title = composed.text.clone();
                 cx.spawn(async move |this, cx| {
@@ -1547,6 +1583,17 @@ impl Workspace {
 
     /// Asks Codex to summarize the shown chat's history to free context.
     pub fn compact(&mut self, cx: &mut Context<Self>) {
+        // ACP agents compact through their own `/compact` command.
+        if !self.is_codex_view() {
+            if self.can_compact() {
+                self.send(Composed::text("/compact".into()), cx);
+            } else {
+                cx.emit(Notice::Info(
+                    t("This agent cannot compact a conversation.").into(),
+                ));
+            }
+            return;
+        }
         let (Some(thread_id), Some(client)) = (
             self.active_thread_id().map(str::to_owned),
             self.view_codex(),
@@ -1590,6 +1637,7 @@ impl Workspace {
                     approval_policy: Some(AccessMode::ReadOnly.approval_policy().into()),
                     sandbox: Some(AccessMode::ReadOnly.sandbox_mode().into()),
                     mcp_servers: Vec::new(),
+                    env: Vec::new(),
                 };
                 cx.spawn(async move |this, cx| {
                     let meta = match client.thread_start(options).await {
@@ -1695,7 +1743,31 @@ impl Workspace {
 
     pub fn set_mode(&mut self, mode: AccessMode, cx: &mut Context<Self>) {
         self.settings.mode = mode;
+        let folder = self.settings.working_dir();
+        self.settings.folder_modes.insert(folder, mode);
         self.settings.save();
+        cx.notify();
+    }
+
+    /// Whether the shown conversation can be compacted: any Codex thread,
+    /// or an ACP agent offering `/compact`.
+    pub fn can_compact(&self) -> bool {
+        let Some(thread) = self.active_thread_id() else {
+            return false;
+        };
+        self.is_codex_view()
+            || self
+                .commands
+                .get(thread)
+                .is_some_and(|c| c.iter().any(|c| c.name == "compact"))
+    }
+
+    /// Shows the next of normal, thinking and verbose views of the chat.
+    pub fn cycle_transcript_mode(&mut self, cx: &mut Context<Self>) {
+        let mode = self.settings.transcript_mode.next();
+        self.settings.transcript_mode = mode;
+        self.settings.save();
+        cx.emit(Notice::Success(t(mode.label()).into()));
         cx.notify();
     }
 
@@ -1837,5 +1909,102 @@ mod tests {
         );
         assert_eq!(composed.images, vec![PathBuf::from("/a/shot.PNG")]);
         assert_eq!(composed.mentions, vec![PathBuf::from("/a/src/main.rs")]);
+    }
+}
+
+/// The follow-ups an answer proposes: the list under a "Next steps" (or
+/// "Follow-ups", "Suggested next", "下一步", "后续") line, at most five.
+pub fn next_steps(text: &str) -> Vec<String> {
+    const CUES: [&str; 8] = [
+        "next step",
+        "next steps",
+        "follow-up",
+        "follow up",
+        "suggested next",
+        "下一步",
+        "后续",
+        "接下来可以",
+    ];
+    let mut out = Vec::new();
+    let mut in_list = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let plain = trimmed
+            .trim_start_matches('#')
+            .trim()
+            .trim_matches('*')
+            .trim()
+            .to_lowercase();
+        let is_cue = !plain.is_empty()
+            && plain.chars().count() <= 40
+            && CUES.iter().any(|cue| plain.starts_with(cue))
+            && (trimmed.starts_with('#')
+                || plain.ends_with(':')
+                || plain.ends_with('：')
+                || trimmed.starts_with("**"));
+        if is_cue {
+            out.clear();
+            in_list = true;
+            continue;
+        }
+        if !in_list {
+            continue;
+        }
+        let item = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+            .or_else(|| {
+                let digits = trimmed.chars().take_while(|c| c.is_ascii_digit()).count();
+                (digits > 0)
+                    .then(|| {
+                        trimmed[digits..]
+                            .strip_prefix(". ")
+                            .or_else(|| trimmed[digits..].strip_prefix(") "))
+                    })
+                    .flatten()
+            });
+        match item {
+            Some(item) if !item.trim().is_empty() => {
+                let item = item
+                    .trim()
+                    .trim_start_matches("[ ]")
+                    .trim()
+                    .replace("**", "");
+                out.push(item);
+            }
+            None if trimmed.is_empty() => {}
+            // Anything else ends the list.
+            _ => {
+                if !out.is_empty() {
+                    in_list = false;
+                }
+            }
+        }
+    }
+    out.truncate(5);
+    out
+}
+
+#[cfg(test)]
+mod next_step_tests {
+    use super::next_steps;
+
+    #[test]
+    fn follow_ups_are_read_from_the_end_of_an_answer() {
+        let text = "Done.\n\n**Next steps:**\n- Add tests for the parser\n- Wire it into the UI\n\nThat's it.";
+        assert_eq!(
+            next_steps(text),
+            vec!["Add tests for the parser", "Wire it into the UI"]
+        );
+        let zh = "改好了。\n\n## 下一步\n1. 补测试\n2. 更新文档\n";
+        assert_eq!(next_steps(zh), vec!["补测试", "更新文档"]);
+        assert!(
+            next_steps("Here is a list:\n- a\n- b").is_empty(),
+            "no cue, no suggestions"
+        );
+        assert!(
+            next_steps("The next step in the pipeline parses input.").is_empty(),
+            "a sentence is not a heading"
+        );
     }
 }

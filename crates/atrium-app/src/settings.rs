@@ -58,6 +58,16 @@ pub struct Settings {
     pub node_token: Option<String>,
     /// Names this install to nodes, so it finds its own processes.
     pub install_id: String,
+    /// Named sets of environment variables, such as "staging".
+    pub environments: Vec<SavedEnvironment>,
+    /// The environment new sessions get, by name.
+    pub environment: Option<String>,
+    /// MCP servers every agent gets, Codex and ACP alike.
+    pub mcp_servers: Vec<SharedMcp>,
+    /// How much of each turn the chat shows.
+    pub transcript_mode: TranscriptMode,
+    /// The access mode last used in each folder, to come back to it.
+    pub folder_modes: std::collections::HashMap<PathBuf, AccessMode>,
     /// No system notifications when a conversation you are not looking at
     /// finishes, fails or needs you.
     pub quiet_notifications: bool,
@@ -117,6 +127,10 @@ impl Settings {
         self.recent_folders.retain(|recent| *recent != dir);
         self.recent_folders.insert(0, dir.clone());
         self.recent_folders.truncate(6);
+        // Each folder keeps the access mode last chosen in it.
+        if let Some(mode) = self.folder_modes.get(&dir) {
+            self.mode = *mode;
+        }
         self.cwd = Some(dir);
     }
 
@@ -161,5 +175,136 @@ mod tests {
         let settings: Settings = serde_json::from_str(r#"{"cwd": "/x", "model": "m"}"#).unwrap();
         assert_eq!(settings.mode, AccessMode::Auto);
         assert_eq!(settings.theme, ThemePref::System);
+    }
+}
+
+/// How much of each turn the chat shows: answers with folded details, the
+/// reasoning opened, or everything opened.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TranscriptMode {
+    #[default]
+    Normal,
+    Thinking,
+    Verbose,
+}
+
+impl TranscriptMode {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Normal => Self::Thinking,
+            Self::Thinking => Self::Verbose,
+            Self::Verbose => Self::Normal,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Normal => "Normal view",
+            Self::Thinking => "Thinking view",
+            Self::Verbose => "Verbose view",
+        }
+    }
+}
+
+/// A named set of environment variables new sessions can run with.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SavedEnvironment {
+    pub name: String,
+    pub vars: Vec<(String, String)>,
+}
+
+/// An MCP server configured once in Atrium for every agent.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SharedMcp {
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+    /// Kept but not handed to agents.
+    pub off: bool,
+}
+
+impl SharedMcp {
+    /// Reads `name` and a command line (`npx -y @scope/server --flag`),
+    /// split on spaces with quotes kept together.
+    pub fn parse(name: &str, line: &str) -> Option<Self> {
+        let mut words = Vec::new();
+        let mut word = String::new();
+        let mut quote: Option<char> = None;
+        for c in line.trim().chars() {
+            match (quote, c) {
+                (Some(q), c) if c == q => quote = None,
+                (None, '"' | '\'') => quote = Some(c),
+                (None, c) if c.is_whitespace() => {
+                    if !word.is_empty() {
+                        words.push(std::mem::take(&mut word));
+                    }
+                }
+                (_, c) => word.push(c),
+            }
+        }
+        if !word.is_empty() {
+            words.push(word);
+        }
+        let name: String = name
+            .trim()
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        if name.is_empty() || words.is_empty() {
+            return None;
+        }
+        Some(Self {
+            name,
+            command: words.remove(0),
+            args: words,
+            ..Self::default()
+        })
+    }
+}
+
+/// `KEY=value` lines as variables; blank lines and `#` comments skipped.
+pub fn parse_vars(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter_map(|l| {
+            let l = l.strip_prefix("export ").unwrap_or(l);
+            let (k, v) = l.split_once('=')?;
+            let v = v.trim().trim_matches('"').trim_matches('\'');
+            (!k.trim().is_empty()).then(|| (k.trim().to_string(), v.to_string()))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod parse_tests {
+    use super::*;
+
+    #[test]
+    fn mcp_lines_and_variables_parse() {
+        let mcp = SharedMcp::parse("my docs", "npx -y \"@acme/docs server\" --port 3").unwrap();
+        assert_eq!(mcp.name, "my-docs");
+        assert_eq!(mcp.command, "npx");
+        assert_eq!(mcp.args, vec!["-y", "@acme/docs server", "--port", "3"]);
+        assert!(SharedMcp::parse("x", "  ").is_none());
+        assert_eq!(
+            parse_vars(
+                "# staging\nAPI_URL=https://s.example.com\nexport TOKEN_NAME='ci'\nnot a var\n"
+            ),
+            vec![
+                ("API_URL".to_string(), "https://s.example.com".to_string()),
+                ("TOKEN_NAME".to_string(), "ci".to_string())
+            ]
+        );
     }
 }

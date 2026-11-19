@@ -556,7 +556,7 @@ impl RootView {
                 .pr_1()
                 .child(body),
         );
-        if codex && ws.active_thread_id().is_some() {
+        if ws.can_compact() {
             dialog = dialog.action(move |close| {
                 let compact = compact.clone();
                 let button = Button::new("context-compact", t("Compact conversation"))

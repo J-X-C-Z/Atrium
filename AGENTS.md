@@ -22,6 +22,7 @@ existing functions to call, the tests to write and when it is done.
 | 3 | **Autopilot** (unattended, 24 h): one `wake()` path, liveness continuation, heartbeats, stall watchdog, retry backoff, resume after restart, unattended approvals and questions, daily turn cap, keep the machine awake | [`docs/autopilot-implementation.md`](docs/autopilot-implementation.md) §2 | 1, 2 |
 | 4 | **atrium-node**: the per-device service that runs agents for other devices on the tailnet | [`docs/node-implementation.md`](docs/node-implementation.md), contract in [`docs/node-protocol.md`](docs/node-protocol.md) | — |
 | 5 | **Worktrees**: one git worktree and branch per lead and pool worker, worker tasks merged into the lead's branch, lead branches merged on request | [`docs/worktree-implementation.md`](docs/worktree-implementation.md) | 1, 2 |
+| 7 | **PR/CI status, previews, agent environments**: poll `gh` for lead branches (auto-fix on failing CI under the autopilot), screenshot UI work from `.atrium/launch.json`, start ACP agents with the chosen environment | [`docs/pr-preview-implementation.md`](docs/pr-preview-implementation.md) | 5 for PRs |
 | 6 | **Phone view API**: a tailnet-only HTTP API and event stream to follow projects, answer approvals and post notices from a phone (the web page is built on the UI side) | [`docs/remote-view-implementation.md`](docs/remote-view-implementation.md) | 1 |
 
 Do one item per pull request. In each PR, tick its row here (add "✓ done in

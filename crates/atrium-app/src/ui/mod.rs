@@ -1,11 +1,13 @@
 //! The window: a ChatGPT-style sidebar of conversations beside the chat,
 //! with a command palette, settings and toasts over it.
 
+mod activity;
 mod changes;
 mod chat;
 mod composer;
 mod context;
 mod devices;
+mod extras;
 mod motion;
 mod project;
 mod rows;
@@ -56,6 +58,7 @@ actions!(
         AttachFiles,
         ShowContext,
         ToggleChanges,
+        CycleTranscript,
     ]
 );
 
@@ -122,6 +125,10 @@ pub fn register_actions(cx: &mut App) {
         }
     });
     forward::<ToggleChanges>(cx, |this, _, cx| this.toggle_changes(cx));
+    forward::<CycleTranscript>(cx, |this, _, cx| {
+        this.workspace
+            .update(cx, |ws, cx| ws.cycle_transcript_mode(cx))
+    });
     forward::<FocusComposer>(cx, |this, window, cx| {
         Composer::focus_entity(&this.composer, window, cx)
     });
@@ -182,6 +189,8 @@ pub struct RootView {
     /// The changes pane: open or not, and the comments being written.
     pub(super) review: changes::Review,
     comment_input: Entity<TextInput>,
+    /// Inputs of the shared MCP and environment settings.
+    extras: extras::ExtrasInputs,
     /// The theme last applied, so a change of preference or system appearance re-applies.
     applied: Option<(ThemePref, bool)>,
     /// Whether the long-lived inputs show Chinese placeholders.
@@ -205,6 +214,7 @@ impl RootView {
                 .multi_line(1, 4)
                 .placeholder(t("Comment on this line…"))
         });
+        let extras = extras::ExtrasInputs::new(window, cx);
         let subscriptions = vec![
             cx.observe_in(&workspace, window, |this, _, window, cx| {
                 this.apply_theme(window, cx);
@@ -246,6 +256,7 @@ impl RootView {
             notice_to: "all".into(),
             review: changes::Review::default(),
             comment_input,
+            extras,
             applied: None,
             placeholders_chinese: crate::i18n::chinese(),
             _subscriptions: subscriptions,
@@ -878,6 +889,9 @@ impl RootView {
     ) -> AnyElement {
         let agents = self.agents_list(cx);
         let devices = devices::section(&self.workspace, node_address, cx);
+        let mcp = self.mcp_section(cx);
+        let environments = self.environments_section(cx);
+        let skills = self.skills_section(cx);
         let theme = cx.theme();
         let colors = theme.colors.clone();
         let ws = self.workspace.read(cx);
@@ -1037,6 +1051,21 @@ impl RootView {
                         .into_any_element(),
                 ))
                 .child(section(
+                    t("MCP servers"),
+                    t("Given to every agent, Codex and ACP alike, in every new or reopened session on this computer. Agents on other devices are left out."),
+                    mcp,
+                ))
+                .child(section(
+                    t("Environments"),
+                    t("Variables new sessions run with, such as an API's address. Codex gets them for its commands; ACP agents read their own environment, so restart them after a change."),
+                    environments,
+                ))
+                .child(section(
+                    t("Skills"),
+                    t("Skills in ~/.claude/skills and ~/.codex/skills. Share one to give every agent the same."),
+                    skills,
+                ))
+                .child(section(
                     t("Agents"),
                     t("Claude Code, DeepSeek Harness and Antigravity run over the Agent Client Protocol. Set a command per agent with `agent_commands` in settings.json."),
                     agents,
@@ -1118,7 +1147,15 @@ impl Render for RootView {
                     .min_w_0()
                     .h_full()
                     .flex()
-                    .child(chat)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .overflow_hidden()
+                            .flex()
+                            .child(chat),
+                    )
                     .child(pane)
                     .into_any_element(),
                 None => chat,
