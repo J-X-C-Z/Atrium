@@ -297,7 +297,7 @@ impl NodeClient {
             "agent": agent,
             "cwd": cwd,
             "owner": owner,
-            "env": env.iter().collect::<HashMap<_, _>>(),
+            "env": env.iter().cloned().collect::<HashMap<_, _>>(),
         })))?;
         self.remember(&process);
         Ok(process)
