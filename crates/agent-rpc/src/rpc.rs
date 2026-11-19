@@ -206,12 +206,76 @@ impl Connection {
     }
 }
 
+// Node transports unwrap their WS JSON envelope before handing lines here.
+// This is the raw agent JSON line limit, excluding LF but including a CR.
+const MAX_RPC_LINE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Read one complete line without allowing an unterminated peer-controlled
+/// line to grow without limit. Never consume/parse a suffix after overflow.
+fn read_bounded_line(reader: &mut impl BufRead, limit: usize) -> std::io::Result<Option<String>> {
+    let mut bytes = Vec::new();
+    loop {
+        let chunk = match reader.fill_buf() {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            other => other?,
+        };
+        if chunk.is_empty() {
+            return if bytes.is_empty() {
+                Ok(None)
+            } else {
+                String::from_utf8(bytes)
+                    .map(Some)
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+            };
+        }
+        let newline = chunk.iter().position(|byte| *byte == b'\n');
+        let take = newline.unwrap_or(chunk.len());
+        if take > limit.saturating_sub(bytes.len()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "agent JSON line exceeds receive limit",
+            ));
+        }
+        let needed = bytes.len() + take;
+        if needed > bytes.capacity() {
+            // Grow geometrically but never request capacity above the limit.
+            let capacity = bytes
+                .capacity()
+                .saturating_mul(2)
+                .max(8192)
+                .min(limit)
+                .max(needed);
+            bytes.reserve_exact(capacity - bytes.len());
+        }
+        bytes.extend_from_slice(&chunk[..take]);
+        reader.consume(take + usize::from(newline.is_some()));
+        if newline.is_some() {
+            if bytes.last() == Some(&b'\r') {
+                bytes.pop();
+            }
+            return String::from_utf8(bytes)
+                .map(Some)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error));
+        }
+    }
+}
+
 fn read_loop(reader: impl BufRead, pending: Pending, tx: mpsc::UnboundedSender<Incoming>) {
-    for line in reader.lines() {
-        let line = match line {
-            Ok(line) => line,
+    read_loop_with_limit(reader, pending, tx, MAX_RPC_LINE_BYTES);
+}
+
+fn read_loop_with_limit(
+    mut reader: impl BufRead,
+    pending: Pending,
+    tx: mpsc::UnboundedSender<Incoming>,
+    limit: usize,
+) {
+    loop {
+        let line = match read_bounded_line(&mut reader, limit) {
+            Ok(Some(line)) => line,
+            Ok(None) => break,
             Err(error) => {
-                log::warn!("codex: read failed: {error}");
+                log::warn!("agent RPC read failed: {error}");
                 break;
             }
         };
@@ -320,6 +384,109 @@ mod tests {
     use futures::{StreamExt, executor::block_on};
 
     use super::*;
+
+    #[test]
+    fn bounded_reader_accepts_exact_limit_lf_crlf_and_eof() {
+        within(|| {
+            let mut reader =
+                BufReader::with_capacity(3, std::io::Cursor::new(b"12345678\n1234567\r\n12345678"));
+            assert_eq!(
+                read_bounded_line(&mut reader, 8).unwrap().as_deref(),
+                Some("12345678")
+            );
+            assert_eq!(
+                read_bounded_line(&mut reader, 8).unwrap().as_deref(),
+                Some("1234567")
+            );
+            assert_eq!(
+                read_bounded_line(&mut reader, 8).unwrap().as_deref(),
+                Some("12345678")
+            );
+            assert_eq!(read_bounded_line(&mut reader, 8).unwrap(), None);
+            let mut reader = std::io::Cursor::new(b"last\r");
+            assert_eq!(
+                read_bounded_line(&mut reader, 5).unwrap().as_deref(),
+                Some("last\r")
+            );
+        });
+    }
+
+    #[test]
+    fn bounded_reader_stops_before_appending_over_limit_and_never_reads_suffix() {
+        within(|| {
+            let mut reader =
+                BufReader::with_capacity(4, std::io::Cursor::new(b"123456789without-newline"));
+            assert_eq!(
+                read_bounded_line(&mut reader, 8).unwrap_err().kind(),
+                std::io::ErrorKind::InvalidData
+            );
+            // Only the eight allowed bytes were consumed; offending data was
+            // inspected, not appended. The caller terminates the connection.
+            assert_eq!(reader.buffer(), b"9wit");
+        });
+    }
+
+    #[test]
+    fn bounded_rpc_closes_all_waiters_on_overflow_invalid_utf8_or_eof() {
+        within(|| {
+            for first in [vec![b'x'; 97], vec![0xff, b'\n'], Vec::new()] {
+                let pending: Pending = Arc::default();
+                let receivers: Vec<_> = (1..=3)
+                    .map(|id| {
+                        let (tx, rx) = oneshot::channel();
+                        pending.lock().unwrap().waiters.insert(id, tx);
+                        rx
+                    })
+                    .collect();
+                let (tx, mut rx) = mpsc::unbounded();
+                let mut wire = first.clone();
+                if !first.is_empty() {
+                    wire.extend_from_slice(b"\n{\"id\":1,\"result\":\"must not resolve\"}\n{\"method\":\"must not route\"}\n");
+                }
+                read_loop_with_limit(
+                    BufReader::with_capacity(5, std::io::Cursor::new(wire)),
+                    pending.clone(),
+                    tx,
+                    96,
+                );
+                for receiver in receivers {
+                    assert_eq!(block_on(receiver).unwrap(), Err(RpcError::Closed));
+                }
+                assert!(pending.lock().unwrap().closed);
+                assert!(pending.lock().unwrap().waiters.is_empty());
+                assert_eq!(block_on(rx.next()), Some(Incoming::Closed));
+                assert_eq!(block_on(rx.next()), None);
+            }
+        });
+    }
+
+    #[test]
+    fn bounded_rpc_routes_long_json_at_limit_and_preserves_json_error_behavior() {
+        within(|| {
+            let limit = 32 * 1024;
+            let pending: Pending = Arc::default();
+            let (tx, mut rx) = mpsc::unbounded();
+            let json = serde_json::to_vec(
+                &json!({"method":"long", "params":{"data":"雪\\\"".repeat(2000)}}),
+            )
+            .unwrap();
+            assert!(json.len() < limit);
+            let mut wire = b"not json\n".to_vec();
+            wire.extend_from_slice(&json);
+            wire.resize(b"not json\n".len() + limit, b' ');
+            wire.push(b'\n');
+            read_loop_with_limit(
+                BufReader::with_capacity(7, std::io::Cursor::new(wire)),
+                pending,
+                tx,
+                limit,
+            );
+            assert!(
+                matches!(block_on(rx.next()), Some(Incoming::Notification{method, params}) if method == "long" && params["data"].as_str().unwrap().len() > 2000)
+            );
+            assert_eq!(block_on(rx.next()), Some(Incoming::Closed));
+        });
+    }
 
     /// A pipe: what one side writes, the other reads.
     fn pipe() -> (PipeWriter, BufReader<PipeReader>) {
