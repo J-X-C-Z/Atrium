@@ -1,8 +1,8 @@
 //! Blocking Git primitives for the scheduler. Serialize operations for a repository and
 //! call them off the UI thread, with the affected agents stopped or between tasks.
 
+use crate::{Project, glob_match};
 use anyhow::{Context, Result, bail, ensure};
-use atrium_project::{Project, glob_match};
 use std::{
     ffi::{OsStr, OsString},
     fs::{self, File, Metadata, OpenOptions},
@@ -99,14 +99,14 @@ fn git_path(bytes: &[u8]) -> Result<PathBuf> {
     Ok(value.into())
 }
 
-fn git_dir(dir: &Path, option: &str) -> Result<PathBuf> {
+pub(crate) fn git_dir(dir: &Path, option: &str) -> Result<PathBuf> {
     git_path(line(&git(
         dir,
         &["rev-parse", "--path-format=absolute", option],
     )?))
 }
 
-fn top_level(dir: &Path) -> Result<Option<PathBuf>> {
+pub(crate) fn top_level(dir: &Path) -> Result<Option<PathBuf>> {
     let out = output(dir, &["rev-parse", "--show-toplevel"])?;
     if out.status.code() == Some(128)
         && String::from_utf8_lossy(&out.stderr).starts_with("fatal: not a git repository")
@@ -119,7 +119,7 @@ fn top_level(dir: &Path) -> Result<Option<PathBuf>> {
     )?))?))
 }
 
-fn branch(id: &str) -> Result<String> {
+pub(crate) fn branch(id: &str) -> Result<String> {
     ensure!(
         !id.is_empty() && id.chars().all(|c| c.is_alphanumeric() || c == '-'),
         "invalid workstream ID: {id:?}"
@@ -151,7 +151,7 @@ fn head(dir: &Path) -> Result<String> {
     Ok(name.to_owned())
 }
 
-fn commit_id(dir: &Path, reference: &str) -> Result<String> {
+pub(crate) fn commit_id(dir: &Path, reference: &str) -> Result<String> {
     let bytes = git(
         dir,
         &[
@@ -183,7 +183,7 @@ fn is_link(meta: &Metadata) -> bool {
     meta.file_type().is_symlink()
 }
 
-fn require_dir(path: &Path, create: bool) -> Result<bool> {
+pub(crate) fn require_dir(path: &Path, create: bool) -> Result<bool> {
     if let Some(meta) = metadata(path)? {
         ensure!(
             meta.is_dir() && !is_link(&meta),
@@ -254,7 +254,7 @@ fn check_atrium(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn check_tree(root: &Path, tree: &Path, branch: &str) -> Result<()> {
+pub(crate) fn check_tree(root: &Path, tree: &Path, branch: &str) -> Result<()> {
     ensure!(
         require_dir(tree, false)?,
         "missing worktree: {}",
@@ -279,7 +279,7 @@ fn shared_link(tree: &Path, shared: &Path, create: bool) -> Result<()> {
     let link = tree.join(".atrium");
     if let Some(meta) = metadata(&link)? {
         ensure!(
-            meta.file_type().is_symlink() && link.canonicalize()? == shared.canonicalize()?,
+            is_link(&meta) && link.canonicalize()? == shared.canonicalize()?,
             "{} does not link to {}",
             link.display(),
             shared.display()
@@ -289,7 +289,20 @@ fn shared_link(tree: &Path, shared: &Path, create: bool) -> Result<()> {
         #[cfg(unix)]
         let result = std::os::unix::fs::symlink(target, &link);
         #[cfg(windows)]
-        let result = std::os::windows::fs::symlink_dir(target, &link);
+        let result = std::os::windows::fs::symlink_dir(target, &link).or_else(|_| {
+            // Only literal relative paths reach cmd; junctions need no symlink privilege.
+            let out = Command::new("cmd.exe")
+                .current_dir(tree)
+                .args(["/d", "/c", "mklink", "/j", ".atrium", r"..\.."])
+                .output()?;
+            if out.status.success() {
+                Ok(())
+            } else {
+                Err(io::Error::other(
+                    String::from_utf8_lossy(&out.stderr).into_owned(),
+                ))
+            }
+        });
         result.with_context(|| {
             format!(
                 "linking {} to {}{}",
@@ -475,6 +488,12 @@ pub(crate) fn ensure_worktree(
             )?
         };
         checked(out, "worktree add")?;
+        if !exists {
+            fs::write(
+                git_dir(&tree, "--absolute-git-dir")?.join("atrium-created-branch"),
+                &name,
+            )?;
+        }
     }
     check_tree(&root, &tree, &name)?;
     check_atrium(&tree)?;
@@ -721,6 +740,9 @@ pub(crate) fn remove_worktree(
             return Ok(Cleanup::Ignored(path));
         }
     }
+    let owned = delete_worker_branch
+        && fs::read(git_dir(&tree, "--absolute-git-dir")?.join("atrium-created-branch"))
+            .is_ok_and(|bytes| bytes == name.as_bytes());
     checked(
         run(
             root,
@@ -733,7 +755,7 @@ pub(crate) fn remove_worktree(
         )?,
         "worktree remove",
     )?;
-    if delete_worker_branch {
+    if owned {
         // -d uses Git's own reachability and checked-out-branch checks as well.
         git(receiver, &["branch", "-d", "--", &name])
             .context("worktree removed, worker branch retained")?;
@@ -769,17 +791,17 @@ fn same_file_contents(a: &Path, b: &Path) -> Result<bool> {
 mod tests {
     use super::*;
 
-    struct Repo(PathBuf);
+    pub(super) struct Repo(pub(super) PathBuf);
 
     impl Repo {
-        fn empty() -> Self {
+        pub(super) fn empty() -> Self {
             let dir =
                 std::env::temp_dir().join(format!("Atrium Git 測試 {}", uuid::Uuid::new_v4()));
             fs::create_dir(&dir).unwrap();
             Self(dir)
         }
 
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             let repo = Self::empty();
             let dir = &repo.0;
             git(dir, &["init", "--initial-branch=main", "--template="]).unwrap();
@@ -1036,5 +1058,143 @@ mod tests {
         );
         assert!(ignored(&path, Path::new(".atrium")).unwrap());
         assert!(ignored(&linked, Path::new(".atrium")).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod scheduler_tests {
+    use super::{tests::Repo, *};
+    use crate::{ATRIUM, Role, TaskStatus, Workstream, YOU};
+
+    fn streams(repo: &Repo) -> (Project, Workstream, Workstream, Workstream) {
+        let mut project = Project::open(&repo.0).unwrap();
+        project.file.worktrees = true;
+        let lead = Workstream {
+            id: "lead".into(),
+            role: Role::Lead,
+            ..Default::default()
+        };
+        project.file.streams.push(lead.clone());
+        let worker = project.pool_worker("lead", "codex").unwrap();
+        project.file.streams.push(worker.clone());
+        let second = project.pool_worker("lead", "claude").unwrap();
+        project.file.streams.push(second.clone());
+        project.save().unwrap();
+        (project, lead, worker, second)
+    }
+
+    fn task(p: &mut Project, id: &str) {
+        let folder = p.dir().join("tasks/lead");
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(
+            folder.join(format!("{id}.md")),
+            format!("# {id}\nstatus: open\n"),
+        )
+        .unwrap();
+        p.stamp = None;
+        p.reload();
+    }
+
+    #[test]
+    fn pool_claim_waits_for_merge_and_rebase_then_lead_is_merged_only_on_request() {
+        let repo = Repo::new();
+        let (mut p, lead, a, b) = streams(&repo);
+        for id in ["one", "two"] {
+            task(&mut p, id);
+        }
+        let root_tip = commit_id(&repo.0, "HEAD").unwrap();
+        let l = p.prepare_stream_tree(&lead).unwrap().unwrap();
+        p.claim_next(&a.id).unwrap().unwrap();
+        p.claim_next(&b.id).unwrap().unwrap();
+        let wa = p.prepare_stream_tree(&a).unwrap().unwrap();
+        let wb = p.prepare_stream_tree(&b).unwrap().unwrap();
+        task(&mut p, "three");
+        for (tree, id) in [(&wa, &a.id), (&wb, &b.id)] {
+            fs::write(tree.join(id), id).unwrap();
+            let message = p.finish_task(id, true, "checked").unwrap();
+            assert!(message.contains("Stop here"));
+            assert!(p.claim_next(id).unwrap().is_none());
+        }
+        fs::write(l.join("draft"), "keep").unwrap();
+        p.reconcile_worker_tree(&a.id).unwrap();
+        assert!(!l.join(&a.id).exists());
+        fs::remove_file(l.join("draft")).unwrap();
+        p.reconcile_worker_tree(&a.id).unwrap();
+        p.reconcile_worker_tree(&b.id).unwrap();
+        assert!(l.join(&a.id).is_file() && l.join(&b.id).is_file());
+        assert_eq!(commit_id(&repo.0, "HEAD").unwrap(), root_tip);
+        // The second merge invalidates the first worker's cached permission.
+        assert!(p.claim_next(&a.id).unwrap().is_none());
+        p.reconcile_worker_tree(&a.id).unwrap();
+        assert_eq!(
+            commit_id(&wa, "HEAD").unwrap(),
+            commit_id(&l, "HEAD").unwrap()
+        );
+        assert_eq!(p.claim_next(&a.id).unwrap().unwrap().id, "three");
+        p.merge_lead_tree(&lead.id).unwrap();
+        assert!(repo.0.join(&a.id).is_file() && repo.0.join(&b.id).is_file());
+    }
+
+    #[test]
+    fn restarted_worker_conflict_posts_once_and_preserves_task_and_branches() {
+        let repo = Repo::new();
+        let (mut p, lead, worker, _) = streams(&repo);
+        let l = p.prepare_stream_tree(&lead).unwrap().unwrap();
+        task(&mut p, "conflict");
+        p.claim_next(&worker.id).unwrap().unwrap();
+        let w = p.prepare_stream_tree(&worker).unwrap().unwrap();
+        for (tree, text) in [(&l, "lead"), (&w, "worker")] {
+            fs::write(tree.join("shared.txt"), text).unwrap();
+        }
+        commit_task(&l, "lead edit").unwrap();
+        p.finish_task(&worker.id, true, "result stays").unwrap();
+        p.reconcile_worker_tree(&worker.id).unwrap();
+        let mut p = Project::open(&repo.0).unwrap();
+        p.reconcile_worker_tree(&worker.id).unwrap();
+        assert_eq!(
+            p.notices
+                .iter()
+                .filter(|n| n.from == ATRIUM
+                    && n.to == ["lead"]
+                    && n.text.contains("lead/conflict")
+                    && n.text.contains("shared.txt"))
+                .count(),
+            1
+        );
+        let task = p.task("lead/conflict").unwrap();
+        assert_eq!(task.status, TaskStatus::Done);
+        assert_eq!(task.result.as_deref(), Some("result stays"));
+        assert_eq!(fs::read_to_string(w.join("shared.txt")).unwrap(), "worker");
+        assert_eq!(fs::read_to_string(l.join("shared.txt")).unwrap(), "lead");
+        assert!(clean(&w).unwrap() && clean(&l).unwrap());
+        p.clean_stream_tree(&worker).unwrap();
+        assert!(
+            w.exists()
+                && p.notices
+                    .iter()
+                    .any(|n| n.to == [YOU] && n.text.contains("Unmerged"))
+        );
+    }
+
+    #[test]
+    fn non_git_falls_back_with_one_notice_and_reused_worker_branch_survives_retirement() {
+        let empty = Repo::empty();
+        let (mut p, lead, _, _) = streams(&empty);
+        assert!(p.prepare_stream_tree(&lead).unwrap().is_none());
+        p.disable_non_git_worktrees().unwrap();
+        p.disable_non_git_worktrees().unwrap();
+        assert_eq!(p.notices.iter().filter(|n| n.to == [YOU]).count(), 1);
+        assert_eq!(p.prepare_stream_tree(&lead).unwrap().unwrap(), empty.0);
+        assert!(!Project::open(&empty.0).unwrap().file.worktrees);
+        let repo = Repo::new();
+        let (mut p, lead, mut worker, _) = streams(&repo);
+        p.prepare_stream_tree(&lead).unwrap();
+        let name = Project::branch_of(&worker.id);
+        git(&repo.0, &["branch", &name]).unwrap();
+        let tree = p.prepare_stream_tree(&worker).unwrap().unwrap();
+        worker.retired = true;
+        p.clean_stream_tree(&worker).unwrap();
+        assert!(!tree.exists());
+        assert!(commit_id(&repo.0, &format!("refs/heads/{name}")).is_ok());
     }
 }

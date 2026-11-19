@@ -30,6 +30,9 @@ use crate::{
     },
 };
 
+#[path = "workspace_worktrees.rs"]
+mod worktrees;
+
 /// Where the user is: the everyday chats, or a project.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Room {
@@ -184,6 +187,7 @@ pub(super) struct ScheduleState {
     seen: HashMap<PathBuf, usize>,
     pending: HashSet<(PathBuf, String)>,
     last_wake: HashMap<(PathBuf, String), Instant>,
+    tree_jobs: HashSet<PathBuf>,
     orphan_logged: HashSet<(PathBuf, String)>,
     #[cfg(all(test, unix, feature = "workspace-ticker-test"))]
     test_wake_checks: usize,
@@ -322,6 +326,7 @@ impl Workspace {
         for root in roots {
             let changed = self.project_mut(&root).is_some_and(Project::reload);
             self.load_streams(&root, cx);
+            self.tick_worktrees(&root, cx);
             let Some(project) = self.projects.iter().find(|p| p.root == root) else {
                 continue;
             };
@@ -938,7 +943,6 @@ impl Workspace {
 
     fn start_stream(&mut self, root: &Path, stream: Workstream, cx: &mut Context<Self>) {
         let root = root.to_path_buf();
-        let backend = stream.backend.clone();
         let Some(project) = self.project_mut(&root) else {
             return;
         };
@@ -967,15 +971,32 @@ impl Workspace {
             }
             project.kickoff(&stream)
         };
+        let isolated = project.file.worktrees;
         if pool::is_pool_worker(&stream) {
             self.project_schedule
                 .task_pool
                 .starting
                 .insert((root.clone(), id.clone()));
         }
-        let cwd = root.clone();
         cx.notify();
+        if isolated {
+            self.prepare_stream_checkout(root, stream, title, kickoff, cx);
+        } else {
+            self.launch_stream(root.clone(), stream, title, kickoff, root, cx);
+        }
+    }
 
+    fn launch_stream(
+        &mut self,
+        root: PathBuf,
+        stream: Workstream,
+        title: String,
+        kickoff: String,
+        cwd: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let backend = stream.backend.clone();
+        let id = stream.id.clone();
         if agents::is_codex(&backend) {
             let Some(client) = self.codex_for(&backend) else {
                 self.stream_failed(
@@ -1162,6 +1183,7 @@ impl Workspace {
         let Some(root) = self.project_root() else {
             return;
         };
+        self.clean_removed_checkout(&root, stream, cx);
         if let Some(project) = self.project_mut(&root) {
             project.file.streams.retain(|s| s.id != stream);
             let _ = project.save();
@@ -1685,7 +1707,7 @@ fn placeholder(threads: &mut Vec<ThreadMeta>, id: &str, stream: &Workstream, pro
         backend: stream.backend.clone(),
         name: Some(title.clone()),
         preview: title,
-        cwd: project.root.display().to_string(),
+        cwd: project.session_checkout(&stream.id).display().to_string(),
         model: None,
         created_at: stream.created_at,
         updated_at: stream.created_at,

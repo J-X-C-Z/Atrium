@@ -421,6 +421,8 @@ pub fn render_overview(
             let toggle = workspace.clone();
             let autopilot = project.file.autopilot.on;
             let pilot = workspace.clone();
+            let worktrees = project.file.worktrees;
+            let trees = workspace.clone();
             let menu = Menu::new()
                 .item(
                     MenuItem::new(t("Run unattended, around the clock"))
@@ -431,6 +433,17 @@ pub fn render_overview(
                         })
                         .on_click(move |_, cx| {
                             pilot.update(cx, |ws, cx| ws.set_autopilot(!autopilot, cx))
+                        }),
+                )
+                .item(
+                    MenuItem::new(t("Give each agent its own worktree"))
+                        .icon(if worktrees {
+                            IconName::SquareCheck
+                        } else {
+                            IconName::Square
+                        })
+                        .on_click(move |_, cx| {
+                            trees.update(cx, |ws, cx| ws.set_worktrees(!worktrees, cx))
                         }),
                 )
                 .item(

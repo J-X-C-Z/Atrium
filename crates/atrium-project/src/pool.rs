@@ -289,6 +289,9 @@ impl Project {
         let Some(task) = self.claimable(lead).first().map(|t| (*t).clone()) else {
             return Ok(None);
         };
+        if !self.worktree_allows_claim(me, &task)? {
+            return Ok(None);
+        }
         let path = self.root.join(task.rel_path());
         let text =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;

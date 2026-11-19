@@ -392,6 +392,13 @@ impl Project {
                 None if self.pool_session_full(me) => {
                     format!("{done} Session task limit reached. Stop here for a fresh worker.")
                 }
+                None if self.worktree_dir(me).join(".git").is_file()
+                    && !self.claimable(&task.owner).is_empty() =>
+                {
+                    format!(
+                        "{done} Stop here while Atrium integrates your work and prepares your next checkout."
+                    )
+                }
                 None => format!(
                     "{done} The pool is empty: nothing left to claim. Stop here; you are woken if new tasks arrive."
                 ),

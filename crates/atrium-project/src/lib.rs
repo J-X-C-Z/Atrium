@@ -24,10 +24,12 @@
 
 pub mod agent;
 pub mod autopilot;
+mod git;
 pub mod mcp;
 pub mod notice_delivery;
 pub mod pool;
 pub mod skill;
+pub mod worktrees;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -1494,9 +1496,11 @@ impl Project {
     /// `stream` itself: a scope crossing.
     pub fn crossing(&self, stream: &str, path: &str) -> Option<Crossing> {
         let relative = Path::new(path)
-            .strip_prefix(&self.root)
+            .strip_prefix(self.session_checkout(stream))
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|_| path.trim_start_matches("./").to_string());
+        #[cfg(windows)]
+        let relative = relative.replace('\\', "/");
         let own = self.stream(stream)?;
         if own.scope.iter().any(|glob| glob_match(glob, &relative)) {
             return None;
