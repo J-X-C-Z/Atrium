@@ -16,8 +16,9 @@ lead). Agents never call Atrium. They ask for a new agent one level down by
 **editing it** (`status: done` plus a `## Result`). Atrium is the scheduler: it
 notices the files, starts the agents, and tells the asker when they finish.
 
-Everything you need to read and write the files is in
-`crates/atrium-app/src/project.rs` (tested in its `tests` module):
+Everything you need to read and write the files is in the
+`atrium-project` crate (`crates/atrium-project/src/lib.rs`, tested in its
+`tests` module):
 
 | Need | Call |
 | --- | --- |
@@ -29,6 +30,15 @@ Everything you need to read and write the files is in
 | Kickoff prompt for any role | `Project::kickoff(&stream)` |
 | Post a notice | `Project::post(from, to, text)` |
 | Notices a stream has not seen | `Project::unread(id)`, `Project::mark_read(id)` |
+
+Agents can also do their side through the `atrium` MCP server
+(`crates/atrium-project/src/mcp.rs`, served by `atrium mcp --project <root>
+--stream <id>`): `create_task`, `check_step`, `finish_task`, `notify`… It
+writes the same files an agent would (task files, `plan.md`, `status/`,
+`notices.md`) and **never `project.json`**, so the scheduler sees its work
+exactly like a hand edit: nothing to add for it. `create_stream` already
+registers it for every new session (`Workspace::mcp_servers`) and the resume
+paths pass it again (`mcp_for_thread`).
 
 Do not change the file formats or these functions' meaning: the UI reads the
 same data (`Workspace::stream_views`, `proposed_leads`, `queued_tasks`). Add
@@ -58,6 +68,10 @@ Split `create_stream` in two:
 pub fn create_stream(&mut self, name, role, backend, goal, scope, cx)  // UI: builds the Workstream, then calls ↓
 fn start_stream(&mut self, root: &PathBuf, stream: Workstream, cx)     // saves it, starts the session, sends the kickoff
 ```
+
+Keep passing `Workspace::mcp_servers(root, &stream.id, &backend)` to
+`StartThread::mcp_servers` (Codex) and `new_session_with` (ACP) when you move
+the session start into `start_stream`.
 
 `start_stream` takes `root` explicitly (the project need not be the shown
 one) and must not assume `self.project_root()`. On failure keep today's

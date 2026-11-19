@@ -8,8 +8,8 @@ use std::{
 
 use anyhow::{Context as _, Result, anyhow};
 use atrium_core::{
-    Account, ApprovalDecision, Goal, GoalStatus, Item, RateLimits, RequestId, ThreadMeta,
-    TurnStatus,
+    Account, ApprovalDecision, Goal, GoalStatus, Item, McpServer, RateLimits, RequestId,
+    ThreadMeta, TurnStatus,
 };
 use futures::channel::mpsc;
 use serde_json::{Value, json};
@@ -40,6 +40,28 @@ pub struct StartThread {
     pub approval_policy: Option<String>,
     /// `read-only`, `workspace-write` or `danger-full-access`.
     pub sandbox: Option<String>,
+    /// MCP servers this thread has on top of the user's own.
+    pub mcp_servers: Vec<McpServer>,
+}
+
+/// Config overrides adding `servers`, one dotted key each so the user's own
+/// `mcp_servers` stay.
+fn mcp_config(servers: &[McpServer]) -> Option<Value> {
+    (!servers.is_empty()).then(|| {
+        let mut config = serde_json::Map::new();
+        for server in servers {
+            let env: serde_json::Map<String, Value> = server
+                .env
+                .iter()
+                .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                .collect();
+            config.insert(
+                format!("mcp_servers.{}", server.name),
+                json!({ "command": server.command, "args": server.args, "env": env }),
+            );
+        }
+        Value::Object(config)
+    })
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -289,6 +311,9 @@ impl CodexClient {
         put(&mut params, "model", options.model);
         put(&mut params, "approvalPolicy", options.approval_policy);
         put(&mut params, "sandbox", options.sandbox);
+        if let Some(config) = mcp_config(&options.mcp_servers) {
+            params.insert("config".into(), config);
+        }
         let result = self
             .connection
             .request("thread/start", Value::Object(params))
@@ -302,10 +327,20 @@ impl CodexClient {
         &self,
         thread_id: &str,
     ) -> Result<(ThreadMeta, Vec<(String, TurnStatus, Vec<Item>)>)> {
-        let result = self
-            .connection
-            .request("thread/resume", json!({ "threadId": thread_id }))
-            .await?;
+        self.thread_resume_with(thread_id, &[]).await
+    }
+
+    /// [`Self::thread_resume`], giving the thread `mcp_servers` again.
+    pub async fn thread_resume_with(
+        &self,
+        thread_id: &str,
+        mcp_servers: &[McpServer],
+    ) -> Result<(ThreadMeta, Vec<(String, TurnStatus, Vec<Item>)>)> {
+        let mut params = json!({ "threadId": thread_id });
+        if let Some(config) = mcp_config(mcp_servers) {
+            params["config"] = config;
+        }
+        let result = self.connection.request("thread/resume", params).await?;
         let thread = &result["thread"];
         let meta = translate::thread_meta(thread)
             .ok_or_else(|| anyhow!("thread/resume returned no thread"))?;

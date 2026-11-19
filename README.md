@@ -70,6 +70,23 @@ script/bundle-macos.sh
 
 **进度视图**（概览默认）：每个负责人一行，路线图按阶段（`### 阶段名`）排成一串方块。做完的阶段变暗，当前阶段高亮，并显示步骤进度、下一步和正在跑的子 agent，后面的阶段正常显示。一眼就能看出谁做到了哪里。也可以切回卡片视图。
 
+**agent 怎么调用这些能力：`atrium` MCP 服务 + skill**
+
+- **MCP 服务**：Atrium 启动或恢复项目里的会话时，会自动给它挂上一个名为 `atrium` 的 MCP 服务（就是 Atrium 自己：`atrium mcp --project <目录> --stream <id>`）。Codex 通过 `thread/start` / `thread/resume` 的 config 注入，Claude Code、DeepSeek、Antigravity 通过 ACP 的 `mcpServers` 注入。服务启动时已经绑定了这个 agent 的身份，它没法冒充别的工作线；工具清单也按角色给（子 agent 看不到 `create_task`，只有主控有 `write_plan`）。
+
+  | 工具 | 用途 |
+  | --- | --- |
+  | `whoami` | 我是谁：角色、范围、目标、上级、路线图和当前阶段、我派出的任务 |
+  | `create_task` | 主控派负责人（必须带分阶段路线图）；负责人派子 agent |
+  | `check_step` | 负责人勾掉一步（`2.1` 或步骤文字）；一个阶段做完自动通知上级 |
+  | `finish_task` | 交付或失败，写 `## Result` 并改状态 |
+  | `notify` / `read_notices` | 发公告（id、`all` 或 `you`）/ 看未读公告 |
+  | `write_status` / `write_plan` | 写自己的状态文件 / 主控写计划 |
+  | `list_tasks` | 我的任务，或全部任务 |
+
+  它只改 agent 本来也能手改的文件（任务文件、`plan.md`、`status/`、`notices.md`），从不写 `project.json`，所以和调度引擎、手工编辑完全兼容。已用真实的 Claude Code 验证过：主控通过它建出分阶段的负责人任务，负责人勾步骤、阶段完成自动通知主控、交结果。
+- **Skill**：[`skills/atrium/SKILL.md`](skills/atrium/SKILL.md) 讲清三种角色各自怎么做、什么时候用哪个工具，以及没有工具时直接改文件的格式。`atrium skill install` 会把它装到 `~/.claude/skills/atrium/` 和 `~/.codex/skills/atrium/`；`atrium skill` 直接打印。没装 skill 也能用：每个会话的开场说明和 MCP 服务的 instructions 里都有要点。
+
 **分工**：界面、数据模型和文件格式在这里实现并有测试；按任务文件启动 agent、汇报、唤醒的调度引擎交给 Codex 按 [`docs/hierarchy-implementation.md`](docs/hierarchy-implementation.md) 实现。调度引擎完成之前，批准过的负责人会显示为"即将启动"，子 agent 会显示为"排队中"。
 
 当前限制：工作线共用一个代码目录（还没有每条线独立 worktree）；越界提醒只针对 agent 报告的文件修改，不包括它在命令里直接写的文件。
@@ -191,7 +208,8 @@ crates/
   agent-rpc/        共享传输层：子进程 stdio 上的行分隔 JSON-RPC（可选 JSON-RPC 2.0），查找可执行文件；node：atrium-node 客户端（REST + 断线续传的 WebSocket）；含 mock-node
   codex-client/     codex app-server 客户端与协议翻译；含 mock-codex
   acp-client/       ACP 客户端：握手、会话（new/load/resume/list/prompt/cancel/设置）、权限；把 session/update 翻译成 AgentEvent（为没有 id 的 ACP 合成轮次与条目）；含 mock-acp（可模仿 claude / deepseek / antigravity）
-  atrium-app/    GPUI 应用：i18n（以英文原文为键的中文表）、Workspace（状态与后端调用；workspace_project 管项目与工作线）、project（中庭文件、公告解析、范围匹配）+ ui/（sidebar、chat、composer、rows、project、调色板与设置）
+  atrium-project/   项目模型（无 GUI）：中庭文件、任务与路线图、三层角色、公告、范围匹配；agent（agent 可做的操作）、mcp（`atrium` MCP 服务）、skill
+  atrium-app/    GPUI 应用：i18n（以英文原文为键的中文表）、Workspace（状态与后端调用；workspace_project 管项目与工作线）+ ui/（sidebar、chat、composer、rows、project、调色板与设置）
 ```
 
 数据流只有一个方向：

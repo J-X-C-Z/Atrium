@@ -701,8 +701,9 @@ impl Workspace {
             return;
         };
         self.loading.insert(thread_id.clone());
+        let mcp = self.mcp_for_thread(&thread_id, self.backend_of(&thread_id));
         cx.spawn(async move |this, cx| {
-            let resumed = client.thread_resume(&thread_id).await;
+            let resumed = client.thread_resume_with(&thread_id, &mcp).await;
             let _ = this.update(cx, |ws, cx| {
                 ws.loading.remove(&thread_id);
                 match resumed {
@@ -973,10 +974,11 @@ impl Workspace {
             return;
         };
         self.editing = None;
+        let mcp = self.mcp_for_thread(&thread_id, self.backend_of(&thread_id));
         cx.spawn(async move |this, cx| {
             let reverted = client.thread_revert(&thread_id, &turn_id).await;
             let resumed = match reverted {
-                Ok(()) => client.thread_resume(&thread_id).await,
+                Ok(()) => client.thread_resume_with(&thread_id, &mcp).await,
                 Err(error) => Err(error),
             };
             let _ = this.update(cx, |ws, cx| match resumed {
@@ -1306,6 +1308,7 @@ impl Workspace {
                     },
                     approval_policy: Some(self.settings.mode.approval_policy().into()),
                     sandbox: Some(self.settings.mode.sandbox_mode().into()),
+                    mcp_servers: Vec::new(),
                 };
                 let title = composed.text.clone();
                 cx.spawn(async move |this, cx| {
@@ -1548,6 +1551,7 @@ impl Workspace {
                     model: self.settings.model.clone(),
                     approval_policy: Some(AccessMode::ReadOnly.approval_policy().into()),
                     sandbox: Some(AccessMode::ReadOnly.sandbox_mode().into()),
+                    mcp_servers: Vec::new(),
                 };
                 cx.spawn(async move |this, cx| {
                     let meta = match client.thread_start(options).await {

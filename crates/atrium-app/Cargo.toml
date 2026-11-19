@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 atrium-core.workspace = true
+atrium-project.workspace = true
 codex-client.workspace = true
 acp-client.workspace = true
 agent-rpc.workspace = true

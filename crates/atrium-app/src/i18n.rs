@@ -578,7 +578,6 @@ mod tests {
         let sources = [
             include_str!("main.rs"),
             include_str!("agents.rs"),
-            include_str!("project.rs"),
             include_str!("workspace.rs"),
             include_str!("workspace_acp.rs"),
             include_str!("workspace_devices.rs"),

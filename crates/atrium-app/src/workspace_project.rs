@@ -1,9 +1,15 @@
 //! The workspace's project side: projects, their workstreams running side by
 //! side in the background, and the atrium they align through.
 
-use std::{collections::HashSet, path::PathBuf, time::Duration};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
-use atrium_core::{AgentEvent, EntryKind, GoalStatus, Item, ThreadMeta, Transcript, TurnStatus};
+use atrium_core::{
+    AgentEvent, EntryKind, GoalStatus, Item, McpServer, ThreadMeta, Transcript, TurnStatus,
+};
 use codex_client::StartThread;
 use gpui::Context;
 
@@ -121,6 +127,45 @@ impl Workspace {
 
     fn project_mut(&mut self, root: &PathBuf) -> Option<&mut Project> {
         self.projects.iter_mut().find(|p| p.root == *root)
+    }
+
+    /// The `atrium` MCP server for workstream `stream` of the project in
+    /// `root`: this executable run as `atrium mcp`. None for agents on other
+    /// devices, which cannot run it.
+    pub fn mcp_servers(root: &Path, stream: &str, backend: &str) -> Vec<McpServer> {
+        if agents::split_backend(backend).1.is_some() {
+            return Vec::new();
+        }
+        let Ok(exe) = std::env::current_exe() else {
+            return Vec::new();
+        };
+        vec![McpServer {
+            name: "atrium".into(),
+            command: exe.display().to_string(),
+            args: vec![
+                "mcp".into(),
+                "--project".into(),
+                root.display().to_string(),
+                "--stream".into(),
+                stream.into(),
+            ],
+            env: Vec::new(),
+        }]
+    }
+
+    /// The `atrium` MCP server for the workstream `thread` belongs to, if any.
+    pub fn mcp_for_thread(&self, thread: &str, backend: &str) -> Vec<McpServer> {
+        self.projects
+            .iter()
+            .find_map(|p| {
+                let stream = p
+                    .file
+                    .streams
+                    .iter()
+                    .find(|s| s.thread_id.as_deref() == Some(thread))?;
+                Some(Self::mcp_servers(&p.root, &stream.id, backend))
+            })
+            .unwrap_or_default()
     }
 
     /// Every thread that belongs to a workstream: kept out of the chat list.
@@ -326,6 +371,7 @@ impl Workspace {
                 model: self.settings.model.clone(),
                 approval_policy: Some(self.settings.mode.approval_policy().into()),
                 sandbox: Some(self.settings.mode.sandbox_mode().into()),
+                mcp_servers: Self::mcp_servers(&root, &id, &backend),
             };
             let objective = stream.goal.clone();
             cx.spawn(async move |this, cx| {
@@ -364,8 +410,9 @@ impl Workspace {
             let Some(client) = self.acp(&backend) else {
                 return;
             };
+            let mcp = Self::mcp_servers(&root, &id, &backend);
             cx.spawn(async move |this, cx| {
-                let start = match client.new_session(&cwd).await {
+                let start = match client.new_session_with(&cwd, &mcp).await {
                     Ok(start) => start,
                     Err(error) => {
                         let _ = this.update(cx, |ws, cx| ws.stream_failed(&root, &id, error, cx));

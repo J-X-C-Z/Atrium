@@ -22,6 +22,10 @@
 //! do one self-contained task for their lead. Atrium starts the agent a task
 //! file asks for and tells the asker when it is done, so nobody polls.
 
+pub mod agent;
+pub mod mcp;
+pub mod skill;
+
 use std::{
     collections::HashMap,
     fs,
@@ -54,8 +58,6 @@ pub enum Role {
 
 impl Role {
     /// The role of the agents a task file of this role asks for.
-    // Used by the scheduler: see docs/hierarchy-implementation.md.
-    #[allow(dead_code)]
     pub fn child(self) -> Option<Role> {
         match self {
             Role::Controller => Some(Role::Lead),
@@ -64,8 +66,6 @@ impl Role {
         }
     }
 
-    // Used by the scheduler: see docs/hierarchy-implementation.md.
-    #[allow(dead_code)]
     pub fn label(self) -> &'static str {
         match self {
             Role::Controller => "Controller",
@@ -311,8 +311,6 @@ impl Task {
     }
 
     /// A task file for `title`, as the user's "add" dialog writes it.
-    // Used by the scheduler: see docs/hierarchy-implementation.md.
-    #[allow(dead_code)]
     pub fn render(
         title: &str,
         agent: &str,
@@ -484,6 +482,8 @@ pub struct Project {
     pub stamp: Option<SystemTime>,
 }
 
+/// Ends every kickoff: the `atrium` MCP tools do what the files say, safely.
+const TOOLS_HINT: &str = "If you have the `atrium` tools (`whoami`, `check_step`, `create_task`, `finish_task`, `notify`, `write_status`, `write_plan`), use them instead of editing these files by hand: they do the same, check the format and tell the right people. Without them, edit the files as described.";
 const BRIEF: &str = "# Brief\n\nShared conventions and decisions every workstream follows. Keep it short.\n\n## Architecture\n\n## Conventions\n\n## Decisions\n";
 const CONTRACTS: &str = "# Contracts\n\nOne file per interface between workstreams (an API, a schema, an event).\nThe workstream that changes an interface updates its file and posts a notice.\n";
 
@@ -602,8 +602,6 @@ impl Project {
     }
 
     /// Writes a new task file for `owner`; returns its key.
-    // Used by the scheduler: see docs/hierarchy-implementation.md.
-    #[allow(dead_code)]
     pub fn add_task(&mut self, owner: &str, title: &str, text: &str) -> Result<String> {
         let dir = self.dir().join("tasks").join(owner);
         fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -629,8 +627,6 @@ impl Project {
     }
 
     /// The workstreams `id` started.
-    // Used by the scheduler: see docs/hierarchy-implementation.md.
-    #[allow(dead_code)]
     pub fn children<'a>(&'a self, id: &'a str) -> impl Iterator<Item = &'a Workstream> + 'a {
         self.file
             .streams
@@ -664,8 +660,6 @@ impl Project {
     /// Open tasks Atrium should start an agent for now: their owner may ask
     /// for one, nobody works on them yet, the user said yes where needed and
     /// the owner has room.
-    // Used by the scheduler: see docs/hierarchy-implementation.md.
-    #[allow(dead_code)]
     pub fn startable(&self) -> Vec<&Task> {
         let mut started: HashMap<&str, usize> = HashMap::new();
         for stream in &self.file.streams {
@@ -698,8 +692,6 @@ impl Project {
     }
 
     /// Workstreams whose task has finished and whose parent has not been told.
-    // Used by the scheduler: see docs/hierarchy-implementation.md.
-    #[allow(dead_code)]
     pub fn unreported(&self) -> Vec<(&Workstream, &Task)> {
         self.file
             .streams
@@ -711,8 +703,6 @@ impl Project {
     }
 
     /// A new workstream for `task`: its role, parent, goal and scope.
-    // Used by the scheduler: see docs/hierarchy-implementation.md.
-    #[allow(dead_code)]
     pub fn stream_from_task(&self, task: &Task, backend: &str) -> Option<Workstream> {
         let owner = self.stream(&task.owner)?;
         let role = owner.role.child()?;
@@ -839,11 +829,12 @@ impl Project {
 
     /// What a workstream is told when it starts.
     pub fn kickoff(&self, stream: &Workstream) -> String {
-        match stream.role {
+        let text = match stream.role {
             Role::Controller => self.controller_kickoff(stream),
             Role::Lead => self.lead_kickoff(stream),
             Role::Worker => self.worker_kickoff(stream),
-        }
+        };
+        format!("{text}\n\n{TOOLS_HINT}")
     }
 
     /// The leads, one line each, leaving out `except`.

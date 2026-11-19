@@ -3,7 +3,7 @@
 
 mod agents;
 mod i18n;
-mod project;
+use atrium_project as project;
 mod settings;
 mod ui;
 mod workspace;
@@ -20,6 +20,39 @@ use ui::{
 };
 
 fn main() {
+    // `atrium mcp --project <folder> --stream <id>`: the tools project agents
+    // call, served over stdio to the agent session that started it.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("mcp") {
+        let served = project::mcp::Target::from_args(&args[1..]).and_then(|target| {
+            project::mcp::serve(&target, std::io::stdin().lock(), std::io::stdout().lock())
+        });
+        if let Err(error) = served {
+            eprintln!("atrium mcp: {error:#}");
+            std::process::exit(2);
+        }
+        return;
+    }
+    // `atrium skill install`: the skill for Claude Code and Codex;
+    // `atrium skill`: print it.
+    if args.first().map(String::as_str) == Some("skill") {
+        if args.get(1).map(String::as_str) == Some("install") {
+            match dirs::home_dir().map(|home| project::skill::install(&home)) {
+                Some(Ok(paths)) => paths.iter().for_each(|p| println!("{}", p.display())),
+                Some(Err(error)) => {
+                    eprintln!("atrium skill: {error:#}");
+                    std::process::exit(2);
+                }
+                None => {
+                    eprintln!("atrium skill: no home folder");
+                    std::process::exit(2);
+                }
+            }
+        } else {
+            print!("{}", project::skill::SKILL);
+        }
+        return;
+    }
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info,codex_client=info"),
     )

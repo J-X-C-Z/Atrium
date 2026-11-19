@@ -6,6 +6,7 @@ members = [
     "crates/agent-rpc",
     "crates/codex-client",
     "crates/acp-client",
+    "crates/atrium-project",
     "crates/atrium-app",
 ]
 
@@ -33,6 +34,7 @@ atrium-core = { path = "crates/atrium-core" }
 codex-client = { path = "crates/codex-client" }
 agent-rpc = { path = "crates/agent-rpc" }
 acp-client = { path = "crates/acp-client" }
+atrium-project = { path = "crates/atrium-project" }
 
 # UI stack. GPUI Kit 0.7.1 and Ely both pin the gpui-pre 0.3.8 snapshot:
 # upgrade all three together, never one alone.
