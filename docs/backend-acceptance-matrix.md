@@ -100,3 +100,33 @@ acceptance complete merely because isolated macOS CI succeeds.
 The subsequent notice journal, typed ACP outcomes and Workspace hooks have separate model/helper and mock validation described in [notice-delivery-recovery.md](notice-delivery-recovery.md) and [notice-dispatch-hooks.md](notice-dispatch-hooks.md). They are not part of the `37c86bfe` baseline above. Their exact-head macOS app compilation/CI is recorded below. Live Workspace acceptance remains a separate requirement under original package 17; it was not part of package 12's original isolated debounce/edit scope. The explicit uncertain-delivery resolution remains a backend API, not a newly wired frontend control.
 
 The `30a5c029` follow-up completed full macOS CI successfully in [run 44474442418](https://github.com/J-X-C-Z/Atrium/actions/runs/44474442418), including app/workspace compilation/tests and explicit native mocks. This closes its compile-check gap, not live Workspace ticker/window acceptance or the frontend resolution-control gap. The separate opt-in ticker candidate is unpublished and has not run. Under the original isolated macOS scope, package 12 is restored: the original debounce/edit-draft isolation tests and five production dispatch-helper tests passed in the app's 58-test run, alongside the fault-model and native-client checks. Current accepted count is therefore **12/20 = 60% on the unchanged isolated checklist**, not code rewritten or GUI acceptance. The 11/20 review at the `37c86bfe` baseline remains recorded above. Real ticker/window/provider acceptance remains package 17, still incomplete.
+
+
+## Cross-platform follow-up
+
+The backend runs as `atrium-node` on all three platforms. The existing macOS
+desktop continues to exercise Workspace scheduling. Linux and Windows CI run
+the node, core, and transport clients without GPUI.
+
+| Platform | Observed validation | Remaining validation |
+|---|---|---|
+| macOS arm64 | `bc42cf6` passed 229 workspace tests, three native scripted-agent flows and the temporary real launchd install/restart/uninstall test. Release package smoke passed locally. | Interactive desktop with provider accounts and second-device Tailnet acceptance. |
+| Debian 13 arm64 | `bc42cf6` executed in a Linux VM using hash-verified binaries built on macOS. 59 node unit, four protocol, 32 model, and three scripted-agent tests passed. The real systemd 257 user lifecycle installed, started and removed the temporary unit and refused to remove an unrelated unit. | Ubuntu x64 CI and package smoke for the review branch. |
+| Windows x64 | Strict node Clippy for the MSVC target passed through `3ccf212`. Windows fixtures cover Job descendants, batch launch, path handling and Task Scheduler definition validation. | Native Windows CI and the scheduled-task install/start/uninstall cycle in an interactive Windows session. |
+
+The Workspace timer tests cover confirmed acceptance and a rejected RPC whose
+notice remains unread and held after reopening. The subprocess crash test kills
+a writer after reservation and verifies that a fresh process blocks replay. The
+workstream chat offers explicit recovery through **Review notice delivery**.
+
+The original package run [44522702311](https://github.com/J-X-C-Z/Atrium/actions/runs/44522702311)
+passed the archive smoke and bounded-load cases. Its second paced run verified
+all 1,314 sends, below the offered-load floor of 1,024 per client. The functional
+checks run on every applicable PR and the paced test retains its threshold as a
+manual workflow input. See [packaging instructions](node-only-package.md).
+
+Windows registrations use `AtriumNode-<user SID>` and an interactive user token.
+Sites with an older fixed-name `AtriumNode` registration should uninstall it using
+its original binary before installing the per-user task. Linux runs under a
+systemd user manager and requires an explicit administrator/user decision to
+enable lingering. The archive scripts use the current native build target.

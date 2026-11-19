@@ -70,13 +70,15 @@ script/bundle-macos.sh
 
 **进度视图**（概览默认）：每个负责人一行，路线图按阶段（`### 阶段名`）排成一串方块。做完的阶段变暗，当前阶段高亮，并显示步骤进度、下一步和正在跑的子 agent，后面的阶段正常显示。一眼就能看出谁做到了哪里。也可以切回卡片视图。
 
-**分工**：界面、数据模型和文件格式在这里实现并有测试；按任务文件启动 agent、汇报、唤醒的调度引擎交给 Codex 按 [`docs/hierarchy-implementation.md`](docs/hierarchy-implementation.md) 实现。调度引擎完成之前，批准过的负责人会显示为"即将启动"，子 agent 会显示为"排队中"。
+调度器按任务文件启动 agent、汇报结果并唤醒上级。公告投递状态不确定时，打开对应工作线，选择「处理公告投递」来确认已收到或仅重试公告。
 
 当前限制：工作线共用一个代码目录（还没有每条线独立 worktree）；越界提醒只针对 agent 报告的文件修改，不包括它在命令里直接写的文件。
 
 ## 多设备：tailnet 里其他电脑上的 agent
 
 在别的电脑上运行 `atrium-node`（后端，按 [`docs/node-protocol.md`](docs/node-protocol.md) 和 [`docs/node-implementation.md`](docs/node-implementation.md) 实现），它们的 agent 就出现在 Atrium 里：
+
+`atrium-node` 可在 macOS、Linux 和 Windows 上独立运行。首次使用先运行 `atrium-node config path`，创建配置并指定允许访问的 `roots`，再运行 `atrium-node serve --config <配置文件>`。节点可通过 `install`、`status` 和 `uninstall` 交给当前用户的 launchd、systemd 或 Windows 任务计划程序管理。[构建、打包与验收状态](docs/backend-acceptance-matrix.md#cross-platform-follow-up)
 
 - **发现**：读本机 `tailscale status`，探测每台在线设备的 7381 端口；也可以在设置 → Devices 里按地址添加（`ATRIUM_NODES=host:port` 同样可以）
 - **选择**：顶栏的 agent 选择器按设备分组（"This computer"、"studio"……）；远端会话在侧边栏标为 `Claude@studio`、`Codex@studio`

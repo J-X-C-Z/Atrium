@@ -1,6 +1,7 @@
 # Backend implementation status
 
-Based on repository commit `c7e121ff67c4f4d690af4d42873b5631cf77f642`.
+Based on repository commit `c7e121ff67c4f4d690af4d42873b5631cf77f642`. The notes below record historical milestones.
+See the [cross-platform follow-up](backend-acceptance-matrix.md#cross-platform-follow-up) for current results.
 
 ## Node
 

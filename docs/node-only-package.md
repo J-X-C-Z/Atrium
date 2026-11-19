@@ -1,8 +1,7 @@
-# Native node-only packaging candidate
+# Native node packaging
 
-This is a reproducible **archive-format and smoke-test** slice, not a desktop
-release, service installer or completed macOS delivery. It adds no workflow,
-UI, launchd registration, account integration, signing or public publication.
+The packaging scripts build unsigned `atrium-node` archives and run local
+smoke tests.
 
 ## Build, verify, smoke
 
@@ -104,18 +103,24 @@ build/smoke, minimum-macOS validation, signing/notarization, launchd install,
 second-device tailnet test or desktop interaction was performed here**. Those
 remain separate delivery acceptance steps. This candidate is not published.
 
-## Separate macOS CI acceptance
+## Windows x64
 
-`.github/workflows/node-package.yml` is a separate macOS-only job with a
-30-minute cap, read-only repository permissions and checkout credentials not
-persisted. It leaves the existing backend/GUI workflow and timeouts unchanged.
-It runs the safety fixtures, builds only the native `atrium-node` release binary
-with `--locked`, then invokes the package script's offline build against that
-same target directory. This first build permits Cargo's normal dependency
-resolution/downloads on a fresh hosted runner; it does not run workspace-wide
-`cargo fetch`, compile the app, install a service or alter network settings.
-The verifier, same-input repack hash check and foreground smoke then run on the
-native runner. Artifacts remain inside its unique RUNNER_TEMP directory, with
-no upload or public release. CI log hashes establish the tested artifact, not
-publisher authenticity. Merely adding this workflow is not a successful macOS
-run; macOS acceptance requires an observed green run for the final source.
+From a Windows x64 machine with MSVC Rust and PowerShell 7.4 or later:
+
+```powershell
+./scripts/node-package-windows.ps1 -Output ../atrium-node-windows-x64.zip
+```
+
+The script builds a release executable and archives it with a source and SHA-256
+manifest. It extracts its own archive, checks the binary hash, and runs the
+native protocol suite against the extracted executable. It writes the ZIP only
+after these checks pass, and refuses an existing output path.
+
+## CI
+
+The node package workflow runs on macOS, Ubuntu and Windows. The macOS and Linux
+jobs verify deterministic repacking, foreground smoke and bounded load. The
+Windows job verifies its ZIP and runs the native protocol suite. Request the
+`paced-baseline` input when dispatching the workflow to run the two duration-based
+macOS measurements. See the [acceptance matrix](backend-acceptance-matrix.md#cross-platform-follow-up)
+for runtime results.
