@@ -1,0 +1,69 @@
+name: macOS node-only package acceptance
+
+"on":
+  pull_request:
+    paths:
+      - 'crates/atrium-node/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'scripts/node-package.py'
+      - 'scripts/test_node_package.py'
+      - '.github/workflows/node-package.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: '1'
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - name: Checkout without persistent credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # official v4
+        with:
+          persist-credentials: false
+      - name: Official stable Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+      - name: Package safety fixtures
+        run: |
+          python3 -c 'import sys; assert sys.version_info >= (3, 11)'
+          python3 -m unittest discover -s scripts -p test_node_package.py -v
+      - name: Native node build, archive, verify, smoke and reproducible repack
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Do not cargo fetch the entire GUI workspace. A locked node-only
+          # build warms exactly this build graph for the script's offline build.
+          job_root="$(mktemp -d "$RUNNER_TEMP/atrium-node-package.XXXXXX")"
+          export PACKAGE_JOB_ROOT="$job_root"
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          test -n "$host"
+          cargo build --locked --release -p atrium-node --bin atrium-node \
+            --target "$host" --target-dir "$job_root/target"
+          python3 scripts/node-package.py build \
+            --output "$job_root/node.tar.gz" --target-dir "$job_root/target"
+          python3 - <<'PY'
+          import importlib.util
+          import json
+          import os
+          from pathlib import Path
+          spec = importlib.util.spec_from_file_location("node_package", "scripts/node-package.py")
+          package = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(package)
+          root = Path(os.environ["PACKAGE_JOB_ROOT"])
+          archive = root / "node.tar.gz"
+          expected = package.sha(package.read_regular_bounded(archive, package.MAX_BINARY + 1024 * 1024))
+          manifest, binary, hashes = package.verify(archive, expected)
+          package.make_archive(binary, manifest, root / "repacked.tar.gz")
+          _, _, repacked = package.verify(root / "repacked.tar.gz", expected)
+          assert repacked == hashes, "same-input archive repack differed"
+          print(json.dumps({"manifest": manifest, "hashes": hashes, "repack": "identical"}, indent=2))
+          print(json.dumps(package.smoke(archive, expected), indent=2))
+          PY
+          # No uploads, service installation, accounts, signing or publication.
+          # RUNNER_TEMP is runner-owned and removed by the hosted runner lifecycle.
