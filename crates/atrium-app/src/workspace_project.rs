@@ -1172,6 +1172,19 @@ impl Workspace {
             .task_pool
             .starting
             .remove(&(root.clone(), stream.to_owned()));
+        if let Some(parent) = self
+            .projects
+            .iter()
+            .find(|p| p.root == *root)
+            .and_then(|p| p.stream(stream))
+            .filter(|s| pool::is_pool_worker(s))
+            .and_then(|s| s.parent.clone())
+        {
+            self.project_schedule
+                .task_pool
+                .last_start_failure
+                .insert((root.clone(), parent), Instant::now());
+        }
         let mut wake_parent = None;
         if let Some(project) = self.project_mut(root) {
             match project.fail_start(stream, &format!("{error:#}")) {

@@ -22,7 +22,7 @@ const RETRY_DELAY: Duration = Duration::from_secs(30);
 pub(super) struct TaskPoolSchedule {
     pub(super) starting: HashSet<(PathBuf, String)>,
     workers: HashMap<(PathBuf, String), WorkerActivity>,
-    last_start: HashMap<(PathBuf, String), Instant>,
+    pub(super) last_start_failure: HashMap<(PathBuf, String), Instant>,
     goal_cleaned: HashSet<(PathBuf, String)>,
     last_cleanup: HashMap<(PathBuf, String), Instant>,
 }
@@ -343,7 +343,7 @@ impl Workspace {
         if self
             .project_schedule
             .task_pool
-            .last_start
+            .last_start_failure
             .get(&key)
             .is_some_and(|last| now.duration_since(*last) < RETRY_DELAY)
         {
@@ -378,11 +378,20 @@ impl Workspace {
             {
                 break;
             }
-            self.project_schedule
-                .task_pool
-                .last_start
-                .insert(key.clone(), now);
+            let worker_key = (root.clone(), worker.id.clone());
             self.start_stream(root, worker, cx);
+            if !self
+                .project_schedule
+                .task_pool
+                .starting
+                .contains(&worker_key)
+            {
+                self.project_schedule
+                    .task_pool
+                    .last_start_failure
+                    .insert(key, now);
+                break;
+            }
         }
     }
 
