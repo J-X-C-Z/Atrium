@@ -60,6 +60,25 @@ struct PendingState {
 }
 type Pending = Arc<Mutex<PendingState>>;
 
+/// A request future owns only its local response waiter, not remote execution.
+/// Removing an already answered/closed entry is intentionally a no-op.
+struct PendingRegistration {
+    pending: Pending,
+    id: i64,
+}
+impl Drop for PendingRegistration {
+    fn drop(&mut self) {
+        let waiter = self
+            .pending
+            .lock()
+            .expect("pending lock")
+            .waiters
+            .remove(&self.id);
+        // Dropping a sender can wake an executor; do that outside the mutex.
+        drop(waiter);
+    }
+}
+
 /// One JSON-RPC connection. Cheap to clone; all clones share the stream.
 #[derive(Clone)]
 pub struct Connection {
@@ -130,15 +149,12 @@ impl Connection {
             }
             pending.waiters.insert(id, tx);
         }
+        let _registration = PendingRegistration {
+            pending: self.pending.clone(),
+            id,
+        };
         log::debug!("{} >> #{id} {method}", self.peer);
-        if let Err(error) = self.send(&json!({ "id": id, "method": method, "params": params })) {
-            self.pending
-                .lock()
-                .expect("pending lock")
-                .waiters
-                .remove(&id);
-            return Err(error);
-        }
+        self.send(&json!({ "id": id, "method": method, "params": params }))?;
         rx.await.unwrap_or(Err(RpcError::Closed))
     }
 
@@ -392,6 +408,144 @@ mod tests {
         });
         rx.recv_timeout(std::time::Duration::from_secs(3))
             .expect("RPC operation exceeded test deadline")
+    }
+
+    fn poll_pending<F: std::future::Future>(future: std::pin::Pin<&mut F>) {
+        let mut cx = std::task::Context::from_waker(futures::task::noop_waker_ref());
+        assert!(future.poll(&mut cx).is_pending());
+    }
+
+    #[test]
+    fn cancelled_requests_release_waiters_without_sending_cancel_commands() {
+        within(|| {
+            let (to_server, server_in) = pipe();
+            let (_server_out, from_server) = pipe(); // open forever, never responds
+            let (connection, _events) = Connection::new(from_server, to_server);
+            for _ in 0..128 {
+                let mut request = Box::pin(connection.request("never-replies", json!({})));
+                poll_pending(request.as_mut());
+                assert_eq!(connection.pending.lock().unwrap().waiters.len(), 1);
+                let bytes = server_in.get_ref().rx.try_recv().unwrap();
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&bytes).unwrap()["method"],
+                    "never-replies"
+                );
+                drop(request);
+                assert!(
+                    connection.pending.lock().unwrap().waiters.is_empty(),
+                    "dropped request leaked a pending sender"
+                );
+                assert!(
+                    server_in.get_ref().rx.try_recv().is_err(),
+                    "local cancellation must not send an interrupt or retry"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn cancellation_ignores_late_response_and_preserves_other_waiters() {
+        within(|| {
+            let (to_server, server_in) = pipe();
+            let (_server_out, from_server) = pipe();
+            let (connection, _events) = Connection::new(from_server, to_server);
+            let mut cancelled = Box::pin(connection.request("cancelled", json!({})));
+            let mut surviving = Box::pin(connection.request("survives", json!({})));
+            poll_pending(cancelled.as_mut());
+            let first: Value =
+                serde_json::from_slice(&server_in.get_ref().rx.try_recv().unwrap()).unwrap();
+            poll_pending(surviving.as_mut());
+            let second: Value =
+                serde_json::from_slice(&server_in.get_ref().rx.try_recv().unwrap()).unwrap();
+            drop(cancelled);
+            assert_eq!(connection.pending.lock().unwrap().waiters.len(), 1);
+            assert!(
+                route(
+                    json!({"id":first["id"],"result":"late"}),
+                    &connection.pending
+                )
+                .is_none()
+            );
+            assert_eq!(connection.pending.lock().unwrap().waiters.len(), 1);
+            route(
+                json!({"id":second["id"],"result":"expected"}),
+                &connection.pending,
+            );
+            assert_eq!(block_on(surviving), Ok(json!("expected")));
+            assert!(connection.pending.lock().unwrap().waiters.is_empty());
+        });
+    }
+
+    #[test]
+    fn cancel_response_and_eof_race_releases_all_waiters() {
+        within(|| {
+            for _ in 0..64 {
+                let (to_server, server_in) = pipe();
+                let (mut server_out, from_server) = pipe();
+                let (connection, mut events) = Connection::new(from_server, to_server);
+                let worker_connection = connection.clone();
+                let barrier = Arc::new(std::sync::Barrier::new(2));
+                let worker_barrier = barrier.clone();
+                let (registered, ready) = std::sync::mpsc::channel();
+                let (finished, done) = std::sync::mpsc::channel();
+                let worker = thread::spawn(move || {
+                    let mut request = Box::pin(worker_connection.request("race", json!({})));
+                    poll_pending(request.as_mut());
+                    registered.send(()).unwrap();
+                    worker_barrier.wait();
+                    drop(request);
+                    finished.send(()).unwrap();
+                });
+                ready
+                    .recv_timeout(std::time::Duration::from_secs(1))
+                    .unwrap();
+                let sent: Value =
+                    serde_json::from_slice(&server_in.get_ref().rx.try_recv().unwrap()).unwrap();
+                barrier.wait();
+                writeln!(server_out, "{}", json!({"id":sent["id"],"result":"racing"})).unwrap();
+                drop(server_out);
+                done.recv_timeout(std::time::Duration::from_secs(1))
+                    .unwrap();
+                worker.join().unwrap();
+                assert_eq!(block_on(events.next()), Some(Incoming::Closed));
+                let pending = connection.pending.lock().unwrap();
+                assert!(pending.closed && pending.waiters.is_empty());
+            }
+        });
+    }
+
+    #[test]
+    fn serialization_and_write_errors_leave_no_pending_entries() {
+        struct BadParams;
+        impl Serialize for BadParams {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("fixture serialization failure"))
+            }
+        }
+        struct BrokenWriter;
+        impl Write for BrokenWriter {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "fixture write failure",
+                ))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        within(|| {
+            let (_server_out, from_server) = pipe();
+            let (connection, _events) = Connection::new(from_server, BrokenWriter);
+            assert!(
+                matches!(block_on(connection.request("bad-params", BadParams)), Err(RpcError::Write(e)) if e.contains("serialization"))
+            );
+            assert!(connection.pending.lock().unwrap().waiters.is_empty());
+            assert!(
+                matches!(block_on(connection.request("broken-write", json!({}))), Err(RpcError::Write(e)) if e.contains("write failure"))
+            );
+            assert!(connection.pending.lock().unwrap().waiters.is_empty());
+        });
     }
 
     #[test]
