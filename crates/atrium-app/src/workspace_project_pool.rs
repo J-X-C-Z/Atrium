@@ -512,3 +512,7 @@ mod tests {
         assert_eq!(activity.failures, 0);
     }
 }
+
+#[cfg(all(test, unix, feature = "workspace-ticker-test"))]
+#[path = "workspace_project_pool_test.rs"]
+mod ticker_tests;
