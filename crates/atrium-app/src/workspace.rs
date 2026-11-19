@@ -124,6 +124,9 @@ pub struct Workspace {
     client: Option<CodexClient>,
     pub threads: Vec<ThreadMeta>,
     pub view: View,
+    /// Counts the user's moves between chats and project views, so the
+    /// main column can play its entrance on a move and not on other changes.
+    pub nav: u64,
     transcripts: HashMap<String, Transcript>,
     /// The draft's transcript, shown while its thread is being created.
     draft: Transcript,
@@ -219,6 +222,7 @@ impl Workspace {
             client: None,
             threads: Vec::new(),
             view: View::Draft,
+            nav: 0,
             transcripts: HashMap::new(),
             draft: Transcript::new(),
             loading: HashSet::new(),
@@ -677,6 +681,7 @@ impl Workspace {
     }
 
     pub fn new_chat(&mut self, cx: &mut Context<Self>) {
+        self.nav += 1;
         if !self.draft.is_running() {
             self.draft = Transcript::new();
             self.born.remove(DRAFT);
@@ -687,6 +692,7 @@ impl Workspace {
     }
 
     pub fn open_thread(&mut self, thread_id: String, cx: &mut Context<Self>) {
+        self.nav += 1;
         self.view = View::Thread(thread_id.clone());
         cx.notify();
         self.load_thread(thread_id, cx);
@@ -705,8 +711,9 @@ impl Workspace {
             return;
         };
         self.loading.insert(thread_id.clone());
+        let mcp = self.mcp_for_thread(&thread_id, self.backend_of(&thread_id));
         cx.spawn(async move |this, cx| {
-            let resumed = client.thread_resume(&thread_id).await;
+            let resumed = client.thread_resume_with(&thread_id, &mcp).await;
             let _ = this.update(cx, |ws, cx| {
                 ws.loading.remove(&thread_id);
                 match resumed {
@@ -994,10 +1001,11 @@ impl Workspace {
             return;
         };
         self.editing = None;
+        let mcp = self.mcp_for_thread(&thread_id, self.backend_of(&thread_id));
         cx.spawn(async move |this, cx| {
             let reverted = client.thread_revert(&thread_id, &turn_id).await;
             let resumed = match reverted {
-                Ok(()) => client.thread_resume(&thread_id).await,
+                Ok(()) => client.thread_resume_with(&thread_id, &mcp).await,
                 Err(error) => Err(error),
             };
             let _ = this.update(cx, |ws, cx| match resumed {
@@ -1354,6 +1362,7 @@ impl Workspace {
                     },
                     approval_policy: Some(self.settings.mode.approval_policy().into()),
                     sandbox: Some(self.settings.mode.sandbox_mode().into()),
+                    mcp_servers: Vec::new(),
                 };
                 let title = composed.text.clone();
                 cx.spawn(async move |this, cx| {
@@ -1597,6 +1606,7 @@ impl Workspace {
                     model: self.settings.model.clone(),
                     approval_policy: Some(AccessMode::ReadOnly.approval_policy().into()),
                     sandbox: Some(AccessMode::ReadOnly.sandbox_mode().into()),
+                    mcp_servers: Vec::new(),
                 };
                 cx.spawn(async move |this, cx| {
                     let meta = match client.thread_start(options).await {

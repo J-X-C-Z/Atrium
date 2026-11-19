@@ -649,8 +649,9 @@ impl Workspace {
         // Replayed updates fill this transcript as they arrive.
         self.transcripts.insert(session.clone(), Transcript::new());
         self.loading.insert(session.clone());
+        let mcp = self.mcp_for_thread(&session, &meta.backend);
         cx.spawn(async move |this, cx| {
-            let opened = client.open_session(&session, &meta.cwd).await;
+            let opened = client.open_session_with(&session, &meta.cwd, &mcp).await;
             let _ = this.update(cx, |ws, cx| {
                 ws.loading.remove(&session);
                 match opened {

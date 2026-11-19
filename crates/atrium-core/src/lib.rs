@@ -14,7 +14,7 @@ mod transcript;
 pub use event::{AgentEvent, ApprovalDecision, ApprovalKind, ApprovalRequest, UserInputRequest};
 pub use model::{
     Account, AgentCommand, ChangeKind, ConfigChoice, ConfigOption, Cost, Credits, FileChange, Goal,
-    GoalStatus, Item, ItemStatus, PlanStep, Question, RateLimits, RateWindow, RequestId,
+    GoalStatus, Item, ItemStatus, McpServer, PlanStep, Question, RateLimits, RateWindow, RequestId,
     ThreadMeta, TokenCounts, TokenUsage, TurnStatus, plan_label,
 };
 pub use pace::{TurnPace, estimate_tokens};

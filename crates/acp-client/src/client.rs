@@ -9,7 +9,7 @@ use std::{
 
 use agent_rpc::{Connection, Incoming, RpcError, process};
 use anyhow::{Context as _, Result, anyhow};
-use atrium_core::{AgentEvent, ApprovalDecision, ConfigOption, RequestId, ThreadMeta};
+use atrium_core::{AgentEvent, ApprovalDecision, ConfigOption, McpServer, RequestId, ThreadMeta};
 use base64::Engine as _;
 use futures::channel::mpsc;
 use serde_json::{Value, json};
@@ -305,11 +305,20 @@ impl AcpClient {
     }
 
     pub async fn new_session(&self, cwd: &Path) -> Result<SessionStart> {
+        self.new_session_with(cwd, &[]).await
+    }
+
+    /// [`Self::new_session`] with `mcp_servers` for the agent to use.
+    pub async fn new_session_with(
+        &self,
+        cwd: &Path,
+        mcp_servers: &[McpServer],
+    ) -> Result<SessionStart> {
         let result = self
             .connection
             .request(
                 "session/new",
-                json!({ "cwd": cwd.display().to_string(), "mcpServers": [] }),
+                json!({ "cwd": cwd.display().to_string(), "mcpServers": mcp_json(mcp_servers) }),
             )
             .await
             .map_err(|e| self.explain(e))?;
@@ -329,7 +338,18 @@ impl AcpClient {
     /// as updates (translate them as they come); with `session/resume` it
     /// continues without history. Returns the session's settings.
     pub async fn open_session(&self, session_id: &str, cwd: &str) -> Result<Vec<ConfigOption>> {
-        let params = json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": [] });
+        self.open_session_with(session_id, cwd, &[]).await
+    }
+
+    /// [`Self::open_session`] with `mcp_servers` for the agent to use.
+    pub async fn open_session_with(
+        &self,
+        session_id: &str,
+        cwd: &str,
+        mcp_servers: &[McpServer],
+    ) -> Result<Vec<ConfigOption>> {
+        let params =
+            json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": mcp_json(mcp_servers) });
         let result = if self.info.load_session {
             self.translator
                 .lock()
@@ -681,4 +701,19 @@ mod prompt_outcome_tests {
             .recv_timeout(Duration::from_secs(10))
             .expect("prompt cases completed before deadline");
     }
+}
+
+/// `servers` as ACP's stdio `McpServer` entries.
+fn mcp_json(servers: &[McpServer]) -> Value {
+    servers
+        .iter()
+        .map(|s| {
+            json!({
+                "name": s.name,
+                "command": s.command,
+                "args": s.args,
+                "env": s.env.iter().map(|(k, v)| json!({ "name": k, "value": v })).collect::<Vec<_>>(),
+            })
+        })
+        .collect()
 }

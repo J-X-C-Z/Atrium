@@ -22,6 +22,13 @@
 //! do one self-contained task for their lead. Atrium starts the agent a task
 //! file asks for and tells the asker when it is done, so nobody polls.
 
+pub mod agent;
+pub mod autopilot;
+pub mod mcp;
+pub mod notice_delivery;
+pub mod pool;
+pub mod skill;
+
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -34,9 +41,6 @@ use std::{
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
-#[path = "notice_delivery.rs"]
-#[allow(dead_code)] // Consumed by the separate Workspace dispatch integration.
-pub(crate) mod notice_delivery;
 use notice_delivery::{
     Commit, Delivery, NoticeOutcome, NoticePreparation, NoticeResolution, NoticeTicket,
     Phase as DeliveryPhase,
@@ -65,8 +69,6 @@ pub enum Role {
 
 impl Role {
     /// The role of the agents a task file of this role asks for.
-    // Used by the scheduler: see docs/hierarchy-implementation.md.
-    #[allow(dead_code)]
     pub fn child(self) -> Option<Role> {
         match self {
             Role::Controller => Some(Role::Lead),
@@ -75,8 +77,6 @@ impl Role {
         }
     }
 
-    // Used by the scheduler: see docs/hierarchy-implementation.md.
-    #[allow(dead_code)]
     pub fn label(self) -> &'static str {
         match self {
             Role::Controller => "Controller",
@@ -187,6 +187,12 @@ pub struct Task {
     /// The roadmap's phases; without `###` headings each step is a phase.
     pub phases: Vec<Phase>,
     pub result: Option<String>,
+    /// The pool worker working on it (`claimed_by:`).
+    pub claimed_by: Option<String>,
+    /// Ids of tasks of the same owner that must be done first (`after:`).
+    pub after: Vec<String>,
+    /// `priority: high` (1), `normal` (0) or `low` (-1); higher is claimed first.
+    pub priority: i32,
 }
 
 impl Task {
@@ -230,6 +236,29 @@ impl Task {
                 "agent" => {
                     let value = value.trim().to_lowercase();
                     task.agent = (!value.is_empty()).then_some(value);
+                }
+                "claimed_by" | "claimed by" | "worker" => {
+                    let value = value.trim();
+                    task.claimed_by = (!value.is_empty()).then(|| value.to_string());
+                }
+                "after" | "depends on" | "blocked by" => {
+                    task.after = value
+                        .split(',')
+                        .map(|s| {
+                            s.trim()
+                                .trim_matches('`')
+                                .trim_end_matches(".md")
+                                .to_string()
+                        })
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                }
+                "priority" => {
+                    task.priority = match value.trim().to_lowercase().as_str() {
+                        "high" | "urgent" | "p0" | "p1" | "1" => 1,
+                        "low" | "p3" | "-1" => -1,
+                        _ => 0,
+                    }
                 }
                 "scope" => {
                     task.scope = value
@@ -322,8 +351,6 @@ impl Task {
     }
 
     /// A task file for `title`, as the user's "add" dialog writes it.
-    // Used by the scheduler: see docs/hierarchy-implementation.md.
-    #[allow(dead_code)]
     pub fn render(
         title: &str,
         agent: &str,
@@ -364,6 +391,64 @@ impl Task {
             )
         })
     }
+}
+
+/// The header keys of a task file.
+const HEADER_KEYS: &[&str] = &[
+    "status",
+    "agent",
+    "scope",
+    "claimed_by",
+    "claimed by",
+    "worker",
+    "after",
+    "depends on",
+    "blocked by",
+    "priority",
+];
+
+/// `text` with its header line `key:` saying `value`, added under the other
+/// header lines when missing, removed with `None`.
+pub fn with_header(text: &str, key: &str, value: Option<&str>) -> String {
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let title = lines
+        .iter()
+        .position(|l| l.trim().starts_with("# "))
+        .map_or(0, |i| i + 1);
+    // The header block: known `key: value` lines under the title, as
+    // `Task::parse` reads them.
+    let mut end = title;
+    let mut at = title;
+    let mut found = None;
+    while end < lines.len() {
+        let line = lines[end].trim();
+        if line.is_empty() {
+            end += 1;
+            continue;
+        }
+        match line.split_once(':') {
+            Some((k, _)) if HEADER_KEYS.contains(&k.trim().to_lowercase().as_str()) => {
+                if k.trim().eq_ignore_ascii_case(key) {
+                    found = Some(end);
+                }
+                end += 1;
+                at = end;
+            }
+            _ => break,
+        }
+    }
+    let end = at;
+    match (found, value) {
+        (Some(i), Some(value)) => lines[i] = format!("{key}: {value}"),
+        (Some(i), None) => {
+            lines.remove(i);
+        }
+        (None, Some(value)) => lines.insert(end, format!("{key}: {value}")),
+        (None, None) => {}
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
 }
 
 /// `text` with its `status:` line saying `status`; one is added under the
@@ -412,6 +497,9 @@ pub struct Workstream {
     pub task: Option<String>,
     /// Whether its parent has been told the task finished.
     pub reported: bool,
+    /// A pool worker taken out of service (its session was replaced by a
+    /// fresh one, or it kept failing). Kept so its chat stays readable.
+    pub retired: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -427,6 +515,51 @@ pub struct ProjectFile {
     pub approved: Vec<String>,
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     notice_deliveries: HashMap<String, Delivery>,
+    /// Finished pool tasks their lead has been told about, as `owner/id`.
+    pub reported_tasks: Vec<String>,
+    /// Running without the user: see [`Autopilot`].
+    pub autopilot: Autopilot,
+}
+
+/// How a project keeps going around the clock without the user, after
+/// Paperclip's heartbeats and liveness recovery. Atrium's scheduler acts on
+/// it; agents only read it (their kickoff says whether to stop for the user).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Autopilot {
+    /// Keep every agent with unfinished work going: continue it when its
+    /// turn ends, retry failures, recover stalls, and never wait on the user.
+    pub on: bool,
+    /// Minutes between check-ins of an idle lead that still has work.
+    pub lead_heartbeat_min: u32,
+    /// Minutes between check-ins of the controller while leads work.
+    pub controller_heartbeat_min: u32,
+    /// Seconds after a turn ends before an agent with unfinished work is
+    /// told to continue.
+    pub continue_after_secs: u32,
+    /// Minutes without any output before a running turn counts as stalled.
+    pub stall_min: u32,
+    /// Tasks a pool worker does before it is replaced by a fresh session.
+    pub tasks_per_session: usize,
+    /// Wake a lead when fewer tasks than this are ready; 0 means one per worker.
+    pub refill_at: usize,
+    /// Turns the project may start in a day; 0 for no limit.
+    pub daily_turns: u32,
+}
+
+impl Default for Autopilot {
+    fn default() -> Self {
+        Self {
+            on: false,
+            lead_heartbeat_min: 30,
+            controller_heartbeat_min: 120,
+            continue_after_secs: 60,
+            stall_min: 15,
+            tasks_per_session: 5,
+            refill_at: 0,
+            daily_turns: 0,
+        }
+    }
 }
 
 impl Default for ProjectFile {
@@ -438,6 +571,8 @@ impl Default for ProjectFile {
             approve_leads: false,
             approved: Vec::new(),
             notice_deliveries: HashMap::new(),
+            reported_tasks: Vec::new(),
+            autopilot: Autopilot::default(),
         }
     }
 }
@@ -498,6 +633,11 @@ pub struct Project {
     pub stamp: Option<SystemTime>,
 }
 
+/// Added to kickoffs while the project's autopilot is on.
+const UNATTENDED: &str = "This project runs unattended, around the clock: nobody is watching to answer questions. Never stop to ask the user. Make the reasonable choice, write it down in your status file (or result) and tell your parent with a notice; if something truly blocks you, say so in a notice and carry on with whatever else you can do. When Atrium tells you to continue, pick up exactly where you left off: re-read your task file and status file first.";
+
+/// Ends every kickoff: the `atrium` MCP tools do what the files say, safely.
+const TOOLS_HINT: &str = "If you have the `atrium` tools (`whoami`, `check_step`, `create_task`, `finish_task`, `notify`, `write_status`, `write_plan`), use them instead of editing these files by hand: they do the same, check the format and tell the right people. Without them, edit the files as described.";
 const BRIEF: &str = "# Brief\n\nShared conventions and decisions every workstream follows. Keep it short.\n\n## Architecture\n\n## Conventions\n\n## Decisions\n";
 const CONTRACTS: &str = "# Contracts\n\nOne file per interface between workstreams (an API, a schema, an event).\nThe workstream that changes an interface updates its file and posts a notice.\n";
 
@@ -648,6 +788,7 @@ impl Project {
 
     /// Writes `status` into a task's file.
     pub fn set_task_status(&mut self, key: &str, status: TaskStatus) -> Result<()> {
+        let _lock = pool::TaskLock::take(self)?;
         let task = self
             .task(key)
             .ok_or_else(|| anyhow::anyhow!("task {key} is missing or unreadable"))?;
@@ -661,8 +802,6 @@ impl Project {
     }
 
     /// Writes a new task file for `owner`; returns its key.
-    // Used by the scheduler: see docs/hierarchy-implementation.md.
-    #[allow(dead_code)]
     pub fn add_task(&mut self, owner: &str, title: &str, text: &str) -> Result<String> {
         let dir = self.dir().join("tasks").join(owner);
         fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -688,8 +827,6 @@ impl Project {
     }
 
     /// The workstreams `id` started.
-    // Used by the scheduler: see docs/hierarchy-implementation.md.
-    #[allow(dead_code)]
     pub fn children<'a>(&'a self, id: &'a str) -> impl Iterator<Item = &'a Workstream> + 'a {
         self.file
             .streams
@@ -705,9 +842,16 @@ impl Project {
             .find(|s| s.task.as_deref() == Some(key))
     }
 
-    /// The task a workstream was started for.
+    /// The task a workstream was started for, or for a pool worker the task
+    /// it holds now.
     pub fn task_of(&self, stream: &Workstream) -> Option<&Task> {
-        stream.task.as_deref().and_then(|key| self.task(key))
+        match stream.task.as_deref() {
+            Some(key) => self.task(key),
+            None if stream.role == Role::Worker => self.tasks.iter().find(|t| {
+                t.status == TaskStatus::Running && t.claimed_by.as_deref() == Some(&stream.id)
+            }),
+            None => None,
+        }
     }
 
     /// Whether a task waits for the user's go-ahead before its agent starts.
@@ -720,52 +864,29 @@ impl Project {
             && !self.file.approved.contains(&task.key())
     }
 
-    /// Open tasks Atrium should start an agent for now: their owner may ask
-    /// for one, nobody works on them yet, the user said yes where needed and
-    /// the owner has room.
-    // Used by the scheduler: see docs/hierarchy-implementation.md.
-    #[allow(dead_code)]
+    /// The controller's open tasks Atrium should start a lead for now:
+    /// nobody works on them yet and the user said yes where needed.
     pub fn startable(&self) -> Vec<&Task> {
         self.startable_with(|_| true)
     }
 
-    /// Check backend availability before reserving per-lead slots, so an
-    /// offline request cannot starve a later ready task under the same lead.
+    /// Like [`Self::startable`], with a caller-supplied eligibility check.
     pub fn startable_with(&self, eligible: impl Fn(&Task) -> bool) -> Vec<&Task> {
-        let mut started: HashMap<&str, usize> = HashMap::new();
-        for stream in &self.file.streams {
-            if let (Some(parent), Some(task)) = (&stream.parent, self.task_of(stream))
-                && !task.status.finished()
-            {
-                *started.entry(parent.as_str()).or_default() += 1;
-            }
-        }
-        let mut out = Vec::new();
-        for task in &self.tasks {
-            let Some(owner) = self.stream(&task.owner) else {
-                continue;
-            };
-            if task.status != TaskStatus::Open
-                || owner.role.child().is_none()
-                || self.stream_for_task(&task.key()).is_some()
-                || self.awaits_approval(task)
-                || !eligible(task)
-            {
-                continue;
-            }
-            let running = started.entry(owner.id.as_str()).or_default();
-            if owner.role == Role::Lead && *running >= self.file.max_workers.max(1) {
-                continue;
-            }
-            *running += 1;
-            out.push(task);
-        }
-        out
+        self.tasks
+            .iter()
+            .filter(|task| {
+                // A lead's tasks go to its pool (see `pool`), not to agents of their own.
+                self.stream(&task.owner)
+                    .is_some_and(|o| o.role == Role::Controller)
+                    && task.status == TaskStatus::Open
+                    && self.stream_for_task(&task.key()).is_none()
+                    && !self.awaits_approval(task)
+                    && eligible(task)
+            })
+            .collect()
     }
 
     /// Workstreams whose task has finished and whose parent has not been told.
-    // Used by the scheduler: see docs/hierarchy-implementation.md.
-    #[allow(dead_code)]
     pub fn unreported(&self) -> Vec<(&Workstream, &Task)> {
         self.file
             .streams
@@ -777,8 +898,6 @@ impl Project {
     }
 
     /// A new workstream for `task`: its role, parent, goal and scope.
-    // Used by the scheduler: see docs/hierarchy-implementation.md.
-    #[allow(dead_code)]
     pub fn stream_from_task(&self, task: &Task, backend: &str) -> Option<Workstream> {
         let owner = self.stream(&task.owner)?;
         let role = owner.role.child()?;
@@ -810,7 +929,7 @@ impl Project {
             role,
             parent: Some(owner.id.clone()),
             task: Some(task_key),
-            reported: false,
+            ..Workstream::default()
         })
     }
 
@@ -857,7 +976,7 @@ impl Project {
     }
 
     /// Bind before kickoff. On failure callers must not send any work.
-    pub(crate) fn bind_thread(&mut self, stream: &str, thread: &str) -> Result<()> {
+    pub fn bind_thread(&mut self, stream: &str, thread: &str) -> Result<()> {
         let target = self
             .stream_mut(stream)
             .ok_or_else(|| anyhow::anyhow!("workstream was removed before startup completed"))?;
@@ -870,7 +989,7 @@ impl Project {
     }
 
     /// Preserve evidence until both task failure and its notice have persisted.
-    pub(crate) fn fail_start(&mut self, id: &str, reason: &str) -> Result<Option<String>> {
+    pub fn fail_start(&mut self, id: &str, reason: &str) -> Result<Option<String>> {
         let Some(stream) = self.stream(id).cloned() else {
             return Ok(None);
         };
@@ -916,9 +1035,9 @@ impl Project {
         Ok(())
     }
 
-    /// Recover an interrupted pre-launch claim conservatively. No thread can
-    /// have been started by our launcher before its Workstream was saved.
-    /// Never relaunch automatically: show a failed task and tell its owner.
+    /// Recover interrupted launches of task-bound workstreams. Pool claims
+    /// have their own release and resume lifecycle. A failed launch is
+    /// reported to its owner for review before retry.
     pub fn recover_unbound_tasks(&mut self) -> Result<Vec<String>> {
         // A durable receipt may precede the reported flag and outlive its task
         // file. Reconcile it before scanning tasks, otherwise archival hides it.
@@ -941,6 +1060,7 @@ impl Project {
             .iter()
             .filter(|task| {
                 task.status == TaskStatus::Running
+                    && task.claimed_by.is_none()
                     && self.stream_for_task(&task.key()).is_none()
                     && self
                         .stream(&task.owner)
@@ -954,20 +1074,23 @@ impl Project {
             .iter()
             .filter(|s| {
                 s.thread_id.is_none()
-                    && self.task_of(s).is_some_and(|t| {
-                        t.status == TaskStatus::Running
-                            || (t.status == TaskStatus::Failed
-                                && s.parent.as_ref().is_some_and(|parent| {
-                                    self.notices.iter().any(|notice| {
-                                        startup_failure(notice, parent).is_some_and(
-                                            |(task, stream)| {
-                                                s.task.as_ref() == Some(&task)
-                                                    && stream == (s.id.clone(), s.created_at)
-                                            },
-                                        )
-                                    })
-                                }))
-                    })
+                    && s.task
+                        .as_deref()
+                        .and_then(|key| self.task(key))
+                        .is_some_and(|t| {
+                            t.status == TaskStatus::Running
+                                || (t.status == TaskStatus::Failed
+                                    && s.parent.as_ref().is_some_and(|parent| {
+                                        self.notices.iter().any(|notice| {
+                                            startup_failure(notice, parent).is_some_and(
+                                                |(task, stream)| {
+                                                    s.task.as_ref() == Some(&task)
+                                                        && stream == (s.id.clone(), s.created_at)
+                                                },
+                                            )
+                                        })
+                                    }))
+                        })
             })
             .map(|s| s.id.clone())
             .collect();
@@ -1155,8 +1278,7 @@ impl Project {
     }
 
     /// Persist before dispatch. The caller sends no auto wake if this fails.
-    #[allow(dead_code)]
-    pub(crate) fn prepare_notice_delivery(
+    pub fn prepare_notice_delivery(
         &mut self,
         stream: &str,
         thread: &str,
@@ -1193,8 +1315,7 @@ impl Project {
 
     /// True means the exact callback was processed; an accepted RPC whose
     /// captured prefix no longer matches becomes an unresolved hold instead.
-    #[allow(dead_code)]
-    pub(crate) fn settle_notice_delivery(
+    pub fn settle_notice_delivery(
         &mut self,
         ticket: &NoticeTicket,
         outcome: NoticeOutcome,
@@ -1244,8 +1365,7 @@ impl Project {
     }
 
     /// Run once when opening projects in a fresh Workspace, never on reload.
-    #[allow(dead_code)]
-    pub(crate) fn recover_notice_deliveries(&mut self) -> Result<()> {
+    pub fn recover_notice_deliveries(&mut self) -> Result<()> {
         if self
             .file
             .notice_deliveries
@@ -1262,8 +1382,7 @@ impl Project {
     }
 
     /// Requires explicit user choice. Reserved live attempts cannot be reset.
-    #[allow(dead_code)]
-    pub(crate) fn resolve_notice_delivery(
+    pub fn resolve_notice_delivery(
         &mut self,
         stream: &str,
         resolution: NoticeResolution,
@@ -1280,13 +1399,11 @@ impl Project {
         Ok(true)
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn notice_delivery_blocked(&self, stream: &str) -> bool {
+    pub fn notice_delivery_blocked(&self, stream: &str) -> bool {
         self.file.notice_deliveries.contains_key(stream)
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn notice_delivery_uncertain(&self, stream: &str) -> bool {
+    pub fn notice_delivery_uncertain(&self, stream: &str) -> bool {
         self.file
             .notice_deliveries
             .get(stream)
@@ -1337,11 +1454,17 @@ impl Project {
 
     /// What a workstream is told when it starts.
     pub fn kickoff(&self, stream: &Workstream) -> String {
-        match stream.role {
+        let text = match stream.role {
             Role::Controller => self.controller_kickoff(stream),
             Role::Lead => self.lead_kickoff(stream),
             Role::Worker => self.worker_kickoff(stream),
-        }
+        };
+        let unattended = if self.file.autopilot.on {
+            format!("\n\n{UNATTENDED}")
+        } else {
+            String::new()
+        };
+        format!("{text}{unattended}\n\n{TOOLS_HINT}")
     }
 
     /// The leads, one line each, leaving out `except`.
@@ -1445,7 +1568,7 @@ impl Project {
              - `{dir}/status/{id}.md`: your status. Keep it current with the headings Focus, Done, Next, Touching (files you are changing) and Questions.\n\
              - `{dir}/notices.md`: append-only. To tell others something, append one line: `- YYYY-MM-DD HH:MM · {id} → <id or all>: <message>`.\n\
              New notices for you are added to your next message, so there is no need to check for them.\n\n\
-             You can hand self-contained pieces to sub-agents so they run in parallel: write `{dir}/tasks/{id}/<task-id>.md` with a `# Title`, `status: open`, optionally `agent:` and `scope:` (inside yours), and then what to do and how you will check it. Atrium starts one sub-agent per file, at most {max} at a time, and tells you when each finishes; read its result under `## Result` and review its changes before building on them. Do the parts that need your judgement yourself.\n\n\
+             You have a task pool and up to {max} sub-agents to work it. Break the current phase into self-contained, checkable tasks and add them all at once (`create_tasks`, or one file each as `{dir}/tasks/{id}/<task-id>.md` with a `# Title`, `status: open`, optionally `scope:` inside yours, `after: <ids>` for tasks that must be done first and `priority: high`, then what to do and how it will be checked). Sub-agents start on their own; each claims a task, finishes it and claims the next, without you. You are woken with their results when fewer than one task per sub-agent is left: review them, tick your roadmap, and add the next batch so they never run dry. Do the parts that need your judgement yourself.\n\n\
              Read the brief and the contracts, write your status file, then work toward your goal on your own. Stop to ask only when a decision really needs me.",
             name = stream.name,
             id = stream.id,
@@ -1458,7 +1581,33 @@ impl Project {
         )
     }
 
+    fn pool_worker_kickoff(&self, stream: &Workstream) -> String {
+        let lead = stream.parent.as_deref().unwrap_or("your lead");
+        let first = match self.task_of(stream) {
+            Some(task) => format!(
+                "Your first task, already claimed for you:\n\n{}",
+                agent::task_brief(task)
+            ),
+            None => "Start by calling `claim_next`.".to_string(),
+        };
+        format!(
+            "You are a pool sub-agent (id `{id}`) of the lead `{lead}` in the project \"{project}\". The lead keeps a pool of tasks in `{dir}/tasks/{lead}/`; you and other sub-agents work through it, one task at a time, without waiting for anyone.\n\n\
+             Your scope: {scope}, unless a task names a narrower one. Do not change files outside it.\n\n\
+             Read `{dir}/brief.md` and follow it. Do not edit the brief, the contracts, the plan or task files other than the one you hold, and do not start sub-agents.\n\n\
+             The loop: do the task you hold, then `finish_task` with what you changed, how you checked it and anything left open (status `failed` with the reason if you cannot). `finish_task` claims your next task and gives it to you: carry straight on with it. Stop only when it says the pool is empty. Keep each task's work separate; do not rely on what you remember from earlier tasks without checking the files.\n\n\
+             Without the tools: claim a task by setting `status: running` and adding `claimed_by: {id}` under its title, in the first file whose `status:` is `open`, which has no `claimed_by:` and whose `after:` tasks are all `done`; finish it by adding `## Result` and setting `status: done`.\n\n\
+             {first}",
+            id = stream.id,
+            project = self.file.name,
+            scope = scope_label(&stream.scope),
+            dir = DIR,
+        )
+    }
+
     fn worker_kickoff(&self, stream: &Workstream) -> String {
+        if stream.task.is_none() {
+            return self.pool_worker_kickoff(stream);
+        }
         let lead = stream
             .parent
             .as_deref()
@@ -1485,11 +1634,11 @@ impl Project {
     }
 }
 
-pub(crate) fn controller_notice(notice: &ProjectNotice, controller: &str) -> bool {
+pub fn controller_notice(notice: &ProjectNotice, controller: &str) -> bool {
     notice.from != controller && notice.to.iter().any(|to| to == controller)
 }
 
-pub(crate) fn wake_allowed(
+pub fn wake_allowed(
     last: Option<Instant>,
     now: Instant,
     needs_user: bool,
@@ -2288,7 +2437,7 @@ mod tests {
                 .contains("plan.md")
         );
 
-        // The lead asks for two workers; only one runs at a time.
+        // The lead's tasks go to its pool: no agent of their own.
         project
             .add_task(
                 "web",
@@ -2299,60 +2448,54 @@ mod tests {
         project
             .add_task("web", "Theme", "# Theme\nscope: web/theme/**\n\nColours.")
             .unwrap();
-        let ready: Vec<String> = project.startable().iter().map(|t| t.key()).collect();
-        assert_eq!(
-            ready,
-            vec!["web/shell"],
-            "one worker per lead here, and no approval"
-        );
-        let task = project.task("web/shell").unwrap().clone();
-        let worker = project.stream_from_task(&task, "codex").unwrap();
-        assert_eq!(worker.id, "web-shell");
+        assert!(project.startable().is_empty());
+        assert_eq!(project.workers_needed("web"), 1, "max_workers is 1 here");
+        let worker = project.pool_worker("web", "codex").unwrap();
+        assert_eq!(worker.id, "web-w1");
         assert_eq!(
             worker.scope,
             vec!["web/**"],
-            "a worker without a scope gets its lead's"
+            "a pool worker gets its lead's scope"
         );
-        assert!(
-            project
-                .kickoff(&worker)
-                .contains(".atrium/tasks/web/shell.md")
-        );
+        assert!(project.kickoff(&worker).contains("claim_next"));
         project.file.streams.push(worker);
-        project
-            .set_task_status("web/shell", TaskStatus::Running)
-            .unwrap();
-        assert!(project.startable().is_empty());
+        project.save().unwrap();
+        assert_eq!(project.claim_next("web-w1").unwrap().unwrap().id, "shell");
 
         // Its changes inside the lead's scope are no crossing.
         project.file.streams.push(stream("server", &["server/**"]));
-        assert!(project.crossing("web-shell", "web/app.tsx").is_none());
+        assert!(project.crossing("web-w1", "web/app.tsx").is_none());
         assert_eq!(
-            project.crossing("web-shell", "server/a.rs").unwrap().owner,
+            project.crossing("web-w1", "server/a.rs").unwrap().owner,
             "server"
         );
         assert!(project.crossing("web", "web/app.tsx").is_none());
 
         // Workers do not get notices for all.
         project.post(YOU, vec!["all".into()], "freeze").unwrap();
-        assert!(project.unread("web-shell").is_empty());
+        assert!(project.unread("web-w1").is_empty());
         assert_eq!(project.unread("web").len(), 1);
 
-        // It finishes: the lead is told once, and the next task can start.
-        assert!(project.unreported().is_empty());
+        // Pool tasks are reported in batches (see `pool`), not one by one.
         project
-            .set_task_status("web/shell", TaskStatus::Done)
+            .finish_task("web-w1", true, "Shell laid out.")
             .unwrap();
+        assert!(project.unreported().is_empty());
+        assert_eq!(
+            project.task("web/theme").unwrap().claimed_by.as_deref(),
+            Some("web-w1")
+        );
+
+        // The lead finishing is reported to the controller once.
+        project.set_task_status(&key, TaskStatus::Done).unwrap();
         let unreported: Vec<String> = project
             .unreported()
             .iter()
             .map(|(s, _)| s.id.clone())
             .collect();
-        assert_eq!(unreported, vec!["web-shell"]);
-        project.stream_mut("web-shell").unwrap().reported = true;
+        assert_eq!(unreported, vec!["web"]);
+        project.stream_mut("web").unwrap().reported = true;
         assert!(project.unreported().is_empty());
-        let ready: Vec<String> = project.startable().iter().map(|t| t.key()).collect();
-        assert_eq!(ready, vec!["web/theme"]);
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -2597,7 +2740,7 @@ mod tests {
     }
 
     #[test]
-    fn claiming_two_tasks_then_finishing_one_releases_a_slot() {
+    fn pool_workers_reuse_slots_after_finishing_tasks() {
         let root = unique_root("atrium-slots");
         let _ = fs::remove_dir_all(&root);
         let mut project = Project::open(&root).unwrap();
@@ -2606,25 +2749,24 @@ mod tests {
         for name in ["a", "b", "c"] {
             project.add_task("lead", name, "# Task\n\nWork").unwrap();
         }
-        let tasks: Vec<_> = project.startable().into_iter().cloned().collect();
-        assert_eq!(tasks.len(), 2);
-        for task in tasks {
-            let worker = project.stream_from_task(&task, "codex").unwrap();
-            project
-                .set_task_status(&task.key(), TaskStatus::Running)
-                .unwrap();
-            project.file.streams.push(worker);
-        }
         assert!(project.startable().is_empty());
-        project.set_task_status("lead/a", TaskStatus::Done).unwrap();
+        assert_eq!(project.workers_needed("lead"), 2);
+        for task in ["lead/a", "lead/b"] {
+            let worker = project.pool_worker("lead", "codex").unwrap();
+            let id = worker.id.clone();
+            project.file.streams.push(worker);
+            assert_eq!(project.claim_next(&id).unwrap().unwrap().key(), task);
+        }
+        assert_eq!(project.workers_needed("lead"), 0);
+        project.finish_task("lead-w1", true, "Done.").unwrap();
         assert_eq!(
             project
-                .startable()
-                .iter()
-                .map(|t| t.key())
-                .collect::<Vec<_>>(),
-            vec!["lead/c"]
+                .task_of(project.stream("lead-w1").unwrap())
+                .unwrap()
+                .key(),
+            "lead/c"
         );
+        assert_eq!(project.workers_needed("lead"), 0);
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
@@ -2937,19 +3079,44 @@ mod tests {
     }
 
     #[test]
-    fn offline_task_does_not_reserve_a_worker_slot() {
+    fn startable_with_filters_controller_tasks_by_eligibility() {
         let mut project = Project::default();
-        project.file.max_workers = 1;
-        project.file.streams.push(stream("lead", &[]));
+        let mut boss = stream("boss", &[]);
+        boss.role = Role::Controller;
+        project.file.streams.extend([boss, stream("lead", &[])]);
         project.tasks = vec![
-            Task::parse("lead", "a", "# Offline\nagent: claude\n"),
-            Task::parse("lead", "b", "# Ready\nagent: codex\n"),
+            Task::parse("boss", "a", "# Offline\nagent: claude\n"),
+            Task::parse("boss", "b", "# Ready\nagent: codex\n"),
+            Task::parse("lead", "c", "# Pool task\nagent: codex\n"),
         ];
+        assert_eq!(project.startable().len(), 2);
         let tasks = project.startable_with(|task| task.agent.as_deref() == Some("codex"));
         assert_eq!(
             tasks.iter().map(|t| t.key()).collect::<Vec<_>>(),
-            vec!["lead/b"]
+            vec!["boss/b"]
         );
+    }
+
+    #[test]
+    fn restart_leaves_pool_claims_to_the_pool_lifecycle() {
+        let root = unique_root("atrium-recover-pool");
+        let mut p = Project::open(&root).unwrap();
+        p.file.streams.push(stream("lead", &[]));
+        let key = p.add_task("lead", "job", "# Job").unwrap();
+        let worker = p.pool_worker("lead", "codex").unwrap();
+        let id = worker.id.clone();
+        p.file.streams.push(worker);
+        p.save().unwrap();
+        p.claim_next(&id).unwrap().unwrap();
+
+        let mut p = Project::open(&root).unwrap();
+        assert!(p.recover_unbound_tasks().unwrap().is_empty());
+        assert!(p.stream(&id).is_some());
+        let task = p.task(&key).unwrap();
+        assert_eq!(task.status, TaskStatus::Running);
+        assert_eq!(task.claimed_by.as_deref(), Some(id.as_str()));
+        assert!(p.notices.is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

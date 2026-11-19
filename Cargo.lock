@@ -569,6 +569,7 @@ dependencies = [
  "agent-rpc",
  "anyhow",
  "atrium-core",
+ "atrium-project",
  "codex-client",
  "dirs 6.0.0",
  "ely-gpui-component",
@@ -580,7 +581,6 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "uuid",
 ]
 
@@ -600,22 +600,33 @@ dependencies = [
  "agent-rpc",
  "anyhow",
  "atrium-core",
+ "atrium-project",
  "axum",
  "cap-std",
  "codex-client",
  "dirs 6.0.0",
  "futures",
- "jiff",
  "libc",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "tokio",
  "toml 0.8.23",
  "tungstenite 0.24.0",
  "ureq",
  "uuid",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "atrium-project"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "jiff",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "uuid",
 ]
 
 [[package]]

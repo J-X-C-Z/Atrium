@@ -8,7 +8,7 @@ use ely_gpui_component::{
     data_display::{Badge, Tone},
     forms::{Input, TextInput},
     menus::{DropdownMenu, Menu, MenuItem},
-    motion::{ProgressBar, Spinner, SpinnerStyle},
+    motion::{Flash, ProgressBar, Pulse, Spinner, SpinnerStyle},
     overlays::Dialog,
     primitives::{Icon, IconName},
     shell::drag_region,
@@ -20,7 +20,11 @@ use gpui::{
     StatefulInteractiveElement, Styled, Window, div, prelude::*, px,
 };
 
-use super::{Overlay, RootView, TITLE_BAR_HEIGHT, composer::short_path};
+use super::{
+    Overlay, RootView, TITLE_BAR_HEIGHT,
+    composer::short_path,
+    motion::{Enter, enter, enter_nth},
+};
 use crate::i18n::{t, tf};
 use crate::{
     agents,
@@ -272,10 +276,15 @@ pub fn sidebar_list(workspace: &Entity<Workspace>, cx: &App) -> AnyElement {
                         )
                         .when(view.unread > 0, |row| {
                             row.child(
-                                div()
-                                    .text_size(theme.text_size(TextSize::Xs))
-                                    .text_color(colors.accent)
-                                    .child(tf("{n} new", &[("n", &view.unread)])),
+                                Flash::new(
+                                    SharedString::from(format!("unread-{}", view.stream.id)),
+                                    view.unread,
+                                )
+                                .px_1()
+                                .rounded_sm()
+                                .text_size(theme.text_size(TextSize::Xs))
+                                .text_color(colors.accent)
+                                .child(tf("{n} new", &[("n", &view.unread)])),
                             )
                         }),
                 );
@@ -355,6 +364,28 @@ pub fn render_overview(
                         .child(short_path(&project.root)),
                 ),
         )
+        .when(project.file.autopilot.on, |bar| {
+            bar.child(
+                div()
+                    .id("autopilot-chip")
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_full()
+                    .bg(colors.success.opacity(0.12))
+                    .text_size(theme.text_size(TextSize::Xs))
+                    .text_color(colors.success)
+                    .child(
+                        Pulse::new("autopilot-pulse")
+                            .rounded_full()
+                            .child(div().size(px(6.)).rounded_full().bg(colors.success)),
+                    )
+                    .child(t("Unattended")),
+            )
+        })
         .child(
             div()
                 .flex_none()
@@ -388,7 +419,20 @@ pub fn render_overview(
             let open_dir = project.dir();
             let approve_leads = project.file.approve_leads;
             let toggle = workspace.clone();
+            let autopilot = project.file.autopilot.on;
+            let pilot = workspace.clone();
             let menu = Menu::new()
+                .item(
+                    MenuItem::new(t("Run unattended, around the clock"))
+                        .icon(if autopilot {
+                            IconName::SquareCheck
+                        } else {
+                            IconName::Square
+                        })
+                        .on_click(move |_, cx| {
+                            pilot.update(cx, |ws, cx| ws.set_autopilot(!autopilot, cx))
+                        }),
+                )
                 .item(
                     MenuItem::new(t("Approve the controller's leads before they start"))
                         .icon(if approve_leads {
@@ -491,15 +535,22 @@ pub fn render_overview(
     let empty = cards.is_empty() && controller.is_none();
     let mut grid = div().flex().flex_col().gap_3();
     let mut cards = cards.into_iter();
+    let mut row_ix = 0;
     while let Some(first) = cards.next() {
         let second = cards.next();
-        grid = grid.child(
+        grid = grid.child(enter_nth(
             div()
                 .flex()
                 .gap_3()
                 .child(div().flex_1().min_w_0().child(first))
                 .child(div().flex_1().min_w_0().children(second)),
-        );
+            "card-row",
+            0,
+            Enter::Rise,
+            row_ix,
+            cx,
+        ));
+        row_ix += 1;
     }
 
     let cards_view = panel.cards;
@@ -532,9 +583,9 @@ pub fn render_overview(
         .flex_col()
         .gap_4()
         .children(view_switch)
-        .children(attention)
-        .children(controller)
-        .children(proposals)
+        .children(attention.map(|a| enter(div().child(a), "attention", 0, Enter::Rise, cx)))
+        .children(controller.map(|c| enter(div().child(c), "controller", 0, Enter::Rise, cx)))
+        .children(proposals.map(|p| enter(div().child(p), "proposals", 0, Enter::Rise, cx)))
         .children(flow)
         .when(empty, |body| {
             body.child(
@@ -1033,10 +1084,16 @@ fn controller_card(
                     &[("n", &leads.len()), ("finished", &finished)],
                 ))
                 .when(total > 0, |row| {
-                    row.child(tf(
-                        "{done}/{total} milestones",
-                        &[("done", &done), ("total", &total)],
-                    ))
+                    row.child(
+                        Flash::new("controller-milestones", done)
+                            .tint(colors.success.opacity(0.35))
+                            .px_1()
+                            .rounded_sm()
+                            .child(tf(
+                                "{done}/{total} milestones",
+                                &[("done", &done), ("total", &total)],
+                            )),
+                    )
                 })
                 .when(queued > 0, |row| {
                     row.child(tf("{n} leads about to start", &[("n", &queued)]))
@@ -1082,7 +1139,11 @@ fn flow_view(workspace: &Entity<Workspace>, views: &[StreamView], cx: &App) -> A
     let small = theme.text_size(TextSize::Sm);
     let ws = workspace.read(cx);
     let mut lanes = div().flex().flex_col().gap_3();
-    for lead in views.iter().filter(|v| v.stream.role == Role::Lead) {
+    for (lane_ix, lead) in views
+        .iter()
+        .filter(|v| v.stream.role == Role::Lead)
+        .enumerate()
+    {
         let id = lead.stream.id.clone();
         let open = workspace.clone();
         let phases = lead
@@ -1099,9 +1160,10 @@ fn flow_view(workspace: &Entity<Workspace>, views: &[StreamView], cx: &App) -> A
         let workers: Vec<&StreamView> = views
             .iter()
             .filter(|v| v.stream.parent.as_deref() == Some(id.as_str()))
+            .filter(|v| !v.stream.retired)
             .filter(|v| !v.task.as_ref().is_some_and(|t| t.status.finished()))
             .collect();
-        let queued = ws.queued_tasks(&id).len();
+        let pool = ws.pool(&id).unwrap_or_default();
 
         let summary = match (current, phases.len()) {
             (_, 0) => t("No roadmap yet").to_string(),
@@ -1141,15 +1203,20 @@ fn flow_view(workspace: &Entity<Workspace>, views: &[StreamView], cx: &App) -> A
             )
             .child(div().flex_1())
             .child(
-                div()
-                    .text_size(tiny)
-                    .text_color(if finished {
-                        colors.success
-                    } else {
-                        colors.fg_muted
-                    })
-                    .truncate()
-                    .child(summary),
+                Flash::new(
+                    SharedString::from(format!("lane-summary-{}", lead.stream.id)),
+                    current,
+                )
+                .tint(colors.success.opacity(0.35))
+                .px_1()
+                .rounded_sm()
+                .text_size(tiny)
+                .text_color(if finished {
+                    colors.success
+                } else {
+                    colors.fg_muted
+                })
+                .child(summary),
             );
 
         let mut row = div().flex().items_stretch().gap_1();
@@ -1173,51 +1240,71 @@ fn flow_view(workspace: &Entity<Workspace>, views: &[StreamView], cx: &App) -> A
                 ));
             }
             let next_step = phase.steps.iter().find(|m| !m.done).map(|m| m.text.clone());
-            let mut block = div()
-                .flex_1()
-                .min_w(px(104.))
-                .max_w(px(220.))
-                .flex()
-                .flex_col()
-                .gap_1()
-                .p_2()
-                .rounded(theme.radius(Radius::Md))
-                .border_1()
-                .child(
-                    div()
-                        .flex()
-                        .items_start()
-                        .gap_1()
-                        .child(match state {
-                            PhaseState::Done => Icon::new(IconName::CircleCheck)
-                                .size(IconSize::Xs)
-                                .color(colors.success)
-                                .into_any_element(),
-                            PhaseState::Current => Icon::new(IconName::CircleDot)
-                                .size(IconSize::Xs)
-                                .color(colors.accent)
-                                .into_any_element(),
-                            PhaseState::Ahead => Icon::new(IconName::Circle)
-                                .size(IconSize::Xs)
-                                .color(colors.fg_subtle)
-                                .into_any_element(),
-                        })
+            let working = lead.state == StreamState::Working;
+            let mut block = Flash::new(
+                SharedString::from(format!("phase-flash-{}-{ix}", lead.stream.id)),
+                done,
+            )
+            .tint(if phase.done() {
+                colors.success.opacity(0.3)
+            } else {
+                colors.selection
+            })
+            .flex_1()
+            .min_w(px(104.))
+            .max_w(px(220.))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .p_2()
+            .rounded(theme.radius(Radius::Md))
+            .border_1()
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap_1()
+                    .child(match state {
+                        PhaseState::Done => Icon::new(IconName::CircleCheck)
+                            .size(IconSize::Xs)
+                            .color(colors.success)
+                            .into_any_element(),
+                        PhaseState::Current if working => Pulse::new(SharedString::from(format!(
+                            "phase-pulse-{}",
+                            lead.stream.id
+                        )))
+                        .rounded_full()
                         .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .text_size(small)
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .child(phase.title.clone()),
+                            Icon::new(IconName::CircleDot)
+                                .size(IconSize::Xs)
+                                .color(colors.accent),
                         )
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_size(tiny)
-                                .text_color(colors.fg_subtle)
-                                .child(format!("{done}/{total}")),
-                        ),
-                );
+                        .into_any_element(),
+                        PhaseState::Current => Icon::new(IconName::CircleDot)
+                            .size(IconSize::Xs)
+                            .color(colors.accent)
+                            .into_any_element(),
+                        PhaseState::Ahead => Icon::new(IconName::Circle)
+                            .size(IconSize::Xs)
+                            .color(colors.fg_subtle)
+                            .into_any_element(),
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(small)
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .child(phase.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(tiny)
+                            .text_color(colors.fg_subtle)
+                            .child(format!("{done}/{total}")),
+                    ),
+            );
             match state {
                 PhaseState::Done => {
                     block = block
@@ -1245,37 +1332,6 @@ fn flow_view(workspace: &Entity<Workspace>, views: &[StreamView], cx: &App) -> A
                                 .text_color(colors.fg_muted)
                                 .child(tf("Next: {step}", &[("step", &step)]))
                         }));
-                    for worker in &workers {
-                        let wid = worker.stream.id.clone();
-                        let go = workspace.clone();
-                        block = block.child(
-                            div()
-                                .id(SharedString::from(format!("flow-worker-{wid}")))
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .px_1()
-                                .rounded_sm()
-                                .text_size(tiny)
-                                .text_color(colors.fg_muted)
-                                .cursor_pointer()
-                                .hover(|row| row.bg(colors.hover))
-                                .on_click(move |_, _, cx| {
-                                    let id = wid.clone();
-                                    go.update(cx, |ws, cx| ws.show_stream(&id, cx))
-                                })
-                                .child(state_dot(&worker.state, cx))
-                                .child(div().truncate().child(worker.stream.name.clone())),
-                        );
-                    }
-                    if queued > 0 {
-                        block = block.child(
-                            div()
-                                .text_size(tiny)
-                                .text_color(colors.fg_subtle)
-                                .child(tf("{n} queued", &[("n", &queued)])),
-                        );
-                    }
                 }
             }
             row = row.child(block);
@@ -1288,7 +1344,7 @@ fn flow_view(workspace: &Entity<Workspace>, views: &[StreamView], cx: &App) -> A
                     .child(t("Its roadmap appears here once the controller writes it, or add a Roadmap section to its task file.")),
             );
         }
-        lanes = lanes.child(
+        lanes = lanes.child(enter_nth(
             div()
                 .flex()
                 .flex_col()
@@ -1308,8 +1364,14 @@ fn flow_view(workspace: &Entity<Workspace>, views: &[StreamView], cx: &App) -> A
                         .overflow_x_scroll()
                         .pb_1()
                         .child(row),
-                ),
-        );
+                )
+                .children(pool_strip(workspace, lead, &workers, &pool, cx)),
+            "lane",
+            0,
+            Enter::Rise,
+            lane_ix,
+            cx,
+        ));
     }
     lanes.into_any_element()
 }
@@ -1466,7 +1528,115 @@ fn proposals_strip(workspace: &Entity<Workspace>, cx: &App) -> Option<AnyElement
     Some(strip.into_any_element())
 }
 
-/// A lead's sub-agents and queued tasks, one row each.
+/// Under a lead's phases: its task pool and what each sub-agent is on.
+fn pool_strip(
+    workspace: &Entity<Workspace>,
+    lead: &StreamView,
+    workers: &[&StreamView],
+    pool: &project::pool::Pool,
+    cx: &App,
+) -> Option<AnyElement> {
+    if workers.is_empty() && pool.total() == 0 {
+        return None;
+    }
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let tiny = theme.text_size(TextSize::Xs);
+    let mut strip = div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_x_3()
+        .gap_y_1()
+        .pt_2()
+        .border_t_1()
+        .border_color(colors.border);
+    if pool.total() > 0 {
+        strip = strip.child(pool_line(&lead.stream.id, pool, cx));
+    }
+    for worker in workers {
+        let wid = worker.stream.id.clone();
+        let go = workspace.clone();
+        strip = strip.child(
+            div()
+                .id(SharedString::from(format!("flow-worker-{wid}")))
+                .flex()
+                .items_center()
+                .gap_1()
+                .max_w(px(280.))
+                .px_1()
+                .rounded_sm()
+                .text_size(tiny)
+                .text_color(colors.fg_muted)
+                .cursor_pointer()
+                .hover(|row| row.bg(colors.hover))
+                .on_click(move |_, _, cx| {
+                    let id = wid.clone();
+                    go.update(cx, |ws, cx| ws.show_stream(&id, cx))
+                })
+                .child(state_dot(&worker.state, cx))
+                .child(div().flex_none().child(worker.stream.name.clone()))
+                .child(
+                    Icon::new(IconName::ChevronRight)
+                        .size(IconSize::Xs)
+                        .color(colors.fg_subtle),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(colors.fg_subtle)
+                        .child(match (&worker.task, worker.stream.task.is_some()) {
+                            // A sub-agent started for one task: its name is the task.
+                            (_, true) => state_label(&worker.state),
+                            (Some(task), false) => task.title.clone(),
+                            (None, false) => t("idle").to_string(),
+                        }),
+                ),
+        );
+    }
+    Some(strip.into_any_element())
+}
+
+/// "Pool: 3 ready · 2 in progress · 5/12 done", flashing as tasks finish.
+fn pool_line(lead: &str, pool: &project::pool::Pool, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let finished = pool.done + pool.failed;
+    Flash::new(SharedString::from(format!("pool-{lead}")), finished)
+        .tint(colors.success.opacity(0.3))
+        .rounded_sm()
+        .px_1()
+        .flex()
+        .items_center()
+        .gap_1()
+        .text_size(theme.text_size(TextSize::Xs))
+        .text_color(colors.fg_subtle)
+        .child(
+            Icon::new(IconName::Layers)
+                .size(IconSize::Xs)
+                .color(colors.fg_subtle),
+        )
+        .child(tf(
+            "Pool: {ready} ready · {running} in progress · {done}/{total} done",
+            &[
+                ("ready", &(pool.ready.len() + pool.waiting.len())),
+                ("running", &pool.running.len()),
+                ("done", &finished),
+                ("total", &pool.total()),
+            ],
+        ))
+        .when(pool.failed > 0, |row| {
+            row.child(
+                div()
+                    .text_color(colors.danger)
+                    .child(tf("· {n} failed", &[("n", &pool.failed)])),
+            )
+        })
+        .into_any_element()
+}
+
+/// A lead's sub-agents and its task pool, one row each.
 fn sub_agents(
     workspace: &Entity<Workspace>,
     lead: &StreamView,
@@ -1477,10 +1647,17 @@ fn sub_agents(
     let workers: Vec<&StreamView> = views
         .iter()
         .filter(|v| v.stream.parent.as_deref() == Some(lead.stream.id.as_str()))
-        .filter(|v| v.stream.role == Role::Worker)
+        .filter(|v| v.stream.role == Role::Worker && !v.stream.retired)
         .collect();
-    let queued = ws.queued_tasks(&lead.stream.id);
-    if workers.is_empty() && queued.is_empty() {
+    let pool = ws.pool(&lead.stream.id).unwrap_or_default();
+    let queued: Vec<Task> = pool
+        .ready
+        .iter()
+        .take(3)
+        .filter_map(|key| ws.active_project().and_then(|p| p.task(key)).cloned())
+        .collect();
+    let more = (pool.ready.len() + pool.waiting.len()).saturating_sub(queued.len());
+    if workers.is_empty() && pool.total() == 0 {
         return None;
     }
     let theme = cx.theme();
@@ -1498,9 +1675,12 @@ fn sub_agents(
         .border_t_1()
         .border_color(colors.border)
         .child(div().text_size(tiny).text_color(colors.fg_subtle).child(tf(
-            "Sub-agents · {running} running · {queued} queued",
-            &[("running", &running), ("queued", &queued.len())],
-        )));
+            "Sub-agents · {running} running",
+            &[("running", &running)],
+        )))
+        .when(pool.total() > 0, |list| {
+            list.child(pool_line(&lead.stream.id, &pool, cx))
+        });
     for worker in workers {
         let id = worker.stream.id.clone();
         let open = workspace.clone();
@@ -1541,11 +1721,19 @@ fn sub_agents(
                         .child(worker.stream.name.clone()),
                 )
                 .child(Badge::new(agent_short(ws, &worker.stream.backend)))
-                .child(div().text_color(colors.fg_subtle).child(match status {
-                    Some(TaskStatus::Done) => t("done").to_string(),
-                    Some(TaskStatus::Failed) => t("failed").to_string(),
-                    _ => state_label(&worker.state),
-                })),
+                .child(
+                    div()
+                        .max_w(px(160.))
+                        .truncate()
+                        .text_color(colors.fg_subtle)
+                        .child(match (status, &worker.task) {
+                            (Some(TaskStatus::Done), _) => t("done").to_string(),
+                            (Some(TaskStatus::Failed), _) => t("failed").to_string(),
+                            (_, Some(task)) if worker.stream.task.is_none() => task.title.clone(),
+                            (_, None) if worker.stream.task.is_none() => t("idle").to_string(),
+                            _ => state_label(&worker.state),
+                        }),
+                ),
         );
     }
     for task in queued {
@@ -1571,6 +1759,15 @@ fn sub_agents(
                         .child(task.title.clone()),
                 )
                 .child(t("queued")),
+        );
+    }
+    if more > 0 {
+        list = list.child(
+            div()
+                .px_1()
+                .text_size(tiny)
+                .text_color(colors.fg_subtle)
+                .child(tf("+{n} more in the pool", &[("n", &more)])),
         );
     }
     Some(list.into_any_element())
@@ -1694,44 +1891,52 @@ fn atrium_panel(
                         .child(t("No notices yet. Workstreams post here when they change something others depend on.")),
                 );
             }
-            for notice in project.notices.iter().rev().take(60) {
+            let newest = project.notices.len();
+            for (nth, notice) in project.notices.iter().rev().take(60).enumerate() {
                 let from_atrium = notice.from == ATRIUM;
                 list = list.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_0p5()
-                        .p_2()
-                        .rounded(theme.radius(Radius::Md))
-                        .bg(if from_atrium {
-                            colors.warning_subtle
+                    Flash::new(
+                        SharedString::from(if nth == 0 {
+                            "notice-newest".to_string()
                         } else {
-                            colors.sunken
-                        })
-                        .child(
-                            div()
-                                .flex()
-                                .gap_1()
-                                .text_size(tiny)
-                                .text_color(colors.fg_muted)
-                                .child(
-                                    div()
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .child(name_of(&notice.from)),
-                                )
-                                .child("→")
-                                .child(
-                                    notice
-                                        .to
-                                        .iter()
-                                        .map(|t| name_of(t))
-                                        .collect::<Vec<_>>()
-                                        .join(", "),
-                                )
-                                .child(div().flex_1())
-                                .child(notice.at.clone()),
-                        )
-                        .child(div().text_size(small).child(notice.text.clone())),
+                            format!("notice-{}", newest - nth)
+                        }),
+                        if nth == 0 { newest } else { 0 },
+                    )
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .p_2()
+                    .rounded(theme.radius(Radius::Md))
+                    .bg(if from_atrium {
+                        colors.warning_subtle
+                    } else {
+                        colors.sunken
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .gap_1()
+                            .text_size(tiny)
+                            .text_color(colors.fg_muted)
+                            .child(
+                                div()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child(name_of(&notice.from)),
+                            )
+                            .child("→")
+                            .child(
+                                notice
+                                    .to
+                                    .iter()
+                                    .map(|t| name_of(t))
+                                    .collect::<Vec<_>>()
+                                    .join(", "),
+                            )
+                            .child(div().flex_1())
+                            .child(notice.at.clone()),
+                    )
+                    .child(div().text_size(small).child(notice.text.clone())),
                 );
             }
             div()
@@ -1901,7 +2106,13 @@ fn atrium_panel(
                 .overflow_y_scroll()
                 .px_3()
                 .pb_3()
-                .child(content),
+                .child(enter(
+                    div().child(content),
+                    "atrium-tab",
+                    tab.value(),
+                    Enter::Fade,
+                    cx,
+                )),
         )
         .into_any_element()
 }

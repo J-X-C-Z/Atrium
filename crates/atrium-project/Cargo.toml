@@ -1,0 +1,15 @@
+[package]
+name = "atrium-project"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Atrium projects: the controller, leads and sub-agents working in one folder, and the .atrium/ files they align through."
+
+[dependencies]
+anyhow.workspace = true
+jiff.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+uuid.workspace = true

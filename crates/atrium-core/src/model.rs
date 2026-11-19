@@ -467,3 +467,12 @@ pub struct AgentCommand {
     pub name: String,
     pub description: String,
 }
+
+/// An MCP server a session should have, run over stdio.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct McpServer {
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+}

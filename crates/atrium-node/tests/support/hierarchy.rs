@@ -1,8 +1,6 @@
 //! A headless integration seam: drive production Project state and real remote
 //! protocol clients; the fixture supplies ticks and authored task/result files.
-#[allow(dead_code)]
-#[path = "../../../atrium-app/src/project.rs"]
-mod project;
+use atrium_project as project;
 
 use super::*;
 use project::{
@@ -259,16 +257,29 @@ async fn native_controller_lead_worker_completion_wakes_both_parents() {
         project.save().unwrap();
         let (lead, mut lead_session) = start_child(&mut project, &node, &lead_task, Role::Lead, lead_backend).await;
         let worker_task = project.add_task(&lead, "Fixture", "# Fixture\nstatus: open\n\nValidate fixture.").unwrap();
-        let (worker, _worker_session) = start_child(&mut project, &node, &worker_task, Role::Worker, "codex").await;
-        complete(&mut project, &worker_task, "Worker fixture verified");
-        assert_eq!(project.report_finished(&worker).unwrap(), Some(lead.clone()));
-        assert_eq!(project.report_finished(&worker).unwrap(), None);
-        deliver(&node.root, &lead, "Worker fixture verified", &mut lead_session).await;
+        assert_eq!(project.workers_needed(&lead), 1);
+        let worker = project.pool_worker(&lead, "codex").unwrap();
+        project.file.streams.push(worker.clone());
+        project.save().unwrap();
+        assert_eq!(project.claim_next(&worker.id).unwrap().unwrap().key(), worker_task);
+        let mut worker_session = Session::start(&node, "codex").await;
+        project.bind_thread(&worker.id, worker_session.thread()).unwrap();
+        let kickoff = project.kickoff(&worker);
+        assert!(kickoff.contains("Validate fixture."));
+        assert!(!worker_session.turn(&kickoff).await.is_empty());
+        project.finish_task(&worker.id, true, "Worker fixture verified").unwrap();
+        let digest = project.pool_report(&lead).unwrap();
+        assert_eq!(digest.keys, [worker_task]);
+        assert!(digest.text.contains("Worker fixture verified"));
+        assert!(!lead_session.turn(&digest.text).await.is_empty());
+        project.file.reported_tasks.extend(digest.keys);
+        project.save().unwrap();
+        assert!(Project::open(&node.root).unwrap().pool_report(&lead).is_none());
         let mut project = Project::open(&node.root).unwrap();
         complete(&mut project, &lead_task, "Lead fixture verified");
         assert_eq!(project.report_finished(&lead).unwrap().as_deref(), Some("controller"));
         deliver(&node.root, "controller", "Lead fixture verified", &mut controller).await;
-        assert_eq!(Project::open(&node.root).unwrap().notices.len(), 2);
+        assert_eq!(Project::open(&node.root).unwrap().notices.len(), 1);
     }).await.expect("native mock hierarchy exceeded 60 seconds");
     }
 }

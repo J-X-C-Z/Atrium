@@ -130,6 +130,40 @@ impl Drop for Node {
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
+
+#[cfg(windows)]
+fn open_fixture_process(pid: u32) -> std::os::windows::io::OwnedHandle {
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE};
+
+    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+    assert!(
+        !handle.is_null(),
+        "open fixture process {pid}: {}",
+        std::io::Error::last_os_error()
+    );
+    // Retain the handle before stopping the node so PID reuse cannot affect the wait.
+    unsafe { OwnedHandle::from_raw_handle(handle) }
+}
+
+#[cfg(windows)]
+fn assert_fixture_process_exited(process: &std::os::windows::io::OwnedHandle) {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::{
+        Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT},
+        System::Threading::WaitForSingleObject,
+    };
+
+    match unsafe { WaitForSingleObject(process.as_raw_handle(), 5000) } {
+        WAIT_OBJECT_0 => (),
+        WAIT_TIMEOUT => panic!("owned echo process did not exit after node death"),
+        result => panic!(
+            "wait for owned echo process returned {result}: {}",
+            std::io::Error::last_os_error()
+        ),
+    }
+}
+
 fn frame(
     w: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
 ) -> Value {
@@ -403,10 +437,15 @@ fn instance_identity_detects_restart_without_replaying_queued_input() {
     let fresh = NodeClient::new(&n.url, Some("test-only-token".into()));
     let learned = fresh.attach(&second.id, 0);
     wait_for(&learned.state, |s| matches!(s, LinkState::Connected));
-    // Kill only this fixture's node. Its cat has no descendants; closing the
-    // owned stdin pipe ends cat, never restarting any command automatically.
+    #[cfg(windows)]
+    let echo_processes = [p.pid.unwrap(), second.pid.unwrap()].map(open_fixture_process);
+    // Kill only this fixture's node and verify both of its echo children exit.
     n.child.kill().unwrap();
     n.child.wait().unwrap();
+    #[cfg(windows)]
+    for process in &echo_processes {
+        assert_fixture_process_exited(process);
+    }
     // Inspect only the two PIDs returned by this fixture's own spawn requests.
     // Orphaned zombies count as exited; their OS adopter, not this test, reaps.
     #[cfg(unix)]
@@ -509,6 +548,8 @@ async fn restart_closes_rpc_waiters_and_discards_disconnected_requests() {
     assert!(matches!(echo, Incoming::Request { method, .. } if method == "fixture/no-response"));
     assert!(futures::poll!(waiting.as_mut()).is_pending());
 
+    #[cfg(windows)]
+    let echo_process = open_fixture_process(process.pid.unwrap());
     node.child.kill().unwrap();
     node.child.wait().unwrap();
     state_matches(&state, |s| matches!(s, LinkState::Reconnecting { .. })).await;
@@ -560,22 +601,26 @@ async fn restart_closes_rpc_waiters_and_discards_disconnected_requests() {
         client.procs(None).unwrap().is_empty(),
         "restart must not recreate a process or execute queued requests"
     );
-    // Only the PID returned by this fixture is inspected. A zombie is already
-    // exited and awaits its OS adopter; never kill processes by name.
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let output = Command::new("ps")
-            .args(["-o", "stat=", "-p", &process.pid.unwrap().to_string()])
-            .output()
-            .unwrap();
-        let status = String::from_utf8_lossy(&output.stdout);
-        if status.trim().is_empty() || status.trim().starts_with('Z') {
-            break;
+    #[cfg(windows)]
+    assert_fixture_process_exited(&echo_process);
+    #[cfg(unix)]
+    {
+        // A zombie has exited and awaits its OS adopter.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let output = Command::new("ps")
+                .args(["-o", "stat=", "-p", &process.pid.unwrap().to_string()])
+                .output()
+                .unwrap();
+            let status = String::from_utf8_lossy(&output.stdout);
+            if status.trim().is_empty() || status.trim().starts_with('Z') {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "owned cat did not exit after node death"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "owned cat did not exit after node death"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }

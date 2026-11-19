@@ -271,16 +271,22 @@ pub fn render(
                             }),
                     ),
                 )
-                .child(
-                    div()
-                        .id("project-scroll")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .px_2()
-                        .pb_2()
-                        .child(super::project::sidebar_list(workspace, cx)),
-                )
+                .child(super::motion::enter(
+                    div().flex_1().min_h_0().flex().flex_col().child(
+                        div()
+                            .id("project-scroll")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .px_2()
+                            .pb_2()
+                            .child(super::project::sidebar_list(workspace, cx)),
+                    ),
+                    "sidebar-projects",
+                    0,
+                    super::motion::Enter::Slide,
+                    cx,
+                ))
         })
         .when(!in_project, |sidebar| {
             sidebar
@@ -297,84 +303,90 @@ pub fn render(
                         .pb_2()
                         .child(SearchInput::new("search", search).size(ControlSize::Sm)),
                 )
-                .child(
-                    div()
-                        .id("conversation-scroll")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .px_2()
-                        .pb_2()
-                        .when(empty, |column| {
-                            column.child(
-                                div()
-                                    .px_2()
-                                    .py_6()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1()
-                                    .text_size(theme.text_size(TextSize::Sm))
-                                    .text_color(colors.fg_muted)
-                                    .child(if connecting {
-                                        t("Loading chats…")
-                                    } else {
-                                        t("No chats yet.")
-                                    })
-                                    .child(
-                                        div()
-                                            .text_size(theme.text_size(TextSize::Xs))
-                                            .text_color(colors.fg_subtle)
-                                            .child(t("Your Codex conversations show here.")),
-                                    ),
-                            )
-                        })
-                        // With only message hits, the list's "no match" would push them away.
-                        .when(!empty && (titles_match || hits.is_empty()), |column| {
-                            column.child(list)
-                        })
-                        .when(!hits.is_empty(), |column| {
-                            column
-                                .child(
+                .child(super::motion::enter(
+                    div().flex_1().min_h_0().flex().flex_col().child(
+                        div()
+                            .id("conversation-scroll")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .px_2()
+                            .pb_2()
+                            .when(empty, |column| {
+                                column.child(
                                     div()
                                         .px_2()
-                                        .pt_3()
-                                        .pb_1()
-                                        .text_size(theme.text_size(TextSize::Xs))
-                                        .text_color(colors.fg_subtle)
-                                        .child(t("In messages")),
-                                )
-                                .children(hits.into_iter().map(|(id, title, snippet)| {
-                                    let open = workspace.clone();
-                                    div()
-                                        .id(SharedString::from(format!("hit-{id}")))
+                                        .py_6()
                                         .flex()
                                         .flex_col()
-                                        .gap_0p5()
-                                        .px_2()
-                                        .py_1p5()
-                                        .rounded_md()
-                                        .cursor_pointer()
-                                        .hover(|row| row.bg(colors.hover))
-                                        .on_click(move |_, _, cx| {
-                                            let id = id.clone();
-                                            open.update(cx, |ws, cx| ws.open_thread(id, cx))
+                                        .gap_1()
+                                        .text_size(theme.text_size(TextSize::Sm))
+                                        .text_color(colors.fg_muted)
+                                        .child(if connecting {
+                                            t("Loading chats…")
+                                        } else {
+                                            t("No chats yet.")
                                         })
                                         .child(
                                             div()
-                                                .truncate()
-                                                .text_size(theme.text_size(TextSize::Sm))
-                                                .child(title),
-                                        )
-                                        .child(
-                                            div()
                                                 .text_size(theme.text_size(TextSize::Xs))
-                                                .text_color(colors.fg_muted)
-                                                .line_clamp(2)
-                                                .child(snippet),
-                                        )
-                                }))
-                        }),
-                )
+                                                .text_color(colors.fg_subtle)
+                                                .child(t("Your Codex conversations show here.")),
+                                        ),
+                                )
+                            })
+                            // With only message hits, the list's "no match" would push them away.
+                            .when(!empty && (titles_match || hits.is_empty()), |column| {
+                                column.child(list)
+                            })
+                            .when(!hits.is_empty(), |column| {
+                                column
+                                    .child(
+                                        div()
+                                            .px_2()
+                                            .pt_3()
+                                            .pb_1()
+                                            .text_size(theme.text_size(TextSize::Xs))
+                                            .text_color(colors.fg_subtle)
+                                            .child(t("In messages")),
+                                    )
+                                    .children(hits.into_iter().map(|(id, title, snippet)| {
+                                        let open = workspace.clone();
+                                        div()
+                                            .id(SharedString::from(format!("hit-{id}")))
+                                            .flex()
+                                            .flex_col()
+                                            .gap_0p5()
+                                            .px_2()
+                                            .py_1p5()
+                                            .rounded_md()
+                                            .cursor_pointer()
+                                            .hover(|row| row.bg(colors.hover))
+                                            .on_click(move |_, _, cx| {
+                                                let id = id.clone();
+                                                open.update(cx, |ws, cx| ws.open_thread(id, cx))
+                                            })
+                                            .child(
+                                                div()
+                                                    .truncate()
+                                                    .text_size(theme.text_size(TextSize::Sm))
+                                                    .child(title),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(theme.text_size(TextSize::Xs))
+                                                    .text_color(colors.fg_muted)
+                                                    .line_clamp(2)
+                                                    .child(snippet),
+                                            )
+                                    }))
+                            }),
+                    ),
+                    "sidebar-chats",
+                    0,
+                    super::motion::Enter::Slide,
+                    cx,
+                ))
         })
         .child({
             let open = account_root.clone();

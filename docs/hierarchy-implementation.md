@@ -16,19 +16,29 @@ lead). Agents never call Atrium. They ask for a new agent one level down by
 **editing it** (`status: done` plus a `## Result`). Atrium is the scheduler: it
 notices the files, starts the agents, and tells the asker when they finish.
 
-Everything you need to read and write the files is in
-`crates/atrium-app/src/project.rs` (tested in its `tests` module):
+Everything you need to read and write the files is in the
+`atrium-project` crate (`crates/atrium-project/src/lib.rs`, tested in its
+`tests` module):
 
 | Need | Call |
 | --- | --- |
 | Parse a task file | `Task::parse(owner, id, text)` (done for you by `Project::reload` into `project.tasks`) |
-| Tasks that should get an agent now | `Project::startable()`: honours roles, approval and `max_workers` |
+| Controller tasks that should get a lead now | `Project::startable()`: honours approval. A lead's own tasks form a **pool** worked by pool workers instead: see `docs/autopilot-implementation.md` §1 |
 | The `Workstream` to create for one | `Project::stream_from_task(&task, backend)`: id, role, parent, scope, goal |
 | Mark a task running / failed | `Project::set_task_status(key, TaskStatus::…)` |
 | Finished tasks whose parent was not told | `Project::unreported()` |
 | Kickoff prompt for any role | `Project::kickoff(&stream)` |
 | Post a notice | `Project::post(from, to, text)` |
 | Notices a stream has not seen | `Project::unread(id)`, `Project::mark_read(id)` |
+
+Agents can also do their side through the `atrium` MCP server
+(`crates/atrium-project/src/mcp.rs`, served by `atrium mcp --project <root>
+--stream <id>`): `create_task`, `check_step`, `finish_task`, `notify`… It
+writes the same files an agent would (task files, `plan.md`, `status/`,
+`notices.md`) and **never `project.json`**, so the scheduler sees its work
+exactly like a hand edit: nothing to add for it. `create_stream` already
+registers it for every new session (`Workspace::mcp_servers`) and the resume
+paths pass it again (`mcp_for_thread`).
 
 Do not change the file formats or these functions' meaning: the UI reads the
 same data (`Workspace::stream_views`, `proposed_leads`, `queued_tasks`). Add
@@ -58,6 +68,10 @@ Split `create_stream` in two:
 pub fn create_stream(&mut self, name, role, backend, goal, scope, cx)  // UI: builds the Workstream, then calls ↓
 fn start_stream(&mut self, root: &PathBuf, stream: Workstream, cx)     // saves it, starts the session, sends the kickoff
 ```
+
+Keep passing `Workspace::mcp_servers(root, &stream.id, &backend)` to
+`StartThread::mcp_servers` (Codex) and `new_session_with` (ACP) when you move
+the session start into `start_stream`.
 
 `start_stream` takes `root` explicitly (the project need not be the shown
 one) and must not assume `self.project_root()`. On failure keep today's
@@ -131,7 +145,7 @@ Do not archive or delete threads; the user may open them.
 
 ### 6. Safety limits
 
-- `max_workers` (per lead, default 3) is already enforced by `startable()`.
+- `max_workers` (per lead, default 3) caps pool workers: `workers_needed()`.
 - Add a project-wide cap of 12 running workstreams (any role, counted from
   `stream_views` states `Working`/`Starting`); over it, leave tasks open.
 - Never start an agent for a task whose owner is a `worker` (the model already
@@ -149,8 +163,9 @@ and test those. Required:
    `approve_leads` off), and only after approval when it is on.
 2. Two ticks in a row start one agent per task, never two (status is set to
    `running` first).
-3. With `max_workers = 2` and 3 open tasks under one lead, two start; when one
-   finishes, the third starts on the next tick.
+3. With `max_workers = 2` and 3 open tasks under one lead, two pool workers
+   start (`workers_needed`); when one finishes its task it claims the third
+   itself (see the autopilot brief for the rest of the pool).
 4. A finished task posts exactly one notice to its parent, and only once
    across reloads and restarts (`reported` is saved).
 5. A notice `lead → controller` wakes the controller; `lead → all` does not.

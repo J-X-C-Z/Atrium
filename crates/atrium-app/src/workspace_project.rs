@@ -8,7 +8,9 @@ use std::{
 };
 
 use crate::project::notice_delivery::{NoticeOutcome, NoticeResolution};
-use atrium_core::{AgentEvent, EntryKind, GoalStatus, Item, ThreadMeta, Transcript, TurnStatus};
+use atrium_core::{
+    AgentEvent, EntryKind, GoalStatus, Item, McpServer, ThreadMeta, Transcript, TurnStatus,
+};
 use codex_client::StartThread;
 use gpui::Context;
 
@@ -454,6 +456,45 @@ impl Workspace {
         self.projects.iter_mut().find(|p| p.root == *root)
     }
 
+    /// The `atrium` MCP server for workstream `stream` of the project in
+    /// `root`: this executable run as `atrium mcp`. None for agents on other
+    /// devices, which cannot run it.
+    pub fn mcp_servers(root: &Path, stream: &str, backend: &str) -> Vec<McpServer> {
+        if agents::split_backend(backend).1.is_some() {
+            return Vec::new();
+        }
+        let Ok(exe) = std::env::current_exe() else {
+            return Vec::new();
+        };
+        vec![McpServer {
+            name: "atrium".into(),
+            command: exe.display().to_string(),
+            args: vec![
+                "mcp".into(),
+                "--project".into(),
+                root.display().to_string(),
+                "--stream".into(),
+                stream.into(),
+            ],
+            env: Vec::new(),
+        }]
+    }
+
+    /// The `atrium` MCP server for the workstream `thread` belongs to, if any.
+    pub fn mcp_for_thread(&self, thread: &str, backend: &str) -> Vec<McpServer> {
+        self.projects
+            .iter()
+            .find_map(|p| {
+                let stream = p
+                    .file
+                    .streams
+                    .iter()
+                    .find(|s| s.thread_id.as_deref() == Some(thread))?;
+                Some(Self::mcp_servers(&p.root, &stream.id, backend))
+            })
+            .unwrap_or_default()
+    }
+
     /// Every thread that belongs to a workstream: kept out of the chat list.
     pub fn project_threads(&self) -> HashSet<String> {
         self.projects
@@ -479,6 +520,7 @@ impl Workspace {
     }
 
     pub fn enter_chats(&mut self, cx: &mut Context<Self>) {
+        self.nav += 1;
         self.room = Room::Chats;
         self.settings.active_project = None;
         self.settings.save();
@@ -519,6 +561,7 @@ impl Workspace {
 
     /// Shows a project's overview.
     pub fn enter_project(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        self.nav += 1;
         self.room = Room::Project {
             root: root.clone(),
             stream: None,
@@ -535,6 +578,7 @@ impl Workspace {
 
     /// Opens a workstream's chat.
     pub fn show_stream(&mut self, stream: &str, cx: &mut Context<Self>) {
+        self.nav += 1;
         let Some(root) = self.project_root() else {
             return;
         };
@@ -553,6 +597,7 @@ impl Workspace {
     }
 
     pub fn show_overview(&mut self, cx: &mut Context<Self>) {
+        self.nav += 1;
         if let Some(root) = self.project_root() {
             self.room = Room::Project { root, stream: None };
             cx.notify();
@@ -644,7 +689,7 @@ impl Workspace {
                 _ => None,
             },
             task: None,
-            reported: false,
+            ..Workstream::default()
         };
         self.start_stream(&root, stream, cx);
     }
@@ -679,6 +724,7 @@ impl Workspace {
                 },
                 approval_policy: Some(self.settings.mode.approval_policy().into()),
                 sandbox: Some(self.settings.mode.sandbox_mode().into()),
+                mcp_servers: Self::mcp_servers(&root, &id, &backend),
             };
             // Controllers are event-driven; never give them an auto-continuing goal.
             let objective = if stream.role == Role::Controller {
@@ -744,8 +790,9 @@ impl Workspace {
             let Some(client) = self.acp(&backend) else {
                 return;
             };
+            let mcp = Self::mcp_servers(&root, &id, &backend);
             cx.spawn(async move |this, cx| {
-                let start = match client.new_session(&cwd).await {
+                let start = match client.new_session_with(&cwd, &mcp).await {
                     Ok(start) => start,
                     Err(error) => {
                         let _ = this.update(cx, |ws, cx| ws.stream_failed(&root, &id, error, cx));
@@ -1087,6 +1134,24 @@ impl Workspace {
     }
 
     /// Whether to hold the controller's leads for approval.
+    /// A lead's task pool in the shown project.
+    pub fn pool(&self, lead: &str) -> Option<project::pool::Pool> {
+        self.active_project().map(|p| p.pool(lead))
+    }
+
+    /// Turns the shown project's autopilot on or off: whether Atrium keeps
+    /// its agents going around the clock without the user.
+    pub fn set_autopilot(&mut self, on: bool, cx: &mut Context<Self>) {
+        let Some(root) = self.project_root() else {
+            return;
+        };
+        if let Some(project) = self.project_mut(&root) {
+            project.file.autopilot.on = on;
+            let _ = project.save();
+        }
+        cx.notify();
+    }
+
     pub fn set_approve_leads(&mut self, on: bool, cx: &mut Context<Self>) {
         let Some(root) = self.project_root() else {
             return;

@@ -70,7 +70,33 @@ script/bundle-macos.sh
 
 **进度视图**（概览默认）：每个负责人一行，路线图按阶段（`### 阶段名`）排成一串方块。做完的阶段变暗，当前阶段高亮，并显示步骤进度、下一步和正在跑的子 agent，后面的阶段正常显示。一眼就能看出谁做到了哪里。也可以切回卡片视图。
 
+**agent 怎么调用这些能力：`atrium` MCP 服务 + skill**
+
+- **MCP 服务**：Atrium 启动或恢复项目里的会话时，会自动给它挂上一个名为 `atrium` 的 MCP 服务（就是 Atrium 自己：`atrium mcp --project <目录> --stream <id>`）。Codex 通过 `thread/start` / `thread/resume` 的 config 注入，Claude Code、DeepSeek、Antigravity 通过 ACP 的 `mcpServers` 注入。服务启动时已经绑定了这个 agent 的身份，它没法冒充别的工作线；工具清单也按角色给（子 agent 看不到 `create_task`，只有主控有 `write_plan`）。
+
+  | 工具 | 用途 |
+  | --- | --- |
+  | `whoami` | 我是谁：角色、范围、目标、上级、路线图和当前阶段、我派出的任务 |
+  | `create_task` | 主控派负责人（必须带分阶段路线图）；负责人派子 agent |
+  | `check_step` | 负责人勾掉一步（`2.1` 或步骤文字）；一个阶段做完自动通知上级 |
+  | `finish_task` | 交付或失败，写 `## Result` 并改状态 |
+  | `notify` / `read_notices` | 发公告（id、`all` 或 `you`）/ 看未读公告 |
+  | `write_status` / `write_plan` | 写自己的状态文件 / 主控写计划 |
+  | `list_tasks` | 我的任务，或全部任务 |
+
+  它只改 agent 本来也能手改的文件（任务文件、`plan.md`、`status/`、`notices.md`），从不写 `project.json`，所以和调度引擎、手工编辑完全兼容。已用真实的 Claude Code 验证过：主控通过它建出分阶段的负责人任务，负责人勾步骤、阶段完成自动通知主控、交结果。
+- **Skill**：[`skills/atrium/SKILL.md`](skills/atrium/SKILL.md) 讲清三种角色各自怎么做、什么时候用哪个工具，以及没有工具时直接改文件的格式。`atrium skill install` 会把它装到 `~/.claude/skills/atrium/` 和 `~/.codex/skills/atrium/`；`atrium skill` 直接打印。没装 skill 也能用：每个会话的开场说明和 MCP 服务的 instructions 里都有要点。
+
+**任务池：子 agent 不停地干活**（参考 [Paperclip](https://github.com/paperclipai/paperclip) 的 checkout 机制）
+
+负责人不再一个一个地派子 agent，而是用 `create_tasks` 一次往自己的任务池里放一批任务（可以写 `after:` 依赖和 `priority:` 优先级）。Atrium 为它启动几个常驻的子 agent（最多 `max_workers` 个），每个子 agent 领一个任务、做完交结果、`finish_task` 当场帮它领下一个，一直做到池子空。领任务是原子的（跨进程文件锁），同一个任务不会被两个人领走；已经领了的再领会拿回同一个。只有当待领任务少于子 agent 数、或者有任务失败时，才叫醒负责人：附上这期间所有结果的摘要，让它审阅、勾路线图、补下一批。子 agent 做满若干个任务后会换一个新会话，避免上下文越来越乱。概览里每个负责人的当前阶段下会显示任务池（待领 · 进行中 · 已完成）和每个子 agent 手上的任务。
+
+**无人值守：24 小时持续运行**
+
+项目菜单里打开"无人值守，24 小时持续运行"后，概览标题栏会出现一个绿色的"无人值守"标记，所有 agent 的开场说明里都会写明"没人回答问题，不要停下来问，自己做合理决定并记录"。调度上借鉴 Paperclip 的心跳和存活恢复：还有活没干完的 agent 一轮结束就被续上；空闲的负责人和主控定期心跳检查；一轮长时间没输出就打断重来；失败按退避重试（最长每 30 分钟一次，不放弃）；Atrium 重启后自动恢复所有没做完的会话；项目目录内的审批自动通过、目录外的拒绝并通知；可设每日轮数上限；运行期间阻止电脑休眠。真正 24 小时不停，建议把 agent 放在一台常开的机器上（`agent@设备`，通过 atrium-node）。
+
 调度器按任务文件启动 agent、汇报结果并唤醒上级。公告投递状态不确定时，打开对应工作线，选择「处理公告投递」来确认已收到或仅重试公告。
+任务池与无人值守调度的后续要求见 [实现说明](docs/autopilot-implementation.md)。
 
 当前限制：工作线共用一个代码目录（还没有每条线独立 worktree）；越界提醒只针对 agent 报告的文件修改，不包括它在命令里直接写的文件。
 
@@ -193,7 +219,8 @@ crates/
   agent-rpc/        共享传输层：子进程 stdio 上的行分隔 JSON-RPC（可选 JSON-RPC 2.0），查找可执行文件；node：atrium-node 客户端（REST + 断线续传的 WebSocket）；含 mock-node
   codex-client/     codex app-server 客户端与协议翻译；含 mock-codex
   acp-client/       ACP 客户端：握手、会话（new/load/resume/list/prompt/cancel/设置）、权限；把 session/update 翻译成 AgentEvent（为没有 id 的 ACP 合成轮次与条目）；含 mock-acp（可模仿 claude / deepseek / antigravity）
-  atrium-app/    GPUI 应用：i18n（以英文原文为键的中文表）、Workspace（状态与后端调用；workspace_project 管项目与工作线）、project（中庭文件、公告解析、范围匹配）+ ui/（sidebar、chat、composer、rows、project、调色板与设置）
+  atrium-project/   项目模型（无 GUI）：中庭文件、任务与路线图、三层角色、公告、范围匹配；agent（agent 可做的操作）、mcp（`atrium` MCP 服务）、skill
+  atrium-app/    GPUI 应用：i18n（以英文原文为键的中文表）、Workspace（状态与后端调用；workspace_project 管项目与工作线）+ ui/（sidebar、chat、composer、rows、project、调色板与设置）
 ```
 
 数据流只有一个方向：

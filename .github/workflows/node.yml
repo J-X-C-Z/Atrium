@@ -4,7 +4,7 @@ name: Native backend acceptance
   pull_request:
     paths:
       - 'crates/atrium-node/**'
-      - 'crates/atrium-app/src/project.rs'
+      - 'crates/atrium-project/**'
       - 'crates/atrium-app/src/i18n.rs'
       - 'crates/atrium-app/src/ui/project.rs'
       - 'crates/atrium-app/src/workspace.rs'
@@ -77,7 +77,7 @@ jobs:
           done
       - name: Headless backend and client tests on Linux and Windows
         if: runner.os != 'macOS'
-        run: cargo +stable test --locked -p atrium-node -p agent-rpc -p atrium-core -p codex-client -p acp-client
+        run: cargo +stable test --locked -p atrium-node -p atrium-project -p agent-rpc -p atrium-core -p codex-client -p acp-client
       - name: Build scripted agents (no real accounts)
         run: cargo +stable build -p codex-client --bin mock-codex -p acp-client --bin mock-acp --locked
       - name: Native remote clients with scripted agents
