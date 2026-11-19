@@ -22,6 +22,10 @@ use gpui::{AppContext, Context, EventEmitter, Task};
 use crate::i18n::{t, t_any, tf};
 use crate::settings::{Settings, ThemePref};
 
+#[path = "notice_dispatch.rs"]
+mod notice_dispatch;
+use notice_dispatch::{NoticeSendResult, NoticeTarget, codex_notice_outcome};
+
 #[path = "workspace_acp.rs"]
 mod acp;
 #[path = "workspace_devices.rs"]
@@ -921,9 +925,15 @@ impl Workspace {
     }
 
     /// Adds a message to the running turn.
-    fn steer(&mut self, thread_id: String, composed: Composed, cx: &mut Context<Self>) {
+    fn steer(
+        &mut self,
+        thread_id: String,
+        composed: Composed,
+        target: Option<&NoticeTarget>,
+        cx: &mut Context<Self>,
+    ) -> NoticeSendResult {
         let Some(client) = self.thread_codex(&thread_id) else {
-            return;
+            return NoticeSendResult::NoDispatch;
         };
         let Some(turn) = self
             .transcripts
@@ -935,8 +945,13 @@ impl Workspace {
             cx.emit(Notice::Info(
                 t("Codex is still starting this turn; try again in a moment.").into(),
             ));
-            return;
+            return NoticeSendResult::NoDispatch;
         };
+        let (composed, notice_dispatch) =
+            match self.prepare_stream_notices(&thread_id, composed, target, cx) {
+                Ok(prepared) => prepared,
+                Err(outcome) => return outcome,
+            };
         if let Some(transcript) = self.transcripts.get_mut(&thread_id) {
             let before = transcript.len();
             transcript.push_local_user(composed.text.clone(), composed.attachments());
@@ -945,7 +960,12 @@ impl Workspace {
         let request = self.turn_request(&composed);
         cx.notify();
         cx.spawn(async move |this, cx| {
-            if let Err(error) = client.turn_steer(&thread_id, &turn, request).await {
+            let result = client.turn_steer(&thread_id, &turn, request).await;
+            let outcome = codex_notice_outcome(&result, Some(&turn));
+            let _ = this.update(cx, |ws, cx| {
+                ws.settle_stream_notices(notice_dispatch, outcome, cx)
+            });
+            if let Err(error) = result {
                 let _ = this.update(cx, |_, cx| {
                     cx.emit(Notice::Error(tf(
                         "Could not add that to the running turn: {error}",
@@ -955,6 +975,7 @@ impl Workspace {
             }
         })
         .detach();
+        NoticeSendResult::Submitted
     }
 
     /// Replaces the edited turn (and those after it) with `composed`.
@@ -980,7 +1001,7 @@ impl Workspace {
                     ws.transcripts
                         .insert(thread_id.clone(), Transcript::from_history(turns));
                     ws.born.remove(&thread_id);
-                    ws.send(composed, cx);
+                    ws.send_to_thread(thread_id.clone(), composed, cx);
                 }
                 Err(error) => cx.emit(Notice::Error(tf(
                     "Could not edit the message: {error}",
@@ -1219,40 +1240,63 @@ impl Workspace {
 
     /// Sends a message in the current view, creating the thread for a draft.
     pub fn send(&mut self, composed: Composed, cx: &mut Context<Self>) {
+        self.send_for_notice(composed, None, cx);
+    }
+
+    fn send_for_notice(
+        &mut self,
+        composed: Composed,
+        target: Option<&NoticeTarget>,
+        cx: &mut Context<Self>,
+    ) -> NoticeSendResult {
+        if target
+            .is_some_and(|target| !matches!(&self.view, View::Thread(id) if id == &target.thread))
+        {
+            return NoticeSendResult::NoDispatch;
+        }
         let composed = Composed {
             text: composed.text.trim().to_string(),
             ..composed
         };
         if composed.text.is_empty() && composed.images.is_empty() {
-            return;
+            return NoticeSendResult::NoDispatch;
         }
-        let composed = self.with_stream_notices(composed);
         if !self.is_codex_view() {
-            self.acp_send(composed, cx);
-            return;
+            return self.acp_send(composed, target, cx);
         }
         if self.view_codex().is_none() {
             cx.emit(Notice::Error(t("Codex is not running.").into()));
-            return;
+            return NoticeSendResult::NoDispatch;
         }
         if let View::Thread(thread_id) = self.view.clone() {
             self.predictions.remove(&thread_id);
             // A message while Codex works joins the running turn.
             if self.is_running() {
-                self.steer(thread_id, composed, cx);
-                return;
+                return self.steer(thread_id, composed, target, cx);
             }
             if let Some((editing, turn)) = self.editing.clone()
                 && editing == thread_id
             {
+                if target.is_some() {
+                    return NoticeSendResult::NoDispatch;
+                }
                 self.resend_edited(thread_id, turn, composed, cx);
-                return;
+                return NoticeSendResult::NoDispatch;
             }
         } else if self.is_running() {
-            return;
+            return NoticeSendResult::NoDispatch;
         }
         let Some(client) = self.view_codex() else {
-            return;
+            return NoticeSendResult::NoDispatch;
+        };
+        let (composed, notice_dispatch) = match self.view.clone() {
+            View::Thread(thread) => {
+                match self.prepare_stream_notices(&thread, composed, target, cx) {
+                    Ok(prepared) => prepared,
+                    Err(outcome) => return outcome,
+                }
+            }
+            View::Draft => (composed, None),
         };
         let request = self.turn_request(&composed);
         match self.view.clone() {
@@ -1266,6 +1310,10 @@ impl Workspace {
                 cx.notify();
                 cx.spawn(async move |this, cx| {
                     let sent = client.turn_start(&thread_id, request).await;
+                    let outcome = codex_notice_outcome(&sent, None);
+                    let _ = this.update(cx, |ws, cx| {
+                        ws.settle_stream_notices(notice_dispatch, outcome, cx)
+                    });
                     if let Err(error) = sent {
                         let _ = this.update(cx, |ws, cx| {
                             if let Some(t) = ws.transcripts.get_mut(&thread_id) {
@@ -1363,6 +1411,7 @@ impl Workspace {
                 .detach();
             }
         }
+        NoticeSendResult::Submitted
     }
 
     /// Sends the message that started `turn_id` again.

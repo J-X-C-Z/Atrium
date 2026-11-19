@@ -34,6 +34,15 @@ use std::{
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
+#[path = "notice_delivery.rs"]
+#[allow(dead_code)] // Consumed by the separate Workspace dispatch integration.
+pub(crate) mod notice_delivery;
+use notice_delivery::{
+    Commit, Delivery, NoticeOutcome, NoticePreparation, NoticeResolution, NoticeTicket,
+    Phase as DeliveryPhase,
+};
+use sha2::{Digest, Sha256};
+
 pub const DIR: &str = ".atrium";
 /// Who signs notices Atrium posts itself, such as scope warnings.
 pub const ATRIUM: &str = "atrium";
@@ -416,6 +425,8 @@ pub struct ProjectFile {
     pub approve_leads: bool,
     /// Tasks the user said yes to, as `owner/id`.
     pub approved: Vec<String>,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    notice_deliveries: HashMap<String, Delivery>,
 }
 
 impl Default for ProjectFile {
@@ -426,6 +437,7 @@ impl Default for ProjectFile {
             max_workers: 3,
             approve_leads: false,
             approved: Vec::new(),
+            notice_deliveries: HashMap::new(),
         }
     }
 }
@@ -1092,8 +1104,200 @@ impl Project {
             .collect()
     }
 
+    fn notice_prefix(notices: &[ProjectNotice]) -> [u8; 32] {
+        let mut hash = Sha256::new();
+        for n in notices {
+            let record = serde_json::to_vec(&(&n.at, &n.from, &n.to, &n.text))
+                .expect("notice strings serialize");
+            hash.update((record.len() as u64).to_be_bytes());
+            hash.update(record);
+        }
+        hash.finalize().into()
+    }
+
+    fn notices_from_disk(&self) -> Result<Vec<ProjectNotice>> {
+        let path = self.dir().join("notices.md");
+        let text =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        Ok(parse_notices(&text))
+    }
+
+    fn persist_delivery_file(&mut self, next: ProjectFile) -> Result<()> {
+        self.persist_delivery_file_with(next, atomic_write)
+    }
+
+    fn persist_delivery_file_with(
+        &mut self,
+        next: ProjectFile,
+        write: impl FnOnce(&Path, &[u8]) -> Result<()>,
+    ) -> Result<()> {
+        let text = serde_json::to_string_pretty(&next)?;
+        write(&self.dir().join("project.json"), text.as_bytes())?;
+        self.file = next;
+        Ok(())
+    }
+
+    fn delivery_prefix_matches(&self, ticket: &NoticeTicket) -> bool {
+        let Some(stream) = self.stream(&ticket.stream) else {
+            return false;
+        };
+        if !ticket.is_for(stream)
+            || stream.notices_seen != ticket.from
+            || ticket.from >= ticket.through
+        {
+            return false;
+        }
+        self.notices_from_disk().is_ok_and(|notices| {
+            notices
+                .get(..ticket.through)
+                .is_some_and(|n| Self::notice_prefix(n) == ticket.prefix_sha256)
+        })
+    }
+
+    /// Persist before dispatch. The caller sends no auto wake if this fails.
+    #[allow(dead_code)]
+    pub(crate) fn prepare_notice_delivery(
+        &mut self,
+        stream: &str,
+        thread: &str,
+    ) -> Result<NoticePreparation> {
+        if self.file.notice_deliveries.contains_key(stream) {
+            return Ok(NoticePreparation::Blocked);
+        }
+        let Some(target) = self
+            .stream(stream)
+            .filter(|s| s.thread_id.as_deref() == Some(thread))
+        else {
+            return Ok(NoticePreparation::Blocked);
+        };
+        let notices = self.notices_from_disk()?;
+        let unread = notices
+            .get(target.notices_seen..)
+            .context("notice journal no longer contains the saved cursor")?
+            .iter()
+            .filter(|n| n.is_for(stream))
+            .filter(|n| target.role != Role::Worker || n.to.iter().any(|to| to == stream))
+            .collect::<Vec<_>>();
+        if unread.is_empty() {
+            return Ok(NoticePreparation::Empty);
+        }
+        let ticket =
+            NoticeTicket::new(target, thread, notices.len(), Self::notice_prefix(&notices));
+        let text = with_notices(&unread, "");
+        let mut next = self.file.clone();
+        next.notice_deliveries
+            .insert(stream.to_owned(), Delivery::reserved(ticket.clone()));
+        self.persist_delivery_file(next)?;
+        Ok(NoticePreparation::Ready { ticket, text })
+    }
+
+    /// True means the exact callback was processed; an accepted RPC whose
+    /// captured prefix no longer matches becomes an unresolved hold instead.
+    #[allow(dead_code)]
+    pub(crate) fn settle_notice_delivery(
+        &mut self,
+        ticket: &NoticeTicket,
+        outcome: NoticeOutcome,
+    ) -> Result<bool> {
+        let Some(delivery) = self.file.notice_deliveries.get(&ticket.stream) else {
+            return Ok(false);
+        };
+        if &delivery.ticket != ticket
+            || !self
+                .stream(&ticket.stream)
+                .is_some_and(|s| ticket.is_for(s))
+        {
+            return Ok(false);
+        }
+        let Some(action) = delivery.settle(
+            outcome,
+            outcome == NoticeOutcome::Accepted && self.delivery_prefix_matches(ticket),
+        ) else {
+            return Ok(false);
+        };
+        self.commit_notice_delivery(&ticket.stream, action)?;
+        Ok(true)
+    }
+
+    fn commit_notice_delivery(&mut self, stream: &str, action: Commit) -> Result<()> {
+        let mut next = self.file.clone();
+        match action {
+            Commit::Advance(through) => {
+                next.streams
+                    .iter_mut()
+                    .find(|s| s.id == stream)
+                    .context("notice stream no longer exists")?
+                    .notices_seen = through;
+                next.notice_deliveries.remove(stream);
+            }
+            Commit::Release => {
+                next.notice_deliveries.remove(stream);
+            }
+            Commit::Hold => {
+                next.notice_deliveries
+                    .get_mut(stream)
+                    .context("notice delivery no longer exists")?
+                    .phase = DeliveryPhase::Uncertain;
+            }
+        }
+        self.persist_delivery_file(next)
+    }
+
+    /// Run once when opening projects in a fresh Workspace, never on reload.
+    #[allow(dead_code)]
+    pub(crate) fn recover_notice_deliveries(&mut self) -> Result<()> {
+        if self
+            .file
+            .notice_deliveries
+            .values()
+            .any(|d| d.phase == DeliveryPhase::Reserved)
+        {
+            let mut next = self.file.clone();
+            for delivery in next.notice_deliveries.values_mut() {
+                delivery.phase = DeliveryPhase::Uncertain;
+            }
+            self.persist_delivery_file(next)?;
+        }
+        Ok(())
+    }
+
+    /// Requires explicit user choice. Reserved live attempts cannot be reset.
+    #[allow(dead_code)]
+    pub(crate) fn resolve_notice_delivery(
+        &mut self,
+        stream: &str,
+        resolution: NoticeResolution,
+    ) -> Result<bool> {
+        let Some(delivery) = self.file.notice_deliveries.get(stream) else {
+            return Ok(false);
+        };
+        let matches = resolution == NoticeResolution::MarkReceived
+            && self.delivery_prefix_matches(&delivery.ticket);
+        let Some(action) = delivery.resolve(resolution, matches) else {
+            return Ok(false);
+        };
+        self.commit_notice_delivery(stream, action)?;
+        Ok(true)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn notice_delivery_blocked(&self, stream: &str) -> bool {
+        self.file.notice_deliveries.contains_key(stream)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn notice_delivery_uncertain(&self, stream: &str) -> bool {
+        self.file
+            .notice_deliveries
+            .get(stream)
+            .is_some_and(|d| d.phase == DeliveryPhase::Uncertain)
+    }
+
     /// Marks every notice so far as handed to `stream`.
     pub fn mark_read(&mut self, stream: &str) {
+        if self.file.notice_deliveries.contains_key(stream) {
+            return;
+        }
         let count = self.notices.len();
         if let Some(s) = self.stream_mut(stream) {
             s.notices_seen = count;
@@ -1618,6 +1822,237 @@ mod tests {
             scope: scope.iter().map(|s| s.to_string()).collect(),
             ..Default::default()
         }
+    }
+
+    fn delivery_fixture(label: &str) -> (PathBuf, Project) {
+        let root = unique_root(label);
+        let mut project = Project::open(&root).unwrap();
+        let mut lead = stream("lead", &[]);
+        lead.thread_id = Some("mock-session".into());
+        project.file.streams.push(lead);
+        project.save().unwrap();
+        project
+            .post(ATRIUM, vec!["lead".into()], "first notice")
+            .unwrap();
+        (root, project)
+    }
+
+    fn reserve_delivery(project: &mut Project) -> NoticeTicket {
+        let NoticePreparation::Ready { ticket, text } = project
+            .prepare_notice_delivery("lead", "mock-session")
+            .unwrap()
+        else {
+            panic!("expected a new notice reservation");
+        };
+        assert!(text.contains("first notice"));
+        ticket
+    }
+
+    #[test]
+    fn notice_delivery_acceptance_commits_only_captured_prefix() {
+        let (root, mut p) = delivery_fixture("atrium-delivery-watermark");
+        let ticket = reserve_delivery(&mut p);
+        p.mark_read("lead"); // Older helper cannot clobber an active lease.
+        assert_eq!(p.stream("lead").unwrap().notices_seen, 0);
+        p.post(ATRIUM, vec!["lead".into()], "later notice").unwrap();
+        assert!(
+            p.settle_notice_delivery(&ticket, NoticeOutcome::Accepted)
+                .unwrap()
+        );
+        let p = Project::open(&root).unwrap();
+        assert_eq!(p.stream("lead").unwrap().notices_seen, 1);
+        assert_eq!(
+            p.unread("lead")
+                .iter()
+                .map(|n| n.text.as_str())
+                .collect::<Vec<_>>(),
+            ["later notice"]
+        );
+        let raw = fs::read_to_string(p.dir().join("project.json")).unwrap();
+        assert!(!raw.contains("notice_deliveries"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejected_delivery_stays_unread_and_old_callbacks_are_stale() {
+        let (root, mut p) = delivery_fixture("atrium-delivery-rejected");
+        let first = reserve_delivery(&mut p);
+        assert!(
+            !p.resolve_notice_delivery("lead", NoticeResolution::RetryNotices)
+                .unwrap()
+        );
+        assert!(
+            p.settle_notice_delivery(&first, NoticeOutcome::Rejected)
+                .unwrap()
+        );
+        let second = reserve_delivery(&mut p);
+        assert_ne!(first, second);
+        assert!(
+            !p.settle_notice_delivery(&first, NoticeOutcome::Accepted)
+                .unwrap()
+        );
+        p.bind_thread("lead", "new-session").unwrap();
+        assert!(
+            !p.settle_notice_delivery(&second, NoticeOutcome::Accepted)
+                .unwrap()
+        );
+        p.recover_notice_deliveries().unwrap();
+        assert!(
+            !p.resolve_notice_delivery("lead", NoticeResolution::MarkReceived)
+                .unwrap()
+        );
+        assert!(
+            p.resolve_notice_delivery("lead", NoticeResolution::RetryNotices)
+                .unwrap()
+        );
+        assert_eq!(Project::open(&root).unwrap().unread("lead").len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn persisted_reserved_delivery_is_held_after_restart_until_user_resolves() {
+        let (root, mut p) = delivery_fixture("atrium-delivery-restart");
+        let ticket = reserve_delivery(&mut p);
+        let raw = fs::read_to_string(p.dir().join("project.json")).unwrap();
+        assert!(raw.contains("reserved") && !raw.contains("first notice"));
+        let mut p = Project::open(&root).unwrap();
+        assert!(matches!(
+            p.prepare_notice_delivery("lead", "mock-session").unwrap(),
+            NoticePreparation::Blocked
+        ));
+        p.recover_notice_deliveries().unwrap();
+        assert!(p.notice_delivery_uncertain("lead"));
+        assert!(
+            !p.settle_notice_delivery(&ticket, NoticeOutcome::Accepted)
+                .unwrap()
+        );
+        assert!(
+            p.resolve_notice_delivery("lead", NoticeResolution::MarkReceived)
+                .unwrap()
+        );
+        assert!(Project::open(&root).unwrap().unread("lead").is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn changed_notice_prefix_remains_unread_despite_accepted_rpc() {
+        let (root, mut p) = delivery_fixture("atrium-delivery-prefix-edit");
+        let ticket = reserve_delivery(&mut p);
+        let notice_file = p.dir().join("notices.md");
+        let prior = fs::read_to_string(&notice_file).unwrap();
+        fs::write(
+            &notice_file,
+            prior.replace("first notice", "replacement notice"),
+        )
+        .unwrap();
+        assert!(
+            p.settle_notice_delivery(&ticket, NoticeOutcome::Accepted)
+                .unwrap()
+        );
+        assert!(p.notice_delivery_uncertain("lead"));
+        assert!(
+            !p.resolve_notice_delivery("lead", NoticeResolution::MarkReceived)
+                .unwrap()
+        );
+        assert!(
+            p.resolve_notice_delivery("lead", NoticeResolution::RetryNotices)
+                .unwrap()
+        );
+        assert_eq!(
+            Project::open(&root).unwrap().unread("lead")[0].text,
+            "replacement notice"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn delivery_save_reported_failed_after_publication_does_not_redispatch() {
+        let (root, mut p) = delivery_fixture("atrium-delivery-after-rename");
+        reserve_delivery(&mut p);
+        // Simulate an Accepted cursor+clear that got through replacement but
+        // returned an error synchronizing the containing directory afterwards.
+        let mut next = p.file.clone();
+        next.streams[0].notices_seen = 1;
+        next.notice_deliveries.clear();
+        let result = p.persist_delivery_file_with(next, |path, bytes| {
+            atomic_write(path, bytes)?;
+            anyhow::bail!("simulated directory sync error after rename");
+        });
+        assert!(result.is_err());
+        assert!(p.notice_delivery_blocked("lead"));
+        assert_eq!(p.stream("lead").unwrap().notices_seen, 0);
+        assert!(Project::open(&root).unwrap().unread("lead").is_empty());
+        p.reload();
+        assert!(p.notice_delivery_blocked("lead"));
+        p.save().unwrap(); // May regress cursor but preserves conservative hold.
+        let mut p = Project::open(&root).unwrap();
+        p.recover_notice_deliveries().unwrap();
+        assert!(p.notice_delivery_uncertain("lead"));
+        assert!(matches!(
+            p.prepare_notice_delivery("lead", "mock-session").unwrap(),
+            NoticePreparation::Blocked
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn delivery_persistence_failure_neither_sends_nor_advances_cursor() {
+        let (root, mut p) = delivery_fixture("atrium-delivery-io");
+        let path = p.dir().join("project.json");
+        let backup = p.dir().join("project.backup");
+        let block = || {
+            fs::rename(&path, &backup).unwrap();
+            fs::create_dir(&path).unwrap();
+        };
+        let unblock = || {
+            fs::remove_dir(&path).unwrap();
+            fs::rename(&backup, &path).unwrap();
+        };
+        block();
+        assert!(p.prepare_notice_delivery("lead", "mock-session").is_err());
+        assert!(p.file.notice_deliveries.is_empty());
+        unblock();
+        let ticket = reserve_delivery(&mut p);
+        block();
+        assert!(
+            p.settle_notice_delivery(&ticket, NoticeOutcome::Accepted)
+                .is_err()
+        );
+        assert!(
+            p.settle_notice_delivery(&ticket, NoticeOutcome::Rejected)
+                .is_err()
+        );
+        assert!(
+            p.settle_notice_delivery(&ticket, NoticeOutcome::Uncertain)
+                .is_err()
+        );
+        assert_eq!(p.stream("lead").unwrap().notices_seen, 0);
+        assert!(matches!(
+            p.prepare_notice_delivery("lead", "mock-session").unwrap(),
+            NoticePreparation::Blocked
+        ));
+        unblock();
+        let mut p = Project::open(&root).unwrap();
+        p.recover_notice_deliveries().unwrap();
+        assert!(p.notice_delivery_uncertain("lead"));
+        block();
+        assert!(
+            p.resolve_notice_delivery("lead", NoticeResolution::MarkReceived)
+                .is_err()
+        );
+        assert!(
+            p.resolve_notice_delivery("lead", NoticeResolution::RetryNotices)
+                .is_err()
+        );
+        assert_eq!(p.stream("lead").unwrap().notices_seen, 0);
+        assert!(p.notice_delivery_uncertain("lead"));
+        unblock();
+        assert!(
+            p.resolve_notice_delivery("lead", NoticeResolution::RetryNotices)
+                .unwrap()
+        );
+        assert_eq!(Project::open(&root).unwrap().unread("lead").len(), 1);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -580,6 +580,8 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "uuid",
 ]
 
 [[package]]
@@ -607,6 +609,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "toml 0.8.23",
  "tungstenite 0.24.0",

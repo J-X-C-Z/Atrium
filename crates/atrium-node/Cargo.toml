@@ -14,13 +14,14 @@ dirs.workspace = true
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws"] }
 toml = "0.8"
-uuid = { version = "1", features = ["v4"] }
+uuid.workspace = true
 libc = "0.2"
 cap-std = "3"
 
 ureq.workspace = true
 
 [dev-dependencies]
+sha2.workspace = true
 jiff.workspace = true
 codex-client.workspace = true
 acp-client.workspace = true

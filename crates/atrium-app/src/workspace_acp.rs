@@ -2,7 +2,9 @@
 //! each its own process and event pump, their sessions mixed into the same
 //! thread list and transcripts as Codex's.
 
+use super::notice_dispatch::{NoticeDispatch, NoticeSendResult, NoticeTarget};
 use crate::i18n::tf;
+use crate::project::notice_delivery::NoticeOutcome;
 use std::time::Instant;
 
 use acp_client::{AcpClient, AcpConfig, AgentInfo};
@@ -419,24 +421,35 @@ impl Workspace {
     }
 
     /// Sends a message to an ACP agent, starting its session for a new chat.
-    pub(super) fn acp_send(&mut self, composed: Composed, cx: &mut Context<Self>) {
+    pub(super) fn acp_send(
+        &mut self,
+        composed: Composed,
+        target: Option<&NoticeTarget>,
+        cx: &mut Context<Self>,
+    ) -> NoticeSendResult {
         let backend = self.view_backend().to_string();
         let Some(client) = self.acp(&backend) else {
             cx.emit(Notice::Error(tf(
                 "{agent} is not running.",
                 &[("agent", &agents::backend_label(&backend))],
             )));
-            return;
+            return NoticeSendResult::NoDispatch;
         };
         if self.is_running() {
             cx.emit(Notice::Info(tf(
                 "{agent} is still working; wait for it, or stop it first.",
                 &[("agent", &agents::backend_label(&backend))],
             )));
-            return;
+            return NoticeSendResult::NoDispatch;
         }
         match self.view.clone() {
             View::Thread(session) => {
+                let (composed, notice_dispatch) =
+                    match self.prepare_stream_notices(&session, composed, target, cx) {
+                        Ok(prepared) => prepared,
+                        Err(outcome) => return outcome,
+                    };
+
                 let transcript = self.transcripts.entry(session.clone()).or_default();
                 let before = transcript.len();
                 transcript.push_local_user(composed.text.clone(), composed.attachments());
@@ -444,7 +457,7 @@ impl Workspace {
                 self.note_births(&session, before);
                 self.turn_started.insert(session.clone(), Instant::now());
                 cx.notify();
-                Self::run_prompt(client, backend, session, composed, cx);
+                Self::run_prompt(client, backend, session, composed, notice_dispatch, cx);
             }
             View::Draft => {
                 self.draft = Transcript::new();
@@ -544,6 +557,7 @@ impl Workspace {
                             backend.clone(),
                             session.clone(),
                             composed.clone(),
+                            None,
                             cx,
                         );
                     });
@@ -552,6 +566,7 @@ impl Workspace {
                 .detach();
             }
         }
+        NoticeSendResult::Submitted
     }
 
     /// Opens the turn and sends the prompt; the turn ends with its response.
@@ -560,20 +575,28 @@ impl Workspace {
         backend: String,
         session: String,
         composed: Composed,
+        notice_dispatch: Option<NoticeDispatch>,
         cx: &mut Context<Self>,
     ) {
         let (_, started) = client.begin_turn(&session);
         cx.spawn(async move |this, cx| {
             let _ = this.update(cx, |ws, cx| ws.apply_acp(&backend, started, cx));
-            let ended = client
-                .prompt(
+            let outcome = client
+                .prompt_with_outcome(
                     &session,
                     &composed.text,
                     &composed.images,
                     &composed.mentions,
                 )
                 .await;
-            let _ = this.update(cx, |ws, cx| ws.apply_acp(&backend, ended, cx));
+            let delivery = match outcome.delivery {
+                acp_client::PromptDelivery::Accepted { .. } => NoticeOutcome::Accepted,
+                acp_client::PromptDelivery::Uncertain { .. } => NoticeOutcome::Uncertain,
+            };
+            let _ = this.update(cx, |ws, cx| {
+                ws.settle_stream_notices(notice_dispatch, delivery, cx);
+                ws.apply_acp(&backend, outcome.events, cx);
+            });
         })
         .detach();
     }

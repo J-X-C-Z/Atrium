@@ -18,7 +18,7 @@ with tempfile.TemporaryDirectory(prefix="atrium-project-harness-") as directory:
     manifest.write_text(
         '[package]\nname="atrium-project-harness"\nversion="0.0.0"\nedition="2024"\n'
         '[workspace]\n[lib]\npath=' + json.dumps(str(root / "crates/atrium-app/src/project.rs")) + '\n'
-        '[dependencies]\nanyhow="1"\nserde={version="1",features=["derive"]}\nserde_json="1"\njiff="0.2"\n',
+        '[dependencies]\nanyhow="1"\nserde={version="1",features=["derive"]}\nserde_json="1"\njiff="0.2"\nsha2="0.10"\nuuid={version="1",features=["v4"]}\n',
         encoding="utf-8",
     )
     result = subprocess.run(

@@ -7,10 +7,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::project::notice_delivery::{NoticeOutcome, NoticeResolution};
 use atrium_core::{AgentEvent, EntryKind, GoalStatus, Item, ThreadMeta, Transcript, TurnStatus};
 use codex_client::StartThread;
 use gpui::Context;
 
+use super::notice_dispatch::{
+    NoticeDispatch, NoticeSendResult, NoticeTarget, automatic_notice_dispatch_allowed,
+};
 use super::{CODEX, Composed, Notice, View, Workspace};
 use crate::i18n::tf;
 use crate::{
@@ -120,6 +124,21 @@ impl Workspace {
         for root in roots {
             match Project::open(&root) {
                 Ok(mut project) => {
+                    if let Err(error) = project.recover_notice_deliveries() {
+                        log::warn!("could not recover notice delivery journal: {error:#}");
+                        cx.emit(Notice::Error(format!(
+                            "Notice delivery recovery needs review: {error:#}"
+                        )));
+                    }
+                    let held = project
+                        .file
+                        .streams
+                        .iter()
+                        .filter(|stream| project.notice_delivery_blocked(&stream.id))
+                        .count();
+                    if held > 0 {
+                        cx.emit(Notice::Info(format!("{}: {held} workstream(s) have unresolved notice delivery. Automatic notice retries are paused; explicit resolution is available through the backend integration API.", root.display())));
+                    }
                     match project.recover_unbound_tasks() {
                         Ok(parents) => {
                             for parent in parents {
@@ -776,29 +795,110 @@ impl Workspace {
         cx.notify();
     }
 
-    /// When the shown chat is a workstream's: puts the notices it has not
-    /// seen in front of the message, and marks them handed over.
-    pub(super) fn with_stream_notices(&mut self, composed: Composed) -> Composed {
-        let Some(thread) = self.active_thread_id().map(str::to_owned) else {
-            return composed;
-        };
+    /// Reserve a captured prefix immediately before dispatch. Held notices
+    /// are never attached again; manual text may still be sent without them.
+    pub(super) fn prepare_stream_notices(
+        &mut self,
+        thread: &str,
+        composed: Composed,
+        target: Option<&NoticeTarget>,
+        cx: &mut Context<Self>,
+    ) -> Result<(Composed, Option<NoticeDispatch>), NoticeSendResult> {
         let Some((root, stream)) = self
-            .stream_of(&thread)
+            .stream_of(thread)
             .map(|(p, s)| (p.root.clone(), s.id.clone()))
         else {
-            return composed;
+            return if target.is_some() {
+                Err(NoticeSendResult::NoDispatch)
+            } else {
+                Ok((composed, None))
+            };
         };
-        let Some(project) = self.project_mut(&root) else {
-            return composed;
-        };
-        let unread = project.unread(&stream);
-        if unread.is_empty() {
-            return composed;
+        if target.is_some_and(|t| t.root != root || t.stream != stream || t.thread != thread) {
+            return Err(NoticeSendResult::NoDispatch);
         }
-        let text = project::with_notices(&unread, &composed.text);
-        project.mark_read(&stream);
-        let _ = project.save();
-        Composed { text, ..composed }
+        let project = self
+            .project_mut(&root)
+            .ok_or(NoticeSendResult::NoDispatch)?;
+        let prepared = match target {
+            Some(target) => {
+                NoticeDispatch::prepare_automatic(project, target, thread, composed.text.clone())
+            }
+            None => {
+                NoticeDispatch::prepare(project, &stream, thread, composed.text.clone()).map(Ok)
+            }
+        };
+        match prepared {
+            Ok(Err(outcome)) => Err(outcome),
+            Ok(Ok(prepared)) => {
+                if prepared.held {
+                    cx.emit(Notice::Info("Earlier project notices are awaiting delivery confirmation. Sending only your current text; held notices are not retried.".into()));
+                }
+                Ok((
+                    Composed {
+                        text: prepared.text,
+                        ..composed
+                    },
+                    prepared.dispatch,
+                ))
+            }
+            Err(error) => {
+                cx.emit(Notice::Error(format!(
+                    "Could not reserve project notices; nothing was sent: {error:#}"
+                )));
+                Err(NoticeSendResult::NoDispatch)
+            }
+        }
+    }
+
+    pub(super) fn settle_stream_notices(
+        &mut self,
+        dispatch: Option<NoticeDispatch>,
+        outcome: NoticeOutcome,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dispatch) = dispatch else {
+            return;
+        };
+        let Some(project) = self.project_mut(&dispatch.root) else {
+            return;
+        };
+        match dispatch.settle(project, outcome) {
+            Ok(false) => {},
+            Ok(true) => {
+                if project.notice_delivery_uncertain(&dispatch.stream) {
+                    cx.emit(Notice::Error("Project notice delivery is uncertain. Automatic retry is paused; explicitly mark the notices received or authorize retrying notices only.".into()));
+                }
+            }
+            Err(error) => cx.emit(Notice::Error(format!("Could not save notice delivery confirmation. Automatic retry remains blocked: {error:#}"))),
+        }
+        cx.notify();
+    }
+
+    /// Requires an explicit user choice. Never replays the original manual text.
+    pub fn resolve_stream_notice_delivery(
+        &mut self,
+        root: &PathBuf,
+        stream: &str,
+        retry_notices: bool,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<bool> {
+        let resolution = if retry_notices {
+            NoticeResolution::RetryNotices
+        } else {
+            NoticeResolution::MarkReceived
+        };
+        let changed = self
+            .project_mut(root)
+            .ok_or_else(|| anyhow::anyhow!("project is not open"))?
+            .resolve_notice_delivery(stream, resolution)?;
+        if changed {
+            self.project_schedule
+                .pending
+                .insert((root.clone(), stream.to_owned()));
+            cx.notify();
+        }
+        Ok(changed)
     }
 
     /// Hands a workstream its new notices now, asking it to carry on.
@@ -812,6 +912,9 @@ impl Workspace {
         let Some(project) = self.projects.iter().find(|p| p.root == *root) else {
             return true;
         };
+        if !automatic_notice_dispatch_allowed(project, stream) {
+            return false;
+        }
         if project.unread(stream).is_empty() {
             return true;
         }
@@ -833,12 +936,28 @@ impl Workspace {
         ) {
             return false;
         }
-        self.send_to_thread(
-            thread,
+        let target = NoticeTarget {
+            root: root.clone(),
+            stream: stream.to_owned(),
+            thread: thread.clone(),
+        };
+        // Rate-limit actual attempts (including persistence refusals) without
+        // dropping their pending wake or spamming an error every two seconds.
+        self.project_schedule
+            .last_wake
+            .insert((root.clone(), stream.to_owned()), Instant::now());
+        let state = BackgroundDispatch::enter(&mut self.view, &mut self.editing, thread);
+        let result = self.send_for_notice(
             Composed::text("Take these into account and carry on toward your goal.".into()),
+            Some(&target),
             cx,
         );
-        true
+        state.restore(&mut self.view, &mut self.editing);
+        cx.notify();
+        matches!(
+            result,
+            NoticeSendResult::Empty | NoticeSendResult::Submitted
+        )
     }
 
     /// Asks an idle workstream to keep going toward its goal.
