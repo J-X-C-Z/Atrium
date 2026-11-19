@@ -88,5 +88,32 @@ jobs:
               print(json.dumps({"case": label, **{k: v for k, v in result.items()
                                if k != "samples"}}, indent=2))
           PY
+          # Same newly built archive, same fixed profile: two current-baseline
+          # repeats, not an A/B or an optimization comparison.
+          python3 - <<'PYBASELINE'
+          import importlib.util, json, os, subprocess, sys
+          from pathlib import Path
+          spec = importlib.util.spec_from_file_location("node_package", "scripts/node-package.py")
+          package = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(package)
+          root = Path(os.environ["PACKAGE_JOB_ROOT"])
+          archive = root / "node.tar.gz"
+          expected = package.sha(package.read_regular_bounded(archive, package.MAX_BINARY + 1024 * 1024))
+          manifest, _, hashes = package.verify(archive, expected)
+          assert manifest["source_dirty"] is False
+          for repeat in (1, 2):
+              output = root / f"paced-{repeat}.json"
+              subprocess.run([sys.executable, "scripts/node-portable-load.py",
+                              "--archive", str(archive), "--expected-sha256", expected,
+                              "--output", str(output), "--paced-baseline"],
+                             check=True, timeout=210)
+              result = json.loads(output.read_text())
+              measured = result["paced_baseline"]
+              assert result["status"] == "completed" and result["hashes"] == hashes
+              assert result["echoes_verified"] == measured["rtt"]["samples"] == 4096
+              assert 102.4 <= measured["observed_seconds"] <= 120
+              print(json.dumps({"baseline_repeat": repeat, **{k: v for k, v in result.items()
+                               if k != "samples"}}, indent=2))
+          PYBASELINE
           # No uploads, service installation, accounts, signing or publication.
           # RUNNER_TEMP is runner-owned and removed by the hosted runner lifecycle.

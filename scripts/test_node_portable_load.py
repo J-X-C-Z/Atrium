@@ -75,4 +75,26 @@ class ReviewRegressions(unittest.TestCase):
         with self.assertRaises(RuntimeError):guard.register(c)
         d.settimeout(.1);self.assertEqual(d.recv(1),b'')
 
+class PacedBaselineFixtures(unittest.TestCase):
+    def test_nearest_rank_rtt(self):
+        values = [v * 1_000_000 for v in reversed(range(1, 101))]
+        self.assertEqual(load.rtt_summary(values),
+                         {'samples':100, 'p50_ms':50, 'p95_ms':95, 'p99_ms':99})
+        self.assertEqual(load.rtt_summary([2_000_000])['p99_ms'], 2)
+        with self.assertRaisesRegex(ValueError, 'no verified'):
+            load.rtt_summary([])
+
+    def test_pacing_waits_until_slot_and_enforces_load_budget(self):
+        clock = [0]
+        waits = []
+        def sleep(seconds):
+            waits.append(seconds)
+            clock[0] += round(seconds * 1e9)
+        self.assertEqual(load.pace(100_000_000, 200_000_000, lambda: clock[0], sleep), 100_000_000)
+        self.assertEqual(waits, [.1])
+        clock[0] += load.BASELINE_PERIOD_NS
+        with self.assertRaisesRegex(RuntimeError, 'load budget'):
+            load.pace(100_000_000, 150_000_000, lambda: clock[0], sleep)
+
+
 if __name__=='__main__': unittest.main()

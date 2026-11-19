@@ -126,3 +126,54 @@ observed owned PIDs alive. Helper hash matched the published packaging helper.
 The new macOS run must build and identify its own executable/archive; it is not
 assumed bit-identical to an earlier macOS artifact. Existing historical numbers
 are not attributed to the newly built macOS executable.
+
+## Fixed-rate 102.4-second release baseline
+
+Run twice sequentially on the same runner and native release archive, with
+separate new output paths. A clean source build and matching expected archive
+SHA-256 are required. Compare repeats only within this identical profile.
+
+```sh
+python3 scripts/node-portable-load.py --archive NODE.tar.gz \
+  --expected-sha256 TRUSTED_ARCHIVE_HASH --output NEW_BASELINE.json --paced-baseline
+```
+
+The profile targets 40 echoes/s in total on two attachments, 20/s each, with
+at least 50 ms between send starts and at most one outstanding echo per client.
+It sends exactly 4,096 verified 16 KiB echoes (64 MiB input) across 32 rounds
+of 64 sends per client, reconnecting between rounds. Scheduling lag is carried forward, never skipped or caught up in a burst.
+The observed rate and accumulated drift are reported separately from nominal
+rate. Success requires all samples and a 102.4–120-second observed load window
+before shutdown and final replay checks. This is a paced closed-loop load,
+not a fixed-rate open-loop generator.
+The small retention setting is fixed: each cat retains eight data frames,
+reports gap 1–2,040, and emits terminal sequence 2,049.
+
+RTT samples start immediately before JSON encoding/masking and WebSocket send
+and stop after WebSocket receive/JSON decoding. Only the exact verified echo is
+counted. They include Python/socket overhead, local TCP, node and cat, but
+exclude pacing waits, payload construction, reconnect handshake and terminal
+replay. The report includes per-client and pooled nearest-rank p50/p95/p99 in
+milliseconds; it does not estimate provider latency or overloaded open-loop
+tail latency. CPU is the sampled node+cat cumulative delta divided by full
+job wall time (one-core percent), excluding the driver and potentially missing
+exit tails. The existing 180-second sampled watchdog, 512 MiB sampled RSS
+guard and owned-process cleanup apply.
+
+For a later hosted Mac run, build and verify the native release archive once in
+the packaging job and run two paced repeats sequentially against that same
+archive/hash, with a 210-second per-driver outer timeout and exact checks for
+completed status, hash, 4,096 RTT samples, and at least 102.4 seconds observed.
+No new dependencies or permissions are needed. Without a production change
+these are repeated current baselines, not an A/B or a speedup claim.
+
+The initial two Linux paced repeats use clean source `a4282c99` and driver
+`7f7af947b04fd9ceabe9b66f0d0141b448e38fa63c00615801e49fd23721bc78`.
+Both verified 4,096 echoes with eight retained frames per cat. Observed load
+windows were 105.838 and 102.699 seconds; pooled RTT p50/p95/p99 were
+5.988/24.925/63.185 ms and 2.277/3.450/5.762 ms respectively. This variation is
+preserved rather than presented as an improvement. Eleven pure fixtures and
+independent source/report review passed. The macOS workflow now runs the two
+paced repeats against its newly built, verified native archive after the short
+cases. Its exact-head execution is pending; these Linux numbers do not predict
+hosted macOS or the user's device.

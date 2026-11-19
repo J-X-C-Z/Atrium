@@ -6,6 +6,7 @@ import concurrent.futures
 import hashlib
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import secrets
@@ -21,6 +22,29 @@ spec = importlib.util.spec_from_file_location('package', Path(__file__).with_nam
 package = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(package)
 CLIENTS, FRAMES, PAYLOAD = 2, 64, 16384
+BASELINE_ROUNDS = 32
+BASELINE_PERIOD_NS = 50_000_000
+BASELINE_MAX_NS = 120_000_000_000
+
+
+def rtt_summary(samples):
+    ordered = sorted(samples)
+    if not ordered:
+        raise ValueError('no verified echo RTT samples')
+    return {'samples': len(ordered), **{
+        f'p{p}_ms': ordered[math.ceil(len(ordered) * p / 100) - 1] / 1e6
+        for p in (50, 95, 99)
+    }}
+
+
+def pace(slot_ns, limit_ns, clock=time.monotonic_ns, sleep=time.sleep):
+    while (remaining := slot_ns - clock()) > 0:
+        sleep(remaining / 1e9)
+    actual_ns = slot_ns - remaining
+    if actual_ns >= limit_ns:
+        raise RuntimeError('paced baseline exceeded the 120s load budget')
+    return actual_ns
+
 
 
 def exact(sock, size, deadline=None):
@@ -159,14 +183,24 @@ def main():
     parser.add_argument('--archive', type=Path, required=True)
     parser.add_argument('--expected-sha256', required=True)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--rounds', type=int, default=2)
+    parser.add_argument('--rounds', type=int)
+    parser.add_argument('--paced-baseline', action='store_true',
+                        help='fixed 102.4s small-retention release measurement')
     parser.add_argument('--small-retention', action='store_true')
     parser.add_argument('--inject-monitor-failure', action='store_true')
     args = parser.parse_args()
+    if args.paced_baseline and (args.rounds is not None or args.small_retention):
+        parser.error('--paced-baseline fixes rounds and retention')
+    if args.paced_baseline:
+        args.rounds, args.small_retention = BASELINE_ROUNDS, True
+    elif args.rounds is None:
+        args.rounds = 2
     if not 1 <= args.rounds <= 60: raise ValueError('rounds must be 1..60')
     manifest, binary, hashes = package.verify(args.archive, args.expected_sha256)
     if manifest.get('profile') != 'release' or not manifest.get('source_commit'):
         raise ValueError('release profile and source provenance required')
+    if args.paced_baseline and manifest.get('source_dirty') is not False:
+        raise ValueError('paced baseline requires a clean source build')
     if any(manifest['binary'][k] != v for k, v in package.host_identity().items()): raise ValueError('native archive required')
     with args.output.open('x') as report:
         report.write('{"status":"initializing"}\n'); report.flush()
@@ -214,19 +248,54 @@ def main():
                     def payload(index,seq):
                         prefix=f'{index}:{seq}:'
                         return prefix+'x'*(PAYLOAD-len(prefix))
+                    epoch_ns = time.monotonic_ns() + 500_000_000
+                    span_ns = BASELINE_ROUNDS * FRAMES * BASELINE_PERIOD_NS
                     def load(index):
-                        child=children[index]; seq=0
+                        child=children[index]; seq=0; rtts=[]; previous_send=epoch_ns-BASELINE_PERIOD_NS
                         for _ in range(args.rounds):
                             ws=attach(child,seq)
                             try:
                                 for _ in range(FRAMES):
                                     if errors or time.monotonic()>deadline: raise RuntimeError('load aborted')
-                                    seq+=1; text=payload(index,seq); ws.send({'line':text}); frame=ws.recv()
+                                    text=payload(index,seq+1)
+                                    if args.paced_baseline:
+                                        slot = epoch_ns + seq * BASELINE_PERIOD_NS
+                                        pace(max(slot, previous_send + BASELINE_PERIOD_NS),
+                                             epoch_ns + BASELINE_MAX_NS)
+                                    seq+=1
+                                    sent_ns = time.monotonic_ns()
+                                    previous_send = sent_ns
+                                    ws.send({'line':text}); frame=ws.recv()
+                                    received_ns = time.monotonic_ns()
                                     if frame.get('seq')!=seq or frame.get('line')!=text: raise ValueError('echo/sequence mismatch')
+                                    if args.paced_baseline: rtts.append(received_ns - sent_ns)
                             finally: ws.close()
-                        return seq
+                        return seq, rtts, previous_send
                     try:
-                        with concurrent.futures.ThreadPoolExecutor(max_workers=CLIENTS) as pool: counts=list(pool.map(load,range(CLIENTS)))
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=CLIENTS) as pool: runs=list(pool.map(load,range(CLIENTS)))
+                        counts = [run[0] for run in runs]
+                        if args.paced_baseline:
+                            end_ns = epoch_ns + span_ns
+                            while (remaining := end_ns - time.monotonic_ns()) > 0:
+                                if guard.aborted.is_set(): raise RuntimeError('baseline aborted')
+                                stop.wait(min(remaining / 1e9, .05))
+                            sample_count = BASELINE_ROUNDS * FRAMES
+                            if any(count != sample_count or len(samples) != sample_count
+                                   for count, samples, _ in runs):
+                                raise ValueError('incomplete paced baseline')
+                            observed_ns = time.monotonic_ns() - epoch_ns
+                            if observed_ns > BASELINE_MAX_NS:
+                                raise RuntimeError('paced baseline exceeded the 120s load budget')
+                            result['paced_baseline'] = {
+                                'scheduled_seconds': span_ns / 1e9,
+                                'observed_seconds': observed_ns / 1e9,
+                                'nominal_echoes_per_second': CLIENTS * 1e9 / BASELINE_PERIOD_NS,
+                                'observed_echoes_per_second': sum(counts) * 1e9 / observed_ns,
+                                'max_schedule_drift_ms': (max(run[2] for run in runs) -
+                                                          (end_ns - BASELINE_PERIOD_NS)) / 1e6,
+                                'rtt_by_client': [rtt_summary(run[1]) for run in runs],
+                                'rtt': rtt_summary([rtt for run in runs for rtt in run[1]]),
+                            }
                         # Snapshot cats before exit; ps cannot recover CPU after exit.
                         samples.append(sample(node,pids))
                         for child in children: request('DELETE','/v1/procs/'+child['id'])
