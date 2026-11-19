@@ -105,11 +105,14 @@ class Packages(unittest.TestCase):
 
     def test_oversized_member_header_is_rejected_before_reading_body(self):
         path = self.root / "large-header.tar.gz"
-        with tarfile.open(path, "w:gz") as output:
-            member = tarfile.TarInfo(package.BINARY)
-            member.size = package.MAX_BINARY + 1
-            output.addfile(member)
-        with self.assertRaises(ValueError): package.verify(path)
+        member = tarfile.TarInfo(package.BINARY)
+        member.size, member.mode = package.MAX_BINARY + 1, 0o755
+        # A deliberately header-only invalid archive: newer tarfile.addfile
+        # requires a body stream for nonempty files, but no huge body is needed.
+        path.write_bytes(gzip.compress(member.tobuf(format=tarfile.USTAR_FORMAT)))
+        self.assertEqual(len(gzip.decompress(path.read_bytes())), 512)
+        with self.assertRaisesRegex(ValueError, "archive member exceeds limit"):
+            package.verify(path)
 
     def test_extension_headers_rejected_before_payload_parser(self):
         valid = self.archive()
