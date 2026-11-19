@@ -29,6 +29,7 @@ pub mod mcp;
 pub mod notice_delivery;
 pub mod pool;
 pub mod preview;
+pub mod scheduler;
 pub mod skill;
 pub mod worktrees;
 
