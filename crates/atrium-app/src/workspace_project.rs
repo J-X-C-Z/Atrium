@@ -79,6 +79,41 @@ pub(super) struct ScheduleState {
     pending: HashSet<(PathBuf, String)>,
     last_wake: HashMap<(PathBuf, String), Instant>,
     orphan_logged: HashSet<(PathBuf, String)>,
+    #[cfg(all(test, unix, feature = "workspace-ticker-test"))]
+    test_wake_checks: usize,
+}
+
+#[cfg(all(test, unix, feature = "workspace-ticker-test"))]
+impl ScheduleState {
+    pub(super) fn test_requeue_after_backoff(&mut self, root: PathBuf, stream: String) {
+        let key = (root, stream);
+        let elapsed = Instant::now().checked_sub(Duration::from_secs(31)).unwrap();
+        assert!(
+            self.last_wake.insert(key.clone(), elapsed).is_some(),
+            "requeue must follow the fixture's real initial dispatch"
+        );
+        self.pending.insert(key);
+        self.test_wake_checks = 0;
+    }
+
+    pub(super) fn test_queue_first_wake(&mut self, root: PathBuf, stream: String) {
+        let key = (root, stream);
+        assert!(!self.last_wake.contains_key(&key));
+        assert_eq!(self.test_wake_checks, 0);
+        assert!(self.pending.insert(key));
+    }
+
+    pub(super) fn assert_test_wake_attempt_still_pending(&self, root: PathBuf, stream: String) {
+        let key = (root, stream);
+        assert!(
+            self.pending.contains(&key),
+            "held notice wake must remain pending"
+        );
+        assert!(
+            self.test_wake_checks > 0,
+            "ticker must have reached dispatch preflight"
+        );
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -369,6 +404,10 @@ impl Workspace {
                 false,
             ) {
                 continue;
+            }
+            #[cfg(all(test, unix, feature = "workspace-ticker-test"))]
+            {
+                self.project_schedule.test_wake_checks += 1;
             }
             if self.deliver_notices_at(&root, &stream, cx) {
                 self.project_schedule.pending.remove(&key);

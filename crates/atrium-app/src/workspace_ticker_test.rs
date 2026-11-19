@@ -7,7 +7,7 @@ use gpui::{AppContext, TestAppContext};
 use serde_json::{Value, json};
 use std::{
     fs,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, ErrorKind, Write},
     os::unix::net::UnixStream,
     path::PathBuf,
     sync::mpsc,
@@ -24,8 +24,16 @@ impl Drop for Fixture {
 
 #[gpui::test(iterations = 1)]
 fn scheduler_tick_sends_notice_and_commits_rpc_acceptance(cx: &mut TestAppContext) {
-    // This fixture deliberately combines a virtual GPUI timer with real
-    // socket I/O: the RPC reader thread wakes the foreground future.
+    exercise_notice_delivery(cx, false);
+}
+
+#[gpui::test(iterations = 1)]
+fn scheduler_tick_holds_notice_on_rpc_error_and_does_not_retry(cx: &mut TestAppContext) {
+    exercise_notice_delivery(cx, true);
+}
+
+fn exercise_notice_delivery(cx: &mut TestAppContext, rpc_error: bool) {
+    // Real socket I/O wakes the GPUI foreground task externally.
     cx.executor().allow_parking();
     let fixture = Fixture(
         std::env::temp_dir().join(format!("atrium-workspace-ticker-{}", uuid::Uuid::new_v4())),
@@ -51,11 +59,11 @@ fn scheduler_tick_sends_notice_and_commits_rpc_acceptance(cx: &mut TestAppContex
         client_socket,
     );
     let (sent, received) = mpsc::channel();
+    let (check_no_retry, await_no_retry_check) = mpsc::channel();
     let mock = thread::spawn(move || {
         let mut line = String::new();
-        BufReader::new(mock_socket.try_clone().unwrap())
-            .read_line(&mut line)
-            .unwrap();
+        let mut reader = BufReader::new(mock_socket.try_clone().unwrap());
+        reader.read_line(&mut line).unwrap();
         let request: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(request["method"], "turn/start");
         assert_eq!(request["params"]["threadId"], "fixture-thread");
@@ -65,15 +73,36 @@ fn scheduler_tick_sends_notice_and_commits_rpc_acceptance(cx: &mut TestAppContex
                 .unwrap()
                 .contains("fixture milestone for real Workspace ticker")
         );
-        writeln!(
-            mock_socket,
-            "{}",
+        let response = if rpc_error {
             json!({
-                "id": request["id"], "result": {"turn": {"id": "fixture-turn"}}
+                "id": request["id"],
+                "error": {"code": -32602, "message": "fixture turn refused"}
             })
-        )
-        .unwrap();
+        } else {
+            json!({"id": request["id"], "result": {"turn": {"id": "fixture-turn"}}})
+        };
+        writeln!(mock_socket, "{response}").unwrap();
         sent.send(()).unwrap();
+        if rpc_error {
+            // Keep transport live until the Workspace has handled the explicit
+            // response and driven more ticks than its retry backoff.
+            await_no_retry_check
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap();
+            reader
+                .get_ref()
+                .set_read_timeout(Some(Duration::from_millis(250)))
+                .unwrap();
+            line.clear();
+            match reader.read_line(&mut line) {
+                Err(error)
+                    if line.is_empty()
+                        && matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+                result => {
+                    panic!("expected live mock transport with no retry: {result:?}, {line:?}")
+                }
+            }
+        }
     });
 
     let settings = Settings {
@@ -109,13 +138,19 @@ fn scheduler_tick_sends_notice_and_commits_rpc_acceptance(cx: &mut TestAppContex
 
     // The GPUI clock is virtual; the std UnixStream reader is an OS thread.
     let deadline = Instant::now() + Duration::from_secs(5);
-    while Project::open(&fixture.0)
-        .unwrap()
-        .stream("controller")
-        .unwrap()
-        .notices_seen
-        != 1
-    {
+    loop {
+        let persisted = Project::open(&fixture.0).unwrap();
+        let cursor = persisted.stream("controller").unwrap().notices_seen;
+        if (rpc_error && persisted.notice_delivery_uncertain("controller"))
+            || (!rpc_error && cursor == 1)
+        {
+            assert_eq!(cursor, if rpc_error { 0 } else { 1 });
+            assert_eq!(persisted.notice_delivery_blocked("controller"), rpc_error);
+            if rpc_error {
+                assert_eq!(persisted.unread("controller").len(), 1);
+            }
+            break;
+        }
         assert!(
             Instant::now() < deadline,
             "real Workspace timer failed to settle the notice"
@@ -124,11 +159,82 @@ fn scheduler_tick_sends_notice_and_commits_rpc_acceptance(cx: &mut TestAppContex
         cx.run_until_parked();
     }
     received.recv_timeout(Duration::from_secs(1)).unwrap();
+    if rpc_error {
+        // A successful submission removed the old pending wake. Simulate a
+        // fresh wake trigger and age the real wall-clock cooldown separately:
+        // the GPUI clock below only controls its asynchronous timer.
+        workspace.update(cx, |ws, _| {
+            assert!(!ws.transcripts["fixture-thread"].is_running());
+            ws.project_schedule
+                .test_requeue_after_backoff(fixture.0.clone(), "controller".into());
+        });
+        // Drive real ticker iterations explicitly: one large jump could
+        // wake only one iteration of its repeating sleep.
+        for _ in 0..17 {
+            cx.executor().advance_clock(Duration::from_secs(2));
+            cx.run_until_parked();
+        }
+        workspace.update(cx, |ws, _| {
+            ws.project_schedule
+                .assert_test_wake_attempt_still_pending(fixture.0.clone(), "controller".into());
+        });
+        check_no_retry.send(()).unwrap();
+    }
     mock.join().unwrap();
-    assert!(
-        !Project::open(&fixture.0)
-            .unwrap()
-            .notice_delivery_blocked("controller")
+    let persisted = Project::open(&fixture.0).unwrap();
+    assert_eq!(persisted.notice_delivery_uncertain("controller"), rpc_error);
+    assert_eq!(
+        persisted.stream("controller").unwrap().notices_seen,
+        if rpc_error { 0 } else { 1 }
     );
+    drop(persisted);
     drop(workspace);
+    cx.run_until_parked();
+    if rpc_error {
+        assert_reopened_workspace_holds_notice(cx, &fixture.0);
+    }
+}
+
+fn assert_reopened_workspace_holds_notice(cx: &mut TestAppContext, root: &PathBuf) {
+    // A new entity and transport read the same temporary disk state via real
+    // startup initialization. This is not a process crash or remote replay.
+    let (client, mock) = UnixStream::pair().unwrap();
+    let (connection, _incoming) =
+        Connection::new(BufReader::new(client.try_clone().unwrap()), client);
+    mock.set_read_timeout(Some(Duration::from_millis(250)))
+        .unwrap();
+    let reopened = cx.new(|cx| {
+        let mut ws = Workspace::with_settings(Settings {
+            projects: vec![root.clone()],
+            ..Default::default()
+        });
+        ws.client = Some(CodexClient::over(connection));
+        ws.transcripts
+            .insert("fixture-thread".into(), Transcript::new());
+        ws.init_projects(cx);
+        // Simulate a later wake trigger; a new scheduler has no old cooldown.
+        ws.project_schedule
+            .test_queue_first_wake(root.clone(), "controller".into());
+        ws
+    });
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+    reopened.update(cx, |ws, _| {
+        ws.project_schedule
+            .assert_test_wake_attempt_still_pending(root.clone(), "controller".into());
+    });
+    let mut unexpected = String::new();
+    match BufReader::new(mock).read_line(&mut unexpected) {
+        Err(error)
+            if unexpected.is_empty()
+                && matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+        result => {
+            panic!("expected live reopened transport with no resend: {result:?}, {unexpected:?}")
+        }
+    }
+    let persisted = Project::open(root).unwrap();
+    assert!(persisted.notice_delivery_uncertain("controller"));
+    assert_eq!(persisted.stream("controller").unwrap().notices_seen, 0);
+    assert_eq!(persisted.unread("controller").len(), 1);
 }

@@ -54,16 +54,20 @@ jobs:
       - name: Workspace tests including scheduler and native protocol
         run: |
           cargo +stable test --workspace --locked --features atrium-app/workspace-ticker-test \
-            -- --skip workspace::ticker_test::scheduler_tick_sends_notice_and_commits_rpc_acceptance
+            -- --skip workspace::ticker_test::scheduler_tick_sends_notice_and_commits_rpc_acceptance \
+            --skip workspace::ticker_test::scheduler_tick_holds_notice_on_rpc_error_and_does_not_retry
       - name: Headless Workspace ticker with mock RPC
         timeout-minutes: 12
         run: |
           set -o pipefail
-          test_name=workspace::ticker_test::scheduler_tick_sends_notice_and_commits_rpc_acceptance
           test_log="$RUNNER_TEMP/atrium-workspace-ticker.log"
-          cargo +stable test --workspace --locked --features atrium-app/workspace-ticker-test \
-            "$test_name" -- --exact --nocapture | tee "$test_log"
-          grep -Fx "test $test_name ... ok" "$test_log"
+          for test_name in \
+            workspace::ticker_test::scheduler_tick_sends_notice_and_commits_rpc_acceptance \
+            workspace::ticker_test::scheduler_tick_holds_notice_on_rpc_error_and_does_not_retry; do
+            cargo +stable test --workspace --locked --features atrium-app/workspace-ticker-test \
+              "$test_name" -- --exact --nocapture | tee -a "$test_log"
+            grep -Fx "test $test_name ... ok" "$test_log"
+          done
       - name: Build scripted agents (no real accounts)
         run: cargo +stable build -p codex-client --bin mock-codex -p acp-client --bin mock-acp --locked
       - name: Native remote clients with scripted agents
