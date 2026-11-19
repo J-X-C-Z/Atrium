@@ -508,6 +508,9 @@ pub struct ProjectFile {
     pub reported_tasks: Vec<String>,
     /// Running without the user: see [`Autopilot`].
     pub autopilot: Autopilot,
+    /// Each lead and pool worker works in its own git worktree
+    /// ([`Project::worktree_dir`]) on its own branch ([`Project::branch_of`]).
+    pub worktrees: bool,
 }
 
 /// How a project keeps going around the clock without the user, after
@@ -561,6 +564,7 @@ impl Default for ProjectFile {
             approved: Vec::new(),
             reported_tasks: Vec::new(),
             autopilot: Autopilot::default(),
+            worktrees: false,
         }
     }
 }
@@ -760,6 +764,30 @@ impl Project {
         self.stamp = None;
         self.reload();
         Ok(format!("{owner}/{id}"))
+    }
+
+    /// Where workstream `id` works when the project uses worktrees:
+    /// `.atrium/worktrees/<id>`, kept out of git by the project's exclude file.
+    pub fn worktree_dir(&self, id: &str) -> PathBuf {
+        self.dir().join("worktrees").join(id)
+    }
+
+    /// The branch of workstream `id`'s worktree: `atrium/<id>`.
+    pub fn branch_of(id: &str) -> String {
+        format!("atrium/{id}")
+    }
+
+    /// The folder workstream `id`'s session runs in: its worktree when the
+    /// project uses them, the project root otherwise.
+    pub fn work_dir(&self, id: &str) -> PathBuf {
+        let own = self.stream(id);
+        // The controller only plans; it stays in the main checkout.
+        let isolated = self.file.worktrees && own.is_some_and(|s| s.role != Role::Controller);
+        if isolated {
+            self.worktree_dir(id)
+        } else {
+            self.root.clone()
+        }
     }
 
     pub fn controller(&self) -> Option<&Workstream> {
@@ -1555,6 +1583,26 @@ mod tests {
         project.stream_mut("web").unwrap().reported = true;
         assert!(project.unreported().is_empty());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn worktrees_are_per_workstream_except_the_controller() {
+        let mut project = Project {
+            root: PathBuf::from("/r"),
+            ..Default::default()
+        };
+        let mut boss = stream("boss", &[]);
+        boss.role = Role::Controller;
+        project.file.streams.push(boss);
+        project.file.streams.push(stream("web", &["web/**"]));
+        assert_eq!(project.work_dir("web"), PathBuf::from("/r"));
+        project.file.worktrees = true;
+        assert_eq!(
+            project.work_dir("web"),
+            PathBuf::from("/r/.atrium/worktrees/web")
+        );
+        assert_eq!(project.work_dir("boss"), PathBuf::from("/r"));
+        assert_eq!(Project::branch_of("web"), "atrium/web");
     }
 
     #[test]

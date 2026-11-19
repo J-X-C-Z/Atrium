@@ -247,7 +247,9 @@ cargo test --workspace
 
 ## 下一步
 
-- 每条工作线可选独立 git worktree；中庭写入的 MCP 工具（发公告、更新状态），让写入更规范
-- 编排内核独立为 daemon，Hub MCP 实现跨后端派单与回执
-- ACP agent 的插话（Claude 支持 prompt 排队）、agent 内登录（`authenticate`）
-- 场景（Scene）配置与网格面板
+借鉴 Claude 桌面版（[文档](https://code.claude.com/docs/en/desktop.md)）：
+
+- 已做：系统通知（没在看的对话做完、失败、需要你时弹出，设置里可关）；改动面板（`Ctrl/⌘+Shift+D`，按文件看 diff、点行写批注、一次发回给 agent）
+- 交给 Codex：每条工作线独立 worktree（[`docs/worktree-implementation.md`](docs/worktree-implementation.md)）；手机通过 tailnet 查看和批准（[`docs/remote-view-implementation.md`](docs/remote-view-implementation.md)，网页部分由界面这边做）
+- 之后：分屏和多窗口同时看几条工作线；每条工作线的后台任务面板（正在跑的命令、子 agent）；负责人建议的下一批任务一键开工；PR 与 CI 状态挂在负责人卡片上；前端负责人的应用预览截图；按文件夹记住权限模式；保存的环境（文件夹 + 环境变量）；统一管理所有 agent 的 MCP 和 skill；对话显示档位（普通 / 思考 / 详细）；上下文卡片里的"压缩"按钮
+- 原有：中庭写入的 MCP 工具已完成；编排内核独立为 daemon；ACP agent 的插话、agent 内登录；场景（Scene）配置与网格面板

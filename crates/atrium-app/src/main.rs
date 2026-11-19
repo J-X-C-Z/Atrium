@@ -2,6 +2,7 @@
 //! session works on its own; the atrium is where they share and align.
 
 mod agents;
+mod alerts;
 mod i18n;
 use atrium_project as project;
 mod settings;
@@ -16,7 +17,7 @@ use gpui::{
 
 use ui::{
     AttachFiles, CompactChat, FocusComposer, NewChat, OpenPalette, OpenSettings, Quit, Reconnect,
-    ReviewChanges, RootView, ShowContext, StopTurn, ToggleSidebar,
+    ReviewChanges, RootView, ShowContext, StopTurn, ToggleChanges, ToggleSidebar,
 };
 
 fn main() {
@@ -79,6 +80,8 @@ fn main() {
                 KeyBinding::new("cmd-shift-a", AttachFiles, None),
                 KeyBinding::new("cmd-i", ShowContext, None),
                 KeyBinding::new("ctrl-i", ShowContext, None),
+                KeyBinding::new("cmd-shift-d", ToggleChanges, None),
+                KeyBinding::new("ctrl-shift-d", ToggleChanges, None),
                 KeyBinding::new("cmd-.", StopTurn, None),
                 KeyBinding::new("ctrl-.", StopTurn, None),
                 KeyBinding::new("cmd-q", Quit, None),
@@ -152,6 +155,7 @@ pub fn set_menus(cx: &mut App) {
                 MenuItem::action(t("Focus Composer"), FocusComposer),
                 MenuItem::action(t("Stop Answer"), StopTurn),
                 MenuItem::action(t("Context & Speed"), ShowContext),
+                MenuItem::action(t("Changes"), ToggleChanges),
                 MenuItem::separator(),
                 MenuItem::action(t("Review Uncommitted Changes"), ReviewChanges),
                 MenuItem::action(t("Compact Conversation"), CompactChat),

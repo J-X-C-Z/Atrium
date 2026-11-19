@@ -123,6 +123,10 @@ pub struct Workspace {
     /// Counts the user's moves between chats and project views, so the
     /// main column can play its entrance on a move and not on other changes.
     pub nav: u64,
+    /// Whether Atrium's window has focus: with it, the shown thread does
+    /// not notify.
+    pub window_active: bool,
+    alerts: crate::alerts::Alerts,
     transcripts: HashMap<String, Transcript>,
     /// The draft's transcript, shown while its thread is being created.
     draft: Transcript,
@@ -201,6 +205,8 @@ impl Workspace {
             threads: Vec::new(),
             view: View::Draft,
             nav: 0,
+            window_active: true,
+            alerts: Default::default(),
             transcripts: HashMap::new(),
             draft: Transcript::new(),
             loading: HashSet::new(),
@@ -390,6 +396,7 @@ impl Workspace {
         }
         self.time(&event);
         self.watch_streams(&event, cx);
+        self.alert(&event);
         match &event {
             AgentEvent::PredictionUpdated { thread_id, text } => {
                 self.set_prediction(thread_id, text.clone());
@@ -512,6 +519,37 @@ impl Workspace {
             transcript.apply(&event);
             self.note_births(&thread_id, before);
         }
+    }
+
+    /// A system notification for `event` when it concerns a conversation
+    /// the user is not looking at.
+    fn alert(&mut self, event: &AgentEvent) {
+        let Some((thread, alert)) = crate::alerts::alert_for(event) else {
+            return;
+        };
+        let shown = self.window_active && self.active_thread_id() == Some(thread);
+        if self.settings.quiet_notifications || shown || self.loading.contains(thread) {
+            return;
+        }
+        if !self.alerts.allow(thread, alert, Instant::now()) {
+            return;
+        }
+        let stream = self.projects.iter().find_map(|p| {
+            p.file
+                .streams
+                .iter()
+                .find(|s| s.thread_id.as_deref() == Some(thread))
+                .map(|s| format!("{} · {}", p.file.name, s.name))
+        });
+        let title = stream.unwrap_or_else(|| {
+            self.threads
+                .iter()
+                .find(|t| t.id == thread)
+                .map(|t| t.name.clone().unwrap_or_else(|| t.preview.clone()))
+                .unwrap_or_else(|| "Atrium".into())
+        });
+        let title: String = title.chars().take(80).collect();
+        crate::alerts::show(&title, t(alert.body()));
     }
 
     /// Records when rows past `before` appeared in the transcript under `key`.
