@@ -1,0 +1,25 @@
+#[allow(dead_code)] #[path="__CURRENT_PROJECT__"] mod current;
+#[allow(dead_code)] mod old_project;
+use current::notice_delivery::NoticePreparation;
+#[allow(dead_code,unused_imports)] mod old_config;
+#[allow(dead_code,unused_imports)] mod new_config;
+fn main(){
+ let legacy: new_config::Config=toml::from_str("keep_output_bytes=268435456").unwrap();assert_eq!(legacy.total_input_bytes,256*1024*1024);
+ assert!(toml::from_str::<old_config::Config>("total_input_bytes=268435456").unwrap_err().to_string().contains("unknown field"));
+ println!("CONFIRMED: old configuration loads with new defaults; old configuration schema refuses new input-budget field");
+ let root=std::env::temp_dir().join(format!("atrium-compat-{}",uuid::Uuid::new_v4()));
+ std::fs::create_dir(&root).unwrap();
+ let mut p=current::Project::open(&root).unwrap();
+ p.file.streams.push(current::Workstream{id:"lead".into(),thread_id:Some("fixture".into()),..Default::default()});p.save().unwrap();
+ p.post("atrium",vec!["lead".into()],"synthetic notice").unwrap();
+ assert!(matches!(p.prepare_notice_delivery("lead","fixture").unwrap(),NoticePreparation::Ready{..}));
+ assert!(current::Project::open(&root).unwrap().notice_delivery_blocked("lead"));
+ let old=old_project::Project::open(&root).unwrap();old.save().unwrap();
+ let mut reopened=current::Project::open(&root).unwrap();
+ assert!(!reopened.notice_delivery_blocked("lead"));
+ assert!(matches!(reopened.prepare_notice_delivery("lead","fixture").unwrap(),NoticePreparation::Ready{..}));
+ println!("CONFIRMED: old writer save removes unresolved reservation; new reopened model permits another attempt");
+ // The still-running new process retains its old in-memory lease; disk and live state disagree.
+ assert!(p.notice_delivery_blocked("lead"));
+ std::fs::remove_dir_all(root).unwrap();
+}

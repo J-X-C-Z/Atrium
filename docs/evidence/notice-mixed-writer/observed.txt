@@ -1,0 +1,8 @@
+Observed against published 30a5c029 model and git 37c86bfe old Project source.
+Linux x86_64, Rust 1.100.0, independent offline release harness.
+No real project or account. The test does not perform a remote dispatch.
+CONFIRMED: old writer save removes unresolved reservation; new reopened model permits another attempt
+The original current-model instance still reports blocked, demonstrating live/disk disagreement.
+This is a model interoperability failure, not evidence that a remote command was replayed.
+Final portable reproduction also checks b14819a old Config definitions and current definitions (hostname stub only):
+CONFIRMED: old configuration loads with new defaults; old configuration schema refuses new input-budget field

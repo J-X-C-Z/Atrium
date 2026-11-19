@@ -3,8 +3,7 @@
 Review baseline: `37c86bfe` (the published source being reviewed). This matrix
 separates implementation from validation environments. A workflow definition,
 passing Linux test, cross-compilation, or older macOS run does not establish a
-passing macOS CI run for this revision. Subsequent unpublished state-machine
-work is **not** counted as a delivered fix here.
+passing macOS CI run for this revision. The historical baseline is preserved below; the final section records the subsequent `30a5c029` isolated macOS acceptance and restoration to 12/20. No live GUI acceptance is implied.
 
 ## Original 20-package baseline: denominator unchanged
 
@@ -98,4 +97,6 @@ acceptance complete merely because isolated macOS CI succeeds.
 
 ## Follow-up delivery changes, separately gated
 
-The subsequent notice journal, typed ACP outcomes and Workspace hooks have separate model/helper and mock validation described in [notice-delivery-recovery.md](notice-delivery-recovery.md) and [notice-dispatch-hooks.md](notice-dispatch-hooks.md). They are not part of the `37c86bfe` baseline above. Their exact-head macOS app compilation/CI and live Workspace acceptance must be recorded before changing the reopened package status. The explicit uncertain-delivery resolution remains a backend API, not a newly wired frontend control.
+The subsequent notice journal, typed ACP outcomes and Workspace hooks have separate model/helper and mock validation described in [notice-delivery-recovery.md](notice-delivery-recovery.md) and [notice-dispatch-hooks.md](notice-dispatch-hooks.md). They are not part of the `37c86bfe` baseline above. Their exact-head macOS app compilation/CI is recorded below. Live Workspace acceptance remains a separate requirement under original package 17; it was not part of package 12's original isolated debounce/edit scope. The explicit uncertain-delivery resolution remains a backend API, not a newly wired frontend control.
+
+The `30a5c029` follow-up completed full macOS CI successfully in [run 44474442418](https://github.com/J-X-C-Z/Atrium/actions/runs/44474442418), including app/workspace compilation/tests and explicit native mocks. This closes its compile-check gap, not live Workspace ticker/window acceptance or the frontend resolution-control gap. The separate opt-in ticker candidate is unpublished and has not run. Under the original isolated macOS scope, package 12 is restored: the original debounce/edit-draft isolation tests and five production dispatch-helper tests passed in the app's 58-test run, alongside the fault-model and native-client checks. Current accepted count is therefore **12/20 = 60% on the unchanged isolated checklist**, not code rewritten or GUI acceptance. The 11/20 review at the `37c86bfe` baseline remains recorded above. Real ticker/window/provider acceptance remains package 17, still incomplete.

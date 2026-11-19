@@ -52,3 +52,5 @@ These tests do **not** compile the GPUI Workspace glue or exercise actual
 window callbacks. Cloud `cargo check -p atrium-app --offline` is blocked before
 app compilation by an uncached `accesskit v0.24.1`; macOS app CI remains
 necessary. No real model account, system service or second device is used.
+
+Exact published revision `30a5c029` subsequently passed the full [macOS acceptance run 44474442418](https://github.com/J-X-C-Z/Atrium/actions/runs/44474442418), including actual app/workspace compilation and existing tests. This is distinct from the local missing-dependency check above. It does not prove live Workspace timer/window callbacks or add a reachable frontend recovery control.
