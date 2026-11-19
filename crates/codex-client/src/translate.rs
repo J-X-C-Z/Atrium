@@ -296,7 +296,8 @@ fn file_change(change: &Value) -> FileChange {
         Some("add") => ChangeKind::Add,
         Some("delete") => ChangeKind::Delete,
         _ => ChangeKind::Update {
-            move_to: opt_s(&change["kind"], "move_path"),
+            move_to: opt_s(&change["kind"], "move_path")
+                .or_else(|| opt_s(&change["kind"], "movePath")),
         },
     };
     FileChange {
@@ -636,6 +637,15 @@ mod tests {
             matches!(&patch, Item::FileChange { changes, .. } if changes[0].kind == ChangeKind::Update { move_to: None })
         );
 
+        let renamed = file_change(
+            &json!({"path": "a.rs", "kind": {"type": "update", "movePath": "../b.rs"}}),
+        );
+        assert_eq!(
+            renamed.kind,
+            ChangeKind::Update {
+                move_to: Some("../b.rs".into())
+            }
+        );
         let user = item(&json!({
             "type": "userMessage", "id": "u", "clientId": null,
             "content": [{"type": "text", "text": "hello", "text_elements": []}, {"type": "localImage", "path": "/x.png"}]

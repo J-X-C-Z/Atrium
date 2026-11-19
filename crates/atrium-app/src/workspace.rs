@@ -383,6 +383,12 @@ impl Workspace {
             Incoming::Notification { method, params } => translate::event(&method, &params),
             Incoming::Request { id, method, params } => {
                 let event = translate::request(&id, &method, &params);
+                if let Some(AgentEvent::ApprovalRequested(req)) = &event {
+                    self.apply(AgentEvent::ApprovalRequested(req.clone()), cx);
+                    self.local_pilot_approval(req, &params, cx);
+                    cx.notify();
+                    return;
+                }
                 if event.is_none() {
                     log::warn!("declining unsupported server request {method}");
                     if let Some(client) = &self.client {
@@ -413,6 +419,7 @@ impl Workspace {
         }
         self.time(&event);
         self.watch_streams(&event, cx);
+        self.pilot_event(&event);
         self.alert(&event);
         match &event {
             AgentEvent::PredictionUpdated { thread_id, text } => {
@@ -517,6 +524,7 @@ impl Workspace {
                     .map(|t| t.id.clone())
                     .collect();
                 for id in codex {
+                    self.pilot_failure(&id, true);
                     self.turn_started.remove(&id);
                     if let Some(transcript) = self.transcripts.get_mut(&id) {
                         transcript.apply(&event);
@@ -801,6 +809,7 @@ impl Workspace {
                         ws.load_goal(thread_id, cx);
                     }
                     Err(error) => {
+                        ws.pilot_failure(&thread_id, true);
                         let mut transcript = Transcript::new();
                         transcript.fail_pending_turn(tf(
                             "Could not open this chat: {error}",
@@ -830,7 +839,19 @@ impl Workspace {
         .detach();
     }
 
+    fn project_access_mode(&self, unattended: bool) -> AccessMode {
+        match (unattended, self.settings.mode) {
+            (true, AccessMode::FullAccess) => AccessMode::Auto,
+            (_, mode) => mode,
+        }
+    }
+
     fn turn_request(&self, composed: &Composed) -> TurnRequest {
+        let unattended = self
+            .active_thread_id()
+            .and_then(|id| self.stream_of(id))
+            .is_some_and(|(p, _)| p.file.autopilot.on);
+        let mode = self.project_access_mode(unattended);
         // A device's Codex keeps its own model settings: the models listed
         // here are this machine's.
         if self.is_remote_view() {
@@ -840,7 +861,7 @@ impl Workspace {
                 mentions: composed.mentions.clone(),
                 model: None,
                 effort: None,
-                mode: Some(self.settings.mode),
+                mode: Some(mode),
                 service_tier: None,
                 plan_mode: false,
             };
@@ -856,7 +877,7 @@ impl Workspace {
             mentions: composed.mentions.clone(),
             model,
             effort: self.settings.effort.clone(),
-            mode: Some(self.settings.mode),
+            mode: Some(mode),
             service_tier: self.settings.fast.then(|| self.fast_tier()).flatten(),
             plan_mode: self.settings.plan_mode,
         }
@@ -895,7 +916,10 @@ impl Workspace {
 
     /// Asks for a guess at the user's next message after `turn_id`.
     fn predict(&mut self, thread_id: String, turn_id: String, cx: &mut Context<Self>) {
-        if self.settings.no_predictions
+        if self
+            .stream_of(&thread_id)
+            .is_some_and(|(p, _)| p.file.autopilot.on)
+            || self.settings.no_predictions
             || self.prediction_forks.values().any(|(t, _)| *t == thread_id)
         {
             return;
@@ -1338,6 +1362,16 @@ impl Workspace {
         target: Option<&NoticeTarget>,
         cx: &mut Context<Self>,
     ) -> NoticeSendResult {
+        self.send_turn(composed, target, false, cx)
+    }
+
+    fn send_turn(
+        &mut self,
+        composed: Composed,
+        target: Option<&NoticeTarget>,
+        reactivate: bool,
+        cx: &mut Context<Self>,
+    ) -> NoticeSendResult {
         if target
             .is_some_and(|target| !matches!(&self.view, View::Thread(id) if id == &target.thread))
         {
@@ -1398,6 +1432,13 @@ impl Workspace {
                 self.turn_started.insert(thread_id.clone(), Instant::now());
                 cx.notify();
                 cx.spawn(async move |this, cx| {
+                    if reactivate
+                        && let Err(e) = client
+                            .goal_set(&thread_id, None, Some(GoalStatus::Active), None)
+                            .await
+                    {
+                        log::warn!("could not reactivate goal: {e:#}");
+                    }
                     let sent = client.turn_start(&thread_id, request).await;
                     let outcome = codex_notice_outcome(&sent, None);
                     let _ = this.update(cx, |ws, cx| {
@@ -1411,6 +1452,7 @@ impl Workspace {
                                     &[("error", &format!("{error:#}"))],
                                 ));
                             }
+                            ws.pilot_failure(&thread_id, false);
                             ws.turn_started.remove(&thread_id);
                             cx.notify();
                         });

@@ -305,6 +305,7 @@ impl Workspace {
                         .map(|t| t.id.clone())
                         .collect();
                     for id in ids {
+                        self.pilot_failure(&id, true);
                         if let Some(transcript) = self.transcripts.get_mut(&id) {
                             transcript.apply(&event);
                         }
@@ -733,6 +734,7 @@ impl Workspace {
                         }
                     }
                     Err(error) => {
+                        ws.pilot_failure(&session, true);
                         let transcript = ws.transcripts.entry(session.clone()).or_default();
                         transcript.fail_pending_turn(tf(
 "Could not open this chat: {error}", &[("error", &format!("{error:#}"))]));

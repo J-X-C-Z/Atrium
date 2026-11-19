@@ -32,6 +32,8 @@ use crate::{
 
 #[path = "workspace_worktrees.rs"]
 mod worktrees;
+#[path = "workspace_autopilot.rs"]
+mod autopilot;
 
 /// Where the user is: the everyday chats, or a project.
 #[derive(Clone, Debug, PartialEq)]
@@ -181,6 +183,7 @@ pub struct StreamView {
 #[derive(Default)]
 pub(super) struct ScheduleState {
     task_pool: pool::TaskPoolSchedule,
+    pilot: autopilot::Pilot,
     inhibitor: crate::sleep_inhibitor::SleepInhibitor,
     inhibitor_failed: bool,
     cleaning: HashSet<(PathBuf, String)>,
@@ -309,6 +312,7 @@ impl Workspace {
                 }
             }
         }
+        self.init_autopilot();
         if let Some(root) = self.settings.active_project.clone()
             && self.projects.iter().any(|p| p.root == root)
         {
@@ -412,7 +416,7 @@ impl Workspace {
                     cx.notify();
                     continue;
                 }
-                if decision != StartDecision::Start {
+                if decision != StartDecision::Start || !self.scheduler_turn_slot(&root) {
                     continue;
                 }
                 let Some(project) = self.project_mut(&root) else {
@@ -508,6 +512,7 @@ impl Workspace {
                 self.report_task(&root, &stream.id, cx);
                 self.project_schedule.pending.insert((root.clone(), parent));
             }
+            self.tick_autopilot(&root, cx);
             if changed {
                 cx.notify();
             }
@@ -516,6 +521,16 @@ impl Workspace {
         let pending: Vec<_> = self.project_schedule.pending.iter().cloned().collect();
         for (root, stream) in pending {
             let key = (root.clone(), stream.clone());
+            if let Some(p) = self
+                .projects
+                .iter()
+                .find(|p| p.root == root && p.file.autopilot.on)
+            {
+                if p.unread(&stream).is_empty() || p.stream(&stream).is_none_or(|s| s.retired) {
+                    self.project_schedule.pending.remove(&key);
+                }
+                continue;
+            }
             if !wake_allowed(
                 self.project_schedule.last_wake.get(&key).copied(),
                 Instant::now(),
@@ -724,7 +739,9 @@ impl Workspace {
     pub fn remove_project(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         self.previews.remove(&root);
         self.settings.preview_commands.remove(&root);
+        self.clear_autopilot(&root);
         self.projects.retain(|p| p.root != root);
+        self.update_sleep_request();
         self.settings.projects.retain(|p| *p != root);
         if self.project_root().as_ref() == Some(&root) {
             self.enter_chats(cx);
@@ -1010,6 +1027,14 @@ impl Workspace {
     ) {
         let backend = stream.backend.clone();
         let id = stream.id.clone();
+        let unattended = self.projects.iter().any(|p| p.root == root && p.file.autopilot.on);
+        if unattended && agents::split_backend(&backend).1.is_none()
+            && !cwd.canonicalize().ok().zip(root.canonicalize().ok())
+                .is_some_and(|(dir, root)| dir.is_dir() && dir.starts_with(root))
+        {
+            self.stream_failed(&root, &id, anyhow::anyhow!("unavailable or unauthorized project work directory"), cx);
+            return;
+        }
         if agents::is_codex(&backend) {
             let Some(client) = self.codex_for(&backend) else {
                 self.stream_failed(
@@ -1020,6 +1045,7 @@ impl Workspace {
                 );
                 return;
             };
+            let mode = self.project_access_mode(unattended);
             let options = StartThread {
                 cwd: Some(cwd.display().to_string()),
                 model: if agents::split_backend(&backend).1.is_some() {
@@ -1027,8 +1053,8 @@ impl Workspace {
                 } else {
                     self.settings.model.clone()
                 },
-                approval_policy: Some(self.settings.mode.approval_policy().into()),
-                sandbox: Some(self.settings.mode.sandbox_mode().into()),
+                approval_policy: Some(mode.approval_policy().into()),
+                sandbox: Some(mode.sandbox_mode().into()),
                 mcp_servers: {
                     let mut servers = self.user_mcp(&backend);
                     servers.extend(Self::mcp_servers(&root, &id, &backend));
@@ -1493,8 +1519,16 @@ impl Workspace {
             return;
         };
         if let Some(project) = self.project_mut(&root) {
+            let previous = project.file.autopilot.on;
             project.file.autopilot.on = on;
-            let _ = project.save();
+            if let Err(e) = project.save() {
+                project.file.autopilot.on = previous;
+                cx.emit(Notice::Error(format!("{e:#}")));
+                return;
+            }
+        }
+        if !on {
+            self.clear_autopilot(&root);
         }
         self.update_sleep_request();
         cx.notify();

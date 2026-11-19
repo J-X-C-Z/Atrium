@@ -24,15 +24,20 @@ impl Drop for Fixture {
 
 #[gpui::test(iterations = 1)]
 fn scheduler_tick_sends_notice_and_commits_rpc_acceptance(cx: &mut TestAppContext) {
-    exercise_notice_delivery(cx, false);
+    exercise_notice_delivery(cx, false, false);
 }
 
 #[gpui::test(iterations = 1)]
 fn scheduler_tick_holds_notice_on_rpc_error_and_does_not_retry(cx: &mut TestAppContext) {
-    exercise_notice_delivery(cx, true);
+    exercise_notice_delivery(cx, true, false);
 }
 
-fn exercise_notice_delivery(cx: &mut TestAppContext, rpc_error: bool) {
+#[gpui::test(iterations = 1)]
+fn unattended_notice_wake_uses_scoped_turn_and_durable_budget(cx: &mut TestAppContext) {
+    exercise_notice_delivery(cx, false, true);
+}
+
+fn exercise_notice_delivery(cx: &mut TestAppContext, rpc_error: bool, unattended: bool) {
     // Real socket I/O wakes the GPUI foreground task externally.
     cx.executor().allow_parking();
     let fixture = Fixture(
@@ -48,6 +53,8 @@ fn exercise_notice_delivery(cx: &mut TestAppContext, rpc_error: bool) {
         role: Role::Controller,
         ..Default::default()
     });
+    project.file.autopilot.on = unattended;
+    project.file.autopilot.daily_turns = 1;
     project.save().unwrap();
 
     let (client_socket, mut mock_socket) = UnixStream::pair().unwrap();
@@ -66,6 +73,16 @@ fn exercise_notice_delivery(cx: &mut TestAppContext, rpc_error: bool) {
         reader.read_line(&mut line).unwrap();
         let request: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(request["method"], "turn/start");
+        if unattended {
+            assert_eq!(request["params"]["sandboxPolicy"]["type"], "workspaceWrite");
+            assert_eq!(request["params"]["approvalPolicy"], "on-request");
+            assert!(
+                request["params"]["input"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Check-in:")
+            );
+        }
         assert_eq!(request["params"]["threadId"], "fixture-thread");
         assert!(
             request["params"]["input"][0]["text"]
@@ -106,6 +123,7 @@ fn exercise_notice_delivery(cx: &mut TestAppContext, rpc_error: bool) {
     });
 
     let settings = Settings {
+        mode: codex_client::AccessMode::FullAccess,
         projects: vec![fixture.0.clone()],
         ..Default::default()
     };
@@ -187,6 +205,13 @@ fn exercise_notice_delivery(cx: &mut TestAppContext, rpc_error: bool) {
         persisted.stream("controller").unwrap().notices_seen,
         if rpc_error { 0 } else { 1 }
     );
+    if unattended {
+        let day: Value = serde_json::from_slice(
+            &fs::read(fixture.0.join(".atrium/autopilot-turns.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(day["turns"], 1);
+    }
     drop(persisted);
     drop(workspace);
     cx.run_until_parked();

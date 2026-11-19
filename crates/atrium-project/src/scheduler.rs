@@ -14,11 +14,16 @@ pub struct StreamClock {
     last_event: Option<Instant>,
     idle_since: Option<Instant>,
     failures: u32,
+    resume_attempt: bool,
     stalled_task: Option<String>,
     stalls: u32,
     interrupting: bool,
     paused: bool,
     phase_at_start: Option<usize>,
+}
+
+pub fn retry_delay(attempt: u32) -> Duration {
+    minutes((1_u32 << attempt.saturating_sub(1).min(5)).min(30))
 }
 
 fn minutes(n: u32) -> Duration {
@@ -33,6 +38,7 @@ impl StreamClock {
     pub fn started(&mut self, now: Instant, phase: Option<usize>) {
         self.last_event = Some(now);
         self.due = None;
+        self.resume_attempt = false;
         self.idle_since = None;
         self.interrupting = false;
         self.paused = false;
@@ -89,14 +95,16 @@ impl StreamClock {
     }
 
     pub fn failed(&mut self, now: Instant) {
-        if self.finish_interrupt(now) || matches!(self.due, Some((_, Wake::Retry(_)))) {
+        if self.finish_interrupt(now)
+            || (!std::mem::take(&mut self.resume_attempt)
+                && matches!(self.due, Some((_, Wake::Retry(_)))))
+        {
             return;
         }
         self.failures = self.failures.saturating_add(1);
         self.stalls = 0;
         self.paused = false;
-        let delay = (1_u32 << (self.failures - 1).min(5)).min(30);
-        self.due = Some((now + minutes(delay), Wake::Retry(self.failures)));
+        self.due = Some((now + retry_delay(self.failures), Wake::Retry(self.failures)));
     }
 
     pub fn wake_due(
@@ -122,6 +130,11 @@ impl StreamClock {
             },
         };
         (now >= at).then_some(why)
+    }
+
+    pub fn resuming(&mut self) {
+        // Keep the retry reason for a successful resume; a failed resume is a fresh attempt.
+        self.resume_attempt = true;
     }
 
     /// New text may expedite a liveness wake, but never a retry or a restart.
@@ -169,6 +182,7 @@ impl Project {
         if !self.file.autopilot.on {
             return Ok(true);
         }
+        let _lock = crate::pool::TaskLock::take(self)?;
         let path = self.dir().join("autopilot-turns.json");
         let used = match fs::read(&path) {
             Ok(bytes) => {

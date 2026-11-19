@@ -427,6 +427,7 @@ impl Workspace {
                     reason: reason.clone(),
                 };
                 for id in ids {
+                    self.pilot_failure(&id, true);
                     self.turn_started.remove(&id);
                     if let Some(transcript) = self.transcripts.get_mut(&id) {
                         transcript.apply(&event);
