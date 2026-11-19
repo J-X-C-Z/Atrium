@@ -1054,6 +1054,17 @@ impl Project {
         if stream.thread_id.is_some() {
             return Ok(None);
         }
+        if stream.role == Role::Worker
+            && stream.task.is_none()
+            && let Some(parent) = &stream.parent
+        {
+            let held = self.task_of(&stream).map(Task::key);
+            if let Some(task) = &held {
+                self.record_start_failure(parent, task, (&stream.id, stream.created_at), reason)?;
+            }
+            self.retire_pool_worker(id, held.as_deref())?;
+            return Ok(held.map(|_| parent.clone()));
+        }
         if let (Some(task), Some(parent)) = (&stream.task, &stream.parent) {
             self.record_start_failure(parent, task, (&stream.id, stream.created_at), reason)?;
             if !self.task(task).is_some_and(|task| task.status.finished()) {
@@ -1654,7 +1665,7 @@ impl Project {
              Your scope: {scope}, unless a task names a narrower one. Do not change files outside it.\n\n\
              Read `{dir}/brief.md` and follow it. Do not edit the brief, the contracts, the plan or task files other than the one you hold, and do not start sub-agents.\n\n\
              The loop: do the task you hold, then `finish_task` with what you changed, how you checked it and anything left open (status `failed` with the reason if you cannot). `finish_task` claims your next task and gives it to you: carry straight on with it. Stop only when it says the pool is empty. Keep each task's work separate; do not rely on what you remember from earlier tasks without checking the files.\n\n\
-             Without the tools: claim a task by setting `status: running` and adding `claimed_by: {id}` under its title, in the first file whose `status:` is `open`, which has no `claimed_by:` and whose `after:` tasks are all `done`; finish it by adding `## Result` and setting `status: done`.\n\n\
+             Without the tools: work only on the task Atrium claimed for you. Finish it by adding `## Result` and setting `status: done` (or `failed` with the reason), keeping `claimed_by: {id}`. End your turn; Atrium assigns the next task.\n\n\
              {first}",
             id = stream.id,
             project = self.file.name,

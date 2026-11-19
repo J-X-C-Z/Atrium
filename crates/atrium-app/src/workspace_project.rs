@@ -1,6 +1,9 @@
 //! The workspace's project side: projects, their workstreams running side by
 //! side in the background, and the atrium they align through.
 
+#[path = "workspace_project_pool.rs"]
+mod pool;
+
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -174,6 +177,7 @@ pub struct StreamView {
 
 #[derive(Default)]
 pub(super) struct ScheduleState {
+    task_pool: pool::TaskPoolSchedule,
     cleaning: HashSet<(PathBuf, String)>,
     seen: HashMap<PathBuf, usize>,
     pending: HashSet<(PathBuf, String)>,
@@ -365,11 +369,7 @@ impl Workspace {
                 .cloned()
                 .collect();
             for task in tasks {
-                let running = self
-                    .stream_views_for(&root)
-                    .iter()
-                    .filter(|v| matches!(v.state, StreamState::Working | StreamState::Starting))
-                    .count();
+                let running = self.running_project_streams(&root);
                 let Some(project) = self.projects.iter().find(|p| p.root == root) else {
                     break;
                 };
@@ -409,6 +409,7 @@ impl Workspace {
                 }
                 self.start_stream(&root, stream, cx);
             }
+            self.tick_task_pools(&root, cx);
             let reports: Vec<_> = self
                 .projects
                 .iter()
@@ -751,6 +752,13 @@ impl Workspace {
             .file
             .streams
             .iter()
+            .filter(|s| {
+                !self
+                    .project_schedule
+                    .task_pool
+                    .starting
+                    .contains(&(root.clone(), s.id.clone()))
+            })
             .filter_map(|s| Some((s.thread_id.clone()?, s.backend.clone())))
             .collect();
         for (thread, backend) in threads {
@@ -862,13 +870,7 @@ impl Workspace {
         let Some(root) = self.project_root() else {
             return;
         };
-        if self
-            .stream_views_for(&root)
-            .iter()
-            .filter(|v| matches!(v.state, StreamState::Working | StreamState::Starting))
-            .count()
-            >= 12
-        {
+        if self.running_project_streams(&root) >= 12 {
             cx.emit(Notice::Error(
                 "The project already has 12 running workstreams.".into(),
             ));
@@ -924,17 +926,46 @@ impl Workspace {
         };
         let id = stream.id.clone();
         let title = format!("{} · {}", project.file.name, stream.name);
-        project.file.streams.push(stream.clone());
-        if let Err(error) = project.save() {
-            self.stream_failed(&root, &id, error, cx);
-            return;
+        let kickoff = if pool::is_pool_worker(&stream) {
+            match project.prepare_pool_start(&stream) {
+                Ok(Some(kickoff)) => kickoff,
+                Ok(None) => {
+                    // Another worker took the last task before we acquired the lock.
+                    if let Err(error) = project.retire_pool_worker(&id, None) {
+                        log::warn!("could not retire empty pool start: {error:#}");
+                    }
+                    return;
+                }
+                Err(error) => {
+                    self.stream_failed(&root, &id, error, cx);
+                    return;
+                }
+            }
+        } else {
+            project.file.streams.push(stream.clone());
+            if let Err(error) = project.save() {
+                self.stream_failed(&root, &id, error, cx);
+                return;
+            }
+            project.kickoff(&stream)
+        };
+        if pool::is_pool_worker(&stream) {
+            self.project_schedule
+                .task_pool
+                .starting
+                .insert((root.clone(), id.clone()));
         }
-        let kickoff = project.kickoff(&stream);
         let cwd = root.clone();
         cx.notify();
 
         if agents::is_codex(&backend) {
             let Some(client) = self.codex_for(&backend) else {
+                self.stream_failed(
+                    &root,
+                    &id,
+                    anyhow::anyhow!("backend {backend} disconnected"),
+                    cx,
+                );
                 return;
             };
             let options = StartThread {
@@ -993,6 +1024,10 @@ impl Workspace {
                         .flatten()
                 };
                 let _ = this.update(cx, |ws, cx| {
+                    ws.project_schedule
+                        .task_pool
+                        .starting
+                        .remove(&(root.clone(), id.clone()));
                     ws.upsert_thread(ThreadMeta {
                         name: Some(title.clone()),
                         backend: backend.clone(),
@@ -1003,18 +1038,25 @@ impl Workspace {
                         ws.goals.insert(thread.clone(), goal);
                     }
                     // The user may have removed it while goal setup was in flight.
-                    if ws
-                        .projects
-                        .iter()
-                        .any(|p| p.root == root && p.stream(&id).is_some())
-                    {
-                        ws.send_to_thread(thread.clone(), Composed::text(kickoff), cx);
+                    if ws.projects.iter().any(|p| {
+                        p.root == root
+                            && p.stream(&id).is_some_and(|s| {
+                                !s.retired && s.thread_id.as_ref() == Some(&thread)
+                            })
+                    }) {
+                        ws.send_stream_kickoff(&root, &id, thread, kickoff, cx);
                     }
                 });
             })
             .detach();
         } else {
             let Some(client) = self.acp(&backend) else {
+                self.stream_failed(
+                    &root,
+                    &id,
+                    anyhow::anyhow!("backend {backend} disconnected"),
+                    cx,
+                );
                 return;
             };
             let mut mcp = self.user_mcp(&backend);
@@ -1030,6 +1072,10 @@ impl Workspace {
                 let _ = this.update(cx, |ws, cx| {
                     let now = jiff::Timestamp::now().as_second();
                     let thread = start.session_id.clone();
+                    ws.project_schedule
+                        .task_pool
+                        .starting
+                        .remove(&(root.clone(), id.clone()));
                     ws.upsert_thread(ThreadMeta {
                         id: thread.clone(),
                         backend: backend.clone(),
@@ -1048,7 +1094,7 @@ impl Workspace {
                     }
                     ws.transcripts.insert(thread.clone(), Transcript::new());
                     match ws.attach_thread(&root, &id, &thread) {
-                        Ok(()) => ws.send_to_thread(thread, Composed::text(kickoff), cx),
+                        Ok(()) => ws.send_stream_kickoff(&root, &id, thread, kickoff, cx),
                         Err(error) => ws.stream_failed(&root, &id, error, cx),
                     }
                 });
@@ -1070,6 +1116,10 @@ impl Workspace {
         error: anyhow::Error,
         cx: &mut Context<Self>,
     ) {
+        self.project_schedule
+            .task_pool
+            .starting
+            .remove(&(root.clone(), stream.to_owned()));
         let mut wake_parent = None;
         if let Some(project) = self.project_mut(root) {
             match project.fail_start(stream, &format!("{error:#}")) {
@@ -1241,6 +1291,9 @@ impl Workspace {
         let Some(transcript) = self.transcripts.get(&thread) else {
             return false;
         };
+        if !transcript.is_running() && self.running_project_streams(root) >= 12 {
+            return false;
+        }
         if !wake_allowed(
             None,
             Instant::now(),

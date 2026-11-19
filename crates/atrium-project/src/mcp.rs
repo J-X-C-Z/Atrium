@@ -136,11 +136,14 @@ fn run(project: &mut Project, me: &str, name: &str, args: &Value) -> Result<Stri
                 .unwrap_or_default();
             project.create_tasks(me, &tasks)
         }
-        "claim_next" => Ok(match project.claim_next(me)? {
+        "claim_next" => Ok(match project.claim_from_disk(me)? {
             Some(task) => format!(
                 "Claimed for you:\n\n{}\n\nDo it, then `finish_task`; that hands you the next one.",
                 crate::agent::task_brief(&task)
             ),
+            None if project.pool_session_full(me) => {
+                "Session task limit reached. Stop here for a fresh worker.".into()
+            }
             None => {
                 "The pool is empty: nothing to claim. Stop here; you are woken if new tasks arrive."
                     .into()
@@ -185,7 +188,12 @@ fn run(project: &mut Project, me: &str, name: &str, args: &Value) -> Result<Stri
             }
             Ok(out)
         }
-        "finish_task" => project.finish_task(me, text("status") != "failed", &text("result")),
+        "finish_task" => project.finish_task_for(
+            me,
+            args["task"].as_str(),
+            text("status") != "failed",
+            &text("result"),
+        ),
         "notify" => project.notify(me, &list("to"), &text("text")),
         "read_notices" => project.notices_for(me, args["recent"].as_bool().unwrap_or(false)),
         "write_plan" => project.write_plan(me, &text("text")),
@@ -358,10 +366,11 @@ fn tools(target: &Target) -> Vec<Value> {
                 "End your task with a report. Your parent is told at once; stop working afterwards."
             },
             json!({
+                "task": { "type": "string", "description": "The owner/id from your claim. Reuse it if retrying this result." },
                 "status": { "type": "string", "enum": ["done", "failed"] },
                 "result": { "type": "string", "description": "What you changed, how you checked it, and anything left open (or why it failed)." }
             }),
-            &["status", "result"],
+            if pooled { &["task", "status", "result"] } else { &["status", "result"] },
         ));
     }
     tools.push(tool(

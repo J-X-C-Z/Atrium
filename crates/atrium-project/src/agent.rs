@@ -270,14 +270,21 @@ impl Project {
             .task_of(&own)
             .cloned()
             .ok_or_else(|| anyhow!("You were not started for a task, so you have no roadmap."))?;
+        let _lock = crate::pool::TaskLock::take(self)?;
+        self.stamp = None;
+        self.reload();
+        let task = self
+            .task_of(&own)
+            .filter(|current| current.key() == task.key())
+            .context("Your task changed before the roadmap step could be saved.")?
+            .clone();
         let index = find_step(&task, step)?;
         let (phase_ix, _) = locate(&task, index);
         let was_done = task.phases[phase_ix].done();
         let path = self.root.join(task.rel_path());
         let text =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-        fs::write(&path, set_step(&text, index, done)?)
-            .with_context(|| format!("writing {}", path.display()))?;
+        crate::atomic_write(&path, set_step(&text, index, done)?.as_bytes())?;
         self.stamp = None;
         self.reload();
         let task = self.task(&task.key()).expect("still there").clone();
@@ -306,35 +313,85 @@ impl Project {
     /// Ends `me`'s task: writes `result` under `## Result` and sets the
     /// status. Atrium then tells the parent.
     pub fn finish_task(&mut self, me: &str, done: bool, result: &str) -> Result<String> {
+        let key = self.task_of(self.me(me)?).map(Task::key);
+        let lock = crate::pool::TaskLock::take(self)?;
+        self.stamp = None;
+        self.reload();
+        self.finish_locked(me, key.as_deref(), done, result, &lock)
+    }
+
+    /// A keyed MCP retry must never apply the previous result to the worker's next task.
+    pub(crate) fn finish_task_for(
+        &mut self,
+        me: &str,
+        key: Option<&str>,
+        done: bool,
+        result: &str,
+    ) -> Result<String> {
+        let observed = self.task_of(self.me(me)?).map(Task::key);
+        let lock = crate::pool::TaskLock::take(self)?;
+        *self = Self::load(&self.root)?;
+        self.finish_locked(me, key.or(observed.as_deref()), done, result, &lock)
+    }
+
+    fn finish_locked(
+        &mut self,
+        me: &str,
+        key: Option<&str>,
+        done: bool,
+        result: &str,
+        lock: &crate::pool::TaskLock,
+    ) -> Result<String> {
         let own = self.me(me)?.clone();
-        let task = self.task_of(&own).cloned().ok_or_else(|| {
-            anyhow!("You were not started for a task; post a notice to say you are done instead.")
-        })?;
+        let key = key.context(
+            "You were not started for a task; post a notice to say you are done instead.",
+        )?;
         if result.trim().is_empty() {
             bail!("Say what you did, how you checked it and what is left open.");
         }
         let pooled = own.role == Role::Worker && own.task.is_none();
-        let path = self.root.join(task.rel_path());
-        let lock = crate::pool::TaskLock::take(self)?;
-        let text =
-            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let task = self.task(key).context("Task no longer exists.")?.clone();
         let status = if done {
             TaskStatus::Done
         } else {
             TaskStatus::Failed
         };
+        if pooled && task.status.finished() && task.claimed_by.as_deref() == Some(me) {
+            anyhow::ensure!(
+                task.status == status && task.result.as_deref() == Some(result.trim()),
+                "A different result is already recorded for {key}."
+            );
+            return Ok(match self.task_of(&own) {
+                Some(held) => format!(
+                    "Result already recorded for `{key}`. Your current task:\n\n{}",
+                    task_brief(held)
+                ),
+                None => format!("Result already recorded for `{key}`. You have no current task."),
+            });
+        }
+        anyhow::ensure!(!pooled || !own.retired, "This worker is retired.");
+        anyhow::ensure!(
+            self.task_of(&own)
+                .is_some_and(|current| current.key() == key),
+            "You no longer hold {key}."
+        );
+        let path = self.root.join(task.rel_path());
+        let text =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         let text = with_status(&with_result(&text, result), status);
-        fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
-        drop(lock);
+        crate::atomic_write(&path, text.as_bytes())?;
         self.stamp = None;
         self.reload();
         if pooled {
             let done = format!("Marked `{}` {}.", task.rel_path(), status.word());
-            return Ok(match self.claim_next(me)? {
+            return Ok(match self.claim_next_locked(me, lock)? {
                 Some(next) => format!(
                     "{done} Your next task, claimed for you:\n\n{}\n\nDo it now, then `finish_task` again.",
                     task_brief(&next)
                 ),
+                None if self.pool_session_full(me) => {
+                    format!("{done} Session task limit reached. Stop here for a fresh worker.")
+                }
                 None => format!(
                     "{done} The pool is empty: nothing left to claim. Stop here; you are woken if new tasks arrive."
                 ),

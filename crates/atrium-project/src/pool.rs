@@ -19,7 +19,30 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 
-use crate::{DIR, Project, Role, Task, TaskStatus, Workstream, with_header, with_status};
+use crate::{
+    ATRIUM, DIR, Project, ProjectNotice, Role, Task, TaskStatus, Workstream, with_header,
+    with_status,
+};
+
+const POOL_RECEIPT: &str = "[Atrium pool receipt] ";
+
+fn receipt_keys(notice: &ProjectNotice, lead: &str) -> Option<Vec<String>> {
+    if notice.from != ATRIUM
+        || notice.to != [lead]
+        || !notice.text.starts_with("[Atrium] Your task pool is ")
+    {
+        return None;
+    }
+    let encoded = notice.text.lines().last()?.strip_prefix(POOL_RECEIPT)?;
+    let keys: Vec<String> = serde_json::from_str(encoded).ok()?;
+    let prefix = format!("{lead}/");
+    (!keys.is_empty()
+        && keys.iter().all(|key| {
+            key.strip_prefix(&prefix)
+                .is_some_and(|id| !id.is_empty() && !id.contains('/'))
+        }))
+    .then_some(keys)
+}
 
 /// Held while task files are read and rewritten; released on drop.
 pub struct TaskLock {
@@ -204,28 +227,66 @@ impl Project {
         })
     }
 
+    /// Stops a session between tasks, including the automatic claim in MCP finish_task.
+    pub fn pool_session_full(&self, worker: &str) -> bool {
+        let limit = self.file.autopilot.tasks_per_session;
+        limit > 0
+            && self
+                .tasks
+                .iter()
+                .filter(|t| t.claimed_by.as_deref() == Some(worker) && t.status.finished())
+                .take(limit)
+                .count()
+                == limit
+    }
+
+    /// Persist the worker before claiming, and only construct a kickoff with a real claim.
+    pub fn prepare_pool_start(&mut self, worker: &Workstream) -> Result<Option<String>> {
+        anyhow::ensure!(self.stream(&worker.id).is_none(), "worker already exists");
+        self.file.streams.push(worker.clone());
+        if let Err(error) = self.save() {
+            self.file.streams.pop();
+            return Err(error);
+        }
+        Ok(self.claim_next(&worker.id)?.map(|_| self.kickoff(worker)))
+    }
+
     /// Claims the next task of `me`'s lead for `me`, atomically. A worker
     /// that already holds a task gets that one back. `None` when the pool
     /// has nothing to claim.
     pub fn claim_next(&mut self, me: &str) -> Result<Option<Task>> {
+        let lock = TaskLock::take(self)?;
+        self.stamp = None;
+        self.reload();
+        self.claim_next_locked(me, &lock)
+    }
+
+    // MCP processes do not own project.json. Resolve their identity after locking,
+    // including retirement/removal since the tool call loaded the project.
+    pub(crate) fn claim_from_disk(&mut self, me: &str) -> Result<Option<Task>> {
+        let lock = TaskLock::take(self)?;
+        *self = Self::load(&self.root)?;
+        self.claim_next_locked(me, &lock)
+    }
+
+    pub(crate) fn claim_next_locked(&mut self, me: &str, _lock: &TaskLock) -> Result<Option<Task>> {
         let own = self
             .stream(me)
-            .cloned()
             .with_context(|| format!("`{me}` is not a workstream of this project"))?;
-        if own.role != Role::Worker || own.task.is_some() {
-            bail!("Only pool sub-agents claim tasks.");
+        if own.retired || own.role != Role::Worker || own.task.is_some() {
+            bail!("Only active pool sub-agents claim tasks.");
         }
         let lead = own
             .parent
-            .clone()
+            .as_deref()
             .context("a pool sub-agent needs a lead")?;
-        let _lock = TaskLock::take(self)?;
-        self.stamp = None;
-        self.reload();
-        if let Some(held) = self.task_of(&own) {
+        if let Some(held) = self.task_of(own) {
             return Ok(Some(held.clone()));
         }
-        let Some(task) = self.claimable(&lead).first().map(|t| (*t).clone()) else {
+        if self.pool_session_full(me) {
+            return Ok(None);
+        }
+        let Some(task) = self.claimable(lead).first().map(|t| (*t).clone()) else {
             return Ok(None);
         };
         let path = self.root.join(task.rel_path());
@@ -236,7 +297,7 @@ impl Project {
             "claimed_by",
             Some(me),
         );
-        fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+        crate::atomic_write(&path, text.as_bytes())?;
         self.stamp = None;
         self.reload();
         Ok(self.task(&task.key()).cloned())
@@ -245,23 +306,102 @@ impl Project {
     /// Puts a claimed task back in the pool: its worker died or was retired
     /// before finishing it.
     pub fn release(&mut self, key: &str) -> Result<()> {
-        let _lock = TaskLock::take(self)?;
+        self.release_if_owner(key, None)
+    }
+
+    /// A stale scheduler snapshot cannot release a claim since handed to another worker.
+    pub fn release_if_owner(&mut self, key: &str, owner: Option<&str>) -> Result<()> {
+        let lock = TaskLock::take(self)?;
         self.stamp = None;
         self.reload();
-        let Some(task) = self.task(key).cloned() else {
+        self.release_locked(key, owner, &lock)
+    }
+
+    /// Recheck the observed claim under the same lock used by MCP to finish and claim.
+    /// Save retirement before release so restart can recover either side of the write.
+    pub fn retire_pool_worker(&mut self, id: &str, expected: Option<&str>) -> Result<bool> {
+        let lock = TaskLock::take(self)?;
+        self.stamp = None;
+        self.reload();
+        let worker = self.stream(id).context("missing pool worker")?;
+        anyhow::ensure!(
+            worker.role == Role::Worker && worker.task.is_none() && worker.parent.is_some(),
+            "not a pool worker"
+        );
+        let held = self.task_of(worker).map(Task::key);
+        if held.as_deref() != expected {
+            return Ok(false);
+        }
+        if !worker.retired {
+            self.stream_mut(id).unwrap().retired = true;
+            if let Err(error) = self.save() {
+                self.stream_mut(id).unwrap().retired = false;
+                return Err(error);
+            }
+        }
+        if let Some(key) = held {
+            self.release_locked(&key, Some(id), &lock)?;
+        }
+        Ok(true)
+    }
+
+    fn release_locked(&mut self, key: &str, owner: Option<&str>, _lock: &TaskLock) -> Result<()> {
+        let Some(task) = self.task(key) else {
             return Ok(());
         };
-        if task.status != TaskStatus::Running {
+        if task.status != TaskStatus::Running
+            || owner.is_some_and(|id| task.claimed_by.as_deref() != Some(id))
+        {
             return Ok(());
         }
         let path = self.root.join(task.rel_path());
         let text =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         let text = with_header(&with_status(&text, TaskStatus::Open), "claimed_by", None);
-        fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+        crate::atomic_write(&path, text.as_bytes())?;
         self.stamp = None;
         self.reload();
         Ok(())
+    }
+
+    /// Queue a digest once and acknowledge its task keys after delivery.
+    pub fn queue_pool_report(&mut self, lead: &str) -> anyhow::Result<bool> {
+        // Only accepted deliveries advance notices_seen. A queued receipt suppresses republication
+        // even after a restart or a save failure between delivery and bookkeeping.
+        let seen = self.stream(lead).map_or(0, |s| s.notices_seen);
+        let previous = self.file.reported_tasks.len();
+        let mut queued = Vec::new();
+        for (i, notice) in self.notices.iter().enumerate() {
+            if let Some(keys) = receipt_keys(notice, lead) {
+                if i >= seen {
+                    queued.extend(keys);
+                } else {
+                    for key in keys {
+                        if !self.file.reported_tasks.contains(&key) {
+                            self.file.reported_tasks.push(key);
+                        }
+                    }
+                }
+            }
+        }
+        if previous != self.file.reported_tasks.len()
+            && let Err(error) = self.save()
+        {
+            self.file.reported_tasks.truncate(previous);
+            return Err(error);
+        }
+        let pending = !queued.is_empty();
+        let report = self.pool_report_excluding(lead, &queued);
+        if let Some(report) = report {
+            let receipt = serde_json::to_string(&report.keys)?;
+            self.post(
+                ATRIUM,
+                vec![report.lead],
+                &format!("{}\n\n{POOL_RECEIPT}{receipt}", report.text),
+            )?;
+            return Ok(true);
+        }
+        Ok(pending)
     }
 
     /// Finished pool tasks of `lead` its lead has not been told about.
@@ -277,7 +417,12 @@ impl Project {
     /// to `refill_at` (one per worker by default) while results wait, or when
     /// a task failed. `None` while the pool is busy and healthy.
     pub fn pool_report(&self, lead: &str) -> Option<PoolReport> {
-        let finished = self.unreported_pool(lead);
+        self.pool_report_excluding(lead, &[])
+    }
+
+    fn pool_report_excluding(&self, lead: &str, queued: &[String]) -> Option<PoolReport> {
+        let mut finished = self.unreported_pool(lead);
+        finished.retain(|t| !queued.contains(&t.key()));
         if finished.is_empty() {
             return None;
         }
@@ -458,8 +603,172 @@ mod tests {
     }
 
     #[test]
-    fn claims_from_many_processes_never_collide() {
+    fn digest_is_published_once_and_recovered_before_delivery() {
+        use crate::notice_delivery::{NoticeOutcome, NoticePreparation};
+        let mut project = project("digest-recovery");
+        project.bind_thread("web", "lead-session").unwrap();
+        let root = project.root.clone();
+        project
+            .create_task(
+                "web",
+                &NewTask {
+                    title: "Layout".into(),
+                    goal: "Build the layout.".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let key = "web/layout".to_owned();
+        project.set_task_status(&key, TaskStatus::Failed).unwrap();
+
+        assert!(project.queue_pool_report("web").unwrap());
+        assert!(project.file.reported_tasks.is_empty());
+        let mut project = Project::load(&root).unwrap();
+        assert!(project.queue_pool_report("web").unwrap());
+        assert_eq!(project.notices.len(), 1);
+        let NoticePreparation::Ready { ticket, text } = project
+            .prepare_notice_delivery("web", "lead-session")
+            .unwrap()
+        else {
+            panic!("expected the queued digest");
+        };
+        assert!(text.contains("web/layout"));
+        assert!(
+            project
+                .settle_notice_delivery(&ticket, NoticeOutcome::Accepted)
+                .unwrap()
+        );
+
+        let metadata = project.dir().join("project.json");
+        let backup = project.dir().join("project-backup.json");
+        fs::rename(&metadata, &backup).unwrap();
+        fs::create_dir(&metadata).unwrap();
+        assert!(project.queue_pool_report("web").is_err());
+        assert!(project.file.reported_tasks.is_empty());
+        fs::remove_dir(&metadata).unwrap();
+        fs::rename(&backup, &metadata).unwrap();
+        let mut project = Project::load(&root).unwrap();
+        assert!(!project.queue_pool_report("web").unwrap());
+        assert_eq!(project.file.reported_tasks, [key]);
+        assert_eq!(project.notices.len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_pool_start_releases_before_replacement_and_stale_calls_cannot_take_it() {
+        let mut p = project("failed-start");
+        p.create_tasks("web", &[task("A"), task("B")]).unwrap();
+        let first = p.pool_worker("web", "codex").unwrap();
+        let kickoff = p.prepare_pool_start(&first).unwrap().unwrap();
+        assert!(kickoff.contains("Your first task, already claimed for you:"));
+        assert!(kickoff.contains("`web/a`"));
+        let mut stale = Project::load(&p.root).unwrap();
+        assert_eq!(stale.task_of(&first).unwrap().key(), "web/a");
+        assert_eq!(
+            p.fail_start(&first.id, "session refused")
+                .unwrap()
+                .as_deref(),
+            Some("web")
+        );
+        assert!(p.fail_start(&first.id, "same failure").unwrap().is_none());
+        assert_eq!(p.notices.len(), 1);
+        assert!(p.notices[0].text.contains("session refused"));
+        assert_eq!(p.task("web/a").unwrap().status, TaskStatus::Open);
+        let mut p = Project::load(&p.root).unwrap();
+        assert!(p.stream(&first.id).unwrap().retired);
+        let next = p.pool_worker("web", "claude").unwrap();
+        assert_ne!(next.id, first.id);
+        assert!(
+            p.prepare_pool_start(&next)
+                .unwrap()
+                .unwrap()
+                .contains("`web/a`")
+        );
+        stale.release_if_owner("web/a", Some(&first.id)).unwrap();
+        assert!(stale.claim_from_disk(&first.id).is_err());
+        assert!(
+            stale
+                .finish_task_for(&first.id, Some("web/a"), true, "late")
+                .is_err()
+        );
+        assert_eq!(stale.task_of(&next).unwrap().key(), "web/a");
+        fs::remove_dir_all(p.root).unwrap();
+    }
+
+    #[test]
+    fn six_tasks_two_workers_one_low_water_digest_and_keyed_mcp_replay() {
+        use crate::mcp::{Target, handle};
+        use serde_json::json;
+        let mut p = project("six");
+        p.file.autopilot.tasks_per_session = 2;
+        p.save().unwrap();
+        p.create_tasks("web", &["A", "B", "C", "D", "E", "F"].map(task))
+            .unwrap();
+        let a = p.pool_worker("web", "claude").unwrap();
+        p.prepare_pool_start(&a).unwrap().unwrap();
+        let b = p.pool_worker("web", "claude").unwrap();
+        p.prepare_pool_start(&b).unwrap().unwrap();
+        assert_eq!(p.workers_needed("web"), 0);
+        let target = Target {
+            root: p.root.clone(),
+            stream: a.id.clone(),
+        };
+        let finish = json!({"id":1,"method":"tools/call","params":{"name":"finish_task",
+            "arguments":{"task":"web/a","status":"done","result":"A checked"}}});
+        for _ in 0..2 {
+            let reply = handle(&target, &finish).unwrap();
+            assert!(
+                reply["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("`web/c`"),
+                "{reply}"
+            );
+        }
+        p = Project::load(&p.root).unwrap();
+        assert!(!p.retire_pool_worker(&a.id, Some("web/a")).unwrap());
+        assert!(!p.queue_pool_report("web").unwrap());
+        p.finish_task(&b.id, true, "B checked").unwrap();
+        assert!(!p.queue_pool_report("web").unwrap()); // two still ready
+        assert!(
+            p.finish_task(&a.id, true, "C checked")
+                .unwrap()
+                .contains("limit reached")
+        );
+        assert!(p.claim_next(&a.id).unwrap().is_none());
+        assert!(p.retire_pool_worker(&a.id, None).unwrap());
+        let c = p.pool_worker("web", "claude").unwrap();
+        assert!(
+            p.prepare_pool_start(&c)
+                .unwrap()
+                .unwrap()
+                .contains("`web/e`")
+        );
+        assert_eq!(p.pool("web").ready, ["web/f"]);
+        for _ in 0..2 {
+            assert!(p.queue_pool_report("web").unwrap());
+        }
+        assert_eq!(p.notices.len(), 1);
+        for result in ["A checked", "B checked", "C checked"] {
+            assert!(p.notices[0].text.contains(result));
+        }
+        p.finish_task(&b.id, true, "D checked").unwrap();
+        assert!(
+            p.finish_task(&c.id, true, "E checked")
+                .unwrap()
+                .contains("`web/f`")
+        );
+        p.finish_task(&c.id, true, "F checked").unwrap();
+        let final_pool = Project::load(&p.root).unwrap().pool("web");
+        assert!(final_pool.drained());
+        assert_eq!(final_pool.done, 6);
+        fs::remove_dir_all(p.root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_workers_never_claim_the_same_task() {
         let mut p = project("race");
+        p.file.autopilot.tasks_per_session = 0;
         let tasks: Vec<NewTask> = (0..12).map(|i| task(&format!("T{i:02}"))).collect();
         p.create_tasks("web", &tasks).unwrap();
         let mut ids = Vec::new();
@@ -494,6 +803,7 @@ mod tests {
         assert!(p.tasks.iter().all(|t| t.status == TaskStatus::Done));
         all.sort();
         let before = all.len();
+        assert_eq!(before, 12);
         all.dedup();
         assert_eq!(before, all.len(), "no task was claimed twice");
         let _ = fs::remove_dir_all(&root);
