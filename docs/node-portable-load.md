@@ -127,53 +127,47 @@ The new macOS run must build and identify its own executable/archive; it is not
 assumed bit-identical to an earlier macOS artifact. Existing historical numbers
 are not attributed to the newly built macOS executable.
 
-## Fixed-rate 102.4-second release baseline
+## Fixed-window 102.4-second release baseline
 
 Run twice sequentially on the same runner and native release archive, with
-separate new output paths. A clean source build and matching expected archive
-SHA-256 are required. Compare repeats only within this identical profile.
+separate new output paths. A clean source build and expected archive SHA-256
+are required. Compare repeats only within this identical profile.
 
 ```sh
 python3 scripts/node-portable-load.py --archive NODE.tar.gz \
   --expected-sha256 TRUSTED_ARCHIVE_HASH --output NEW_BASELINE.json --paced-baseline
 ```
 
-The profile targets 40 echoes/s in total on two attachments, 20/s each, with
-at least 50 ms between send starts and at most one outstanding echo per client.
-It sends exactly 4,096 verified 16 KiB echoes (64 MiB input) across 32 rounds
-of 64 sends per client, reconnecting between rounds. Scheduling lag is carried forward, never skipped or caught up in a burst.
-The observed rate and accumulated drift are reported separately from nominal
-rate. Success requires all samples and a 102.4–120-second observed load window
-before shutdown and final replay checks. This is a paced closed-loop load,
-not a fixed-rate open-loop generator.
-The small retention setting is fixed: each cat retains eight data frames,
-reports gap 1–2,040, and emits terminal sequence 2,049.
+The profile schedules 4,096 nominal slots (40/s aggregate over 102.4 seconds,
+two clients at 20/s each), with 16 KiB payloads, one outstanding echo per
+client and reconnect after every 64 verified echoes. A slot remains eligible
+only for the first half of its 50 ms window. Missed slots are not replayed;
+the next opportunity stays anchored to the original monotonic epoch. The
+driver does not change TCP_NODELAY. CI requires at least half the slots per
+client and exact verification of every attempted echo, and the observed load
+window must stay between 102.4 and 120 seconds. Small retention is fixed:
+for each cat, verify the exact last eight frames, gap from 1 through its
+verified count minus eight, and terminal sequence verified count plus one.
 
-RTT samples start immediately before JSON encoding/masking and WebSocket send
-and stop after WebSocket receive/JSON decoding. Only the exact verified echo is
-counted. They include Python/socket overhead, local TCP, node and cat, but
-exclude pacing waits, payload construction, reconnect handshake and terminal
-replay. The report includes per-client and pooled nearest-rank p50/p95/p99 in
-milliseconds; it does not estimate provider latency or overloaded open-loop
-tail latency. CPU is the sampled node+cat cumulative delta divided by full
-job wall time (one-core percent), excluding the driver and potentially missing
-exit tails. The existing 180-second sampled watchdog, 512 MiB sampled RSS
-guard and owned-process cleanup apply.
+Report nominal slots, attempts, verified echoes, unoffered slots, per-client
+send intervals, sleep overshoot and attach duration (including first attach).
+RTT starts before encoding/masking/send and ends after receipt/JSON decode.
+It excludes pacing, payload construction, reconnect and terminal replay; only
+verified echoes enter the per-client and pooled nearest-rank p50/p95/p99.
+CPU and RSS use the same existing sampling and watchdog boundaries. These
+are paced closed-loop measurements, not an open-loop saturation test.
 
-For a later hosted Mac run, build and verify the native release archive once in
-the packaging job and run two paced repeats sequentially against that same
-archive/hash, with a 210-second per-driver outer timeout and exact checks for
-completed status, hash, 4,096 RTT samples, and at least 102.4 seconds observed.
-No new dependencies or permissions are needed. Without a production change
-these are repeated current baselines, not an A/B or a speedup claim.
+The older fixed-count profile moved each next send to at least 50 ms after
+the previous actual send, systematically accumulating recurring wake delay
+or slow echo/reconnect intervals. It passed two Linux repeats but exceeded
+its 120-second budget on macOS run 44514929797. That run retained no printed
+partial pacing report, so it cannot attribute the overrun to timer wakeup,
+the driver, transport or node. The fixed-window correction keeps the original
+120-second active cap and prints an allowlisted pacing summary even after a
+failed driver process if a report exists. Results from the two pacing
+policies are not comparable as performance gains.
 
-The initial two Linux paced repeats use clean source `a4282c99` and driver
-`7f7af947b04fd9ceabe9b66f0d0141b448e38fa63c00615801e49fd23721bc78`.
-Both verified 4,096 echoes with eight retained frames per cat. Observed load
-windows were 105.838 and 102.699 seconds; pooled RTT p50/p95/p99 were
-5.988/24.925/63.185 ms and 2.277/3.450/5.762 ms respectively. This variation is
-preserved rather than presented as an improvement. Eleven pure fixtures and
-independent source/report review passed. The macOS workflow now runs the two
-paced repeats against its newly built, verified native archive after the short
-cases. Its exact-head execution is pending; these Linux numbers do not predict
-hosted macOS or the user's device.
+macOS builds and verifies one native release archive and uses that same
+archive/hash for two sequential repeats, each guarded by its own 210-second
+outer timeout. Without production changes these are repeat baselines, not
+A/B comparisons or speedups.

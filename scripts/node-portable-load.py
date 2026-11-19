@@ -37,14 +37,33 @@ def rtt_summary(samples):
     }}
 
 
-def pace(slot_ns, limit_ns, clock=time.monotonic_ns, sleep=time.sleep):
-    while (remaining := slot_ns - clock()) > 0:
-        sleep(remaining / 1e9)
-    actual_ns = slot_ns - remaining
-    if actual_ns >= limit_ns:
-        raise RuntimeError('paced baseline exceeded the 120s load budget')
-    return actual_ns
+def timing_summary(samples):
+    return rtt_summary(samples) if samples else {'samples': 0}
 
+
+class Pacer:
+    """Absolute 50 ms slots. Discard stale slots; never replay missed sends."""
+    def __init__(self, epoch, slots, period):
+        self.epoch, self.slots, self.period = epoch, slots, period
+        self.next_slot = 0
+        self.sleep_overshoot = []
+
+    def wait_slot(self, clock=time.monotonic_ns, sleep=time.sleep):
+        while self.next_slot < self.slots:
+            target = self.epoch + self.next_slot * self.period
+            now = clock()
+            while now < target:
+                sleep((target - now) / 1e9)
+                now = clock()
+                self.sleep_overshoot.append(max(0, now - target))
+            if now >= target + self.period // 2:
+                # Jump directly to the first slot whose send window is not stale.
+                self.next_slot = max(self.next_slot + 1,
+                                     (now - self.epoch + self.period // 2) // self.period)
+                continue
+            self.next_slot += 1
+            return now
+        return None
 
 
 def exact(sock, size, deadline=None):
@@ -185,7 +204,7 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--rounds', type=int)
     parser.add_argument('--paced-baseline', action='store_true',
-                        help='fixed 102.4s small-retention release measurement')
+                        help='absolute-slot 102.4s small-retention release measurement')
     parser.add_argument('--small-retention', action='store_true')
     parser.add_argument('--inject-monitor-failure', action='store_true')
     args = parser.parse_args()
@@ -250,52 +269,85 @@ def main():
                         return prefix+'x'*(PAYLOAD-len(prefix))
                     epoch_ns = time.monotonic_ns() + 500_000_000
                     span_ns = BASELINE_ROUNDS * FRAMES * BASELINE_PERIOD_NS
+                    end_ns = epoch_ns + span_ns
+                    pace_stats = [
+                        dict(sent=[], rtts=[], attach=[], pacer=Pacer(
+                            epoch_ns, BASELINE_ROUNDS * FRAMES, BASELINE_PERIOD_NS))
+                        for _ in range(CLIENTS)
+                    ] if args.paced_baseline else []
+
+                    def baseline_results():
+                        target = BASELINE_ROUNDS * FRAMES
+                        by_client = []
+                        for stats in pace_stats:
+                            sent = stats['sent']
+                            by_client.append({
+                                'scheduled_slots': target,
+                                'send_attempts': len(sent),
+                                'verified_echoes': len(stats['rtts']),
+                                'unoffered_slots': target - len(sent),
+                                'rtt': timing_summary(stats['rtts']),
+                                'sleep_overshoot': timing_summary(stats['pacer'].sleep_overshoot),
+                                'attachment_time': timing_summary(stats['attach']),
+                                'send_interval': timing_summary([b-a for a,b in zip(sent,sent[1:])]),
+                            })
+                        return {
+                            'scheduled_seconds': span_ns / 1e9,
+                            'observed_seconds': max(0, time.monotonic_ns() - epoch_ns) / 1e9,
+                            'nominal_echoes_per_second': CLIENTS * 1e9 / BASELINE_PERIOD_NS,
+                            'scheduled_slots': target * CLIENTS,
+                            'send_attempts': sum(c['send_attempts'] for c in by_client),
+                            'verified_echoes': sum(c['verified_echoes'] for c in by_client),
+                            'unoffered_slots': sum(c['unoffered_slots'] for c in by_client),
+                            'clients': by_client,
+                            'rtt': timing_summary([r for stats in pace_stats for r in stats['rtts']]),
+                        }
+
                     def load(index):
-                        child=children[index]; seq=0; rtts=[]; previous_send=epoch_ns-BASELINE_PERIOD_NS
+                        child=children[index]; seq=0
+                        stats = pace_stats[index] if pace_stats else None
                         for _ in range(args.rounds):
-                            ws=attach(child,seq)
+                            if stats and time.monotonic_ns() >= end_ns:
+                                break
+                            attach_start = time.monotonic_ns()
+                            try:
+                                ws=attach(child,seq)
+                            finally:
+                                if stats: stats['attach'].append(time.monotonic_ns() - attach_start)
                             try:
                                 for _ in range(FRAMES):
                                     if errors or time.monotonic()>deadline: raise RuntimeError('load aborted')
                                     text=payload(index,seq+1)
-                                    if args.paced_baseline:
-                                        slot = epoch_ns + seq * BASELINE_PERIOD_NS
-                                        pace(max(slot, previous_send + BASELINE_PERIOD_NS),
-                                             epoch_ns + BASELINE_MAX_NS)
+                                    if stats and stats['pacer'].wait_slot() is None:
+                                        return seq
                                     seq+=1
                                     sent_ns = time.monotonic_ns()
-                                    previous_send = sent_ns
+                                    if stats: stats['sent'].append(sent_ns)
                                     ws.send({'line':text}); frame=ws.recv()
                                     received_ns = time.monotonic_ns()
                                     if frame.get('seq')!=seq or frame.get('line')!=text: raise ValueError('echo/sequence mismatch')
-                                    if args.paced_baseline: rtts.append(received_ns - sent_ns)
+                                    if stats: stats['rtts'].append(received_ns - sent_ns)
                             finally: ws.close()
-                        return seq, rtts, previous_send
+                        return seq
                     try:
-                        with concurrent.futures.ThreadPoolExecutor(max_workers=CLIENTS) as pool: runs=list(pool.map(load,range(CLIENTS)))
-                        counts = [run[0] for run in runs]
-                        if args.paced_baseline:
-                            end_ns = epoch_ns + span_ns
-                            while (remaining := end_ns - time.monotonic_ns()) > 0:
-                                if guard.aborted.is_set(): raise RuntimeError('baseline aborted')
-                                stop.wait(min(remaining / 1e9, .05))
-                            sample_count = BASELINE_ROUNDS * FRAMES
-                            if any(count != sample_count or len(samples) != sample_count
-                                   for count, samples, _ in runs):
-                                raise ValueError('incomplete paced baseline')
-                            observed_ns = time.monotonic_ns() - epoch_ns
-                            if observed_ns > BASELINE_MAX_NS:
+                        try:
+                            with concurrent.futures.ThreadPoolExecutor(max_workers=CLIENTS) as pool:
+                                counts=list(pool.map(load,range(CLIENTS)))
+                            if pace_stats:
+                                while (remaining := end_ns - time.monotonic_ns()) > 0:
+                                    if guard.aborted.is_set(): raise RuntimeError('baseline aborted')
+                                    stop.wait(min(remaining / 1e9, .05))
+                        finally:
+                            if pace_stats: result['paced_baseline'] = baseline_results()
+                        if pace_stats:
+                            measured = result['paced_baseline']
+                            if measured['observed_seconds'] > BASELINE_MAX_NS / 1e9:
                                 raise RuntimeError('paced baseline exceeded the 120s load budget')
-                            result['paced_baseline'] = {
-                                'scheduled_seconds': span_ns / 1e9,
-                                'observed_seconds': observed_ns / 1e9,
-                                'nominal_echoes_per_second': CLIENTS * 1e9 / BASELINE_PERIOD_NS,
-                                'observed_echoes_per_second': sum(counts) * 1e9 / observed_ns,
-                                'max_schedule_drift_ms': (max(run[2] for run in runs) -
-                                                          (end_ns - BASELINE_PERIOD_NS)) / 1e6,
-                                'rtt_by_client': [rtt_summary(run[1]) for run in runs],
-                                'rtt': rtt_summary([rtt for run in runs for rtt in run[1]]),
-                            }
+                            if any(c['send_attempts'] != c['verified_echoes'] or
+                                   c['verified_echoes'] < c['scheduled_slots'] // 2
+                                   for c in measured['clients']):
+                                raise ValueError('paced baseline must verify all attempted sends and cover at least half the slots per client')
+                            measured['observed_echoes_per_second'] = sum(counts) / measured['observed_seconds']
                         # Snapshot cats before exit; ps cannot recover CPU after exit.
                         samples.append(sample(node,pids))
                         for child in children: request('DELETE','/v1/procs/'+child['id'])

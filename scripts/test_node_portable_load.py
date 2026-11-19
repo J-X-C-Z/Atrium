@@ -84,17 +84,29 @@ class PacedBaselineFixtures(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'no verified'):
             load.rtt_summary([])
 
-    def test_pacing_waits_until_slot_and_enforces_load_budget(self):
-        clock = [0]
-        waits = []
+    def test_recurrent_oversleep_does_not_accumulate(self):
+        ns = [0]
+        period = load.BASELINE_PERIOD_NS
+        pacer = load.Pacer(period, 2048, period)
+        def oversleep(seconds):
+            ns[0] += round(seconds * 1e9) + 10_000_000
+        sent = [pacer.wait_slot(lambda: ns[0], oversleep) for _ in range(2048)]
+        self.assertEqual(sent, [period*(i+1)+10_000_000 for i in range(2048)])
+        self.assertIsNone(pacer.wait_slot(lambda: ns[0], oversleep))
+
+    def test_slow_reply_skips_stale_slots_and_never_catches_up(self):
+        ns = [0]
+        period = load.BASELINE_PERIOD_NS
+        pacer = load.Pacer(0, 10, period)
+        clock = lambda: ns[0]
         def sleep(seconds):
-            waits.append(seconds)
-            clock[0] += round(seconds * 1e9)
-        self.assertEqual(load.pace(100_000_000, 200_000_000, lambda: clock[0], sleep), 100_000_000)
-        self.assertEqual(waits, [.1])
-        clock[0] += load.BASELINE_PERIOD_NS
-        with self.assertRaisesRegex(RuntimeError, 'load budget'):
-            load.pace(100_000_000, 150_000_000, lambda: clock[0], sleep)
+            ns[0] += round(seconds * 1e9)
+        self.assertEqual(pacer.wait_slot(clock, sleep), 0)
+        ns[0] = 160_000_000
+        self.assertEqual(pacer.wait_slot(clock, sleep), 160_000_000)
+        self.assertEqual(pacer.wait_slot(clock, sleep), 200_000_000)
+        ns[0] = 121_000_000_000
+        self.assertIsNone(pacer.wait_slot(clock, sleep))
 
 
 if __name__=='__main__': unittest.main()

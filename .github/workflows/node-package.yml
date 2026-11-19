@@ -103,17 +103,30 @@ jobs:
           assert manifest["source_dirty"] is False
           for repeat in (1, 2):
               output = root / f"paced-{repeat}.json"
-              subprocess.run([sys.executable, "scripts/node-portable-load.py",
-                              "--archive", str(archive), "--expected-sha256", expected,
-                              "--output", str(output), "--paced-baseline"],
-                             check=True, timeout=210)
-              result = json.loads(output.read_text())
-              measured = result["paced_baseline"]
+              command = [sys.executable, "scripts/node-portable-load.py",
+                         "--archive", str(archive), "--expected-sha256", expected,
+                         "--output", str(output), "--paced-baseline"]
+              try:
+                  run = subprocess.run(command, check=False, timeout=210)
+              finally:
+                  try:
+                      result = json.loads(output.read_text())
+                  except (OSError, ValueError):
+                      result = {}
+                  fields = ("status", "hashes", "driver_sha256", "paced_baseline",
+                            "wall_seconds", "peak_sampled_node_rss_kib",
+                            "peak_sampled_children_rss_kib", "sampled_cpu_single_core_percent")
+                  print(json.dumps({"baseline_repeat": repeat, "report_available": bool(result),
+                                    **{k: result[k] for k in fields if k in result}}, indent=2),
+                        flush=True)
+              run.check_returncode()
               assert result["status"] == "completed" and result["hashes"] == hashes
-              assert result["echoes_verified"] == measured["rtt"]["samples"] == 4096
+              measured = result["paced_baseline"]
               assert 102.4 <= measured["observed_seconds"] <= 120
-              print(json.dumps({"baseline_repeat": repeat, **{k: v for k, v in result.items()
-                               if k != "samples"}}, indent=2))
+              assert measured["scheduled_slots"] == 4096
+              assert result["echoes_verified"] == measured["rtt"]["samples"] == measured["send_attempts"]
+              assert measured["send_attempts"] + measured["unoffered_slots"] == 4096
+              assert all(c["verified_echoes"] >= 1024 for c in measured["clients"])
           PYBASELINE
           # No uploads, service installation, accounts, signing or publication.
           # RUNNER_TEMP is runner-owned and removed by the hosted runner lifecycle.
