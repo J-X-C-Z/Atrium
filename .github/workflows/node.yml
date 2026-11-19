@@ -6,6 +6,7 @@ name: macOS backend acceptance
       - 'crates/atrium-node/**'
       - 'crates/atrium-app/src/project.rs'
       - 'crates/atrium-app/src/workspace.rs'
+      - 'crates/atrium-app/src/workspace_ticker_test.rs'
       - 'crates/atrium-app/src/workspace_project.rs'
       - 'crates/atrium-app/src/workspace_acp.rs'
       - 'crates/atrium-app/src/notice_delivery.rs'
@@ -51,7 +52,18 @@ jobs:
       - name: Strict native-node lint
         run: cargo +stable clippy -p atrium-node --all-targets --locked -- -D warnings
       - name: Workspace tests including scheduler and native protocol
-        run: cargo +stable test --workspace --locked
+        run: |
+          cargo +stable test --workspace --locked --features atrium-app/workspace-ticker-test \
+            -- --skip workspace::ticker_test::scheduler_tick_sends_notice_and_commits_rpc_acceptance
+      - name: Headless Workspace ticker with mock RPC
+        timeout-minutes: 12
+        run: |
+          set -o pipefail
+          test_name=workspace::ticker_test::scheduler_tick_sends_notice_and_commits_rpc_acceptance
+          test_log="$RUNNER_TEMP/atrium-workspace-ticker.log"
+          cargo +stable test --workspace --locked --features atrium-app/workspace-ticker-test \
+            "$test_name" -- --exact --nocapture | tee "$test_log"
+          grep -Fx "test $test_name ... ok" "$test_log"
       - name: Build scripted agents (no real accounts)
         run: cargo +stable build -p codex-client --bin mock-codex -p acp-client --bin mock-acp --locked
       - name: Native remote clients with scripted agents

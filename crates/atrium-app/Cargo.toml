@@ -27,3 +27,6 @@ dirs.workspace = true
 gpui.workspace = true
 gpui-kit.workspace = true
 ely-gpui-component.workspace = true
+
+[features]
+workspace-ticker-test = ["gpui/test-support"]

@@ -197,7 +197,24 @@ impl EventEmitter<Fill> for Workspace {}
 
 impl Workspace {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let mut workspace = Self {
+        let mut workspace = Self::with_settings(Settings::load());
+        workspace.connect(cx);
+        workspace.init_agents(cx);
+        workspace.init_projects(cx);
+        workspace.init_devices(cx);
+        if let Some(agent) = workspace.settings.default_agent.clone()
+            && (agent == CODEX
+                || workspace
+                    .agent(&agent)
+                    .is_some_and(|a| a.status != AgentStatus::NotInstalled))
+        {
+            workspace.draft_backend = agent;
+        }
+        workspace
+    }
+
+    fn with_settings(settings: Settings) -> Self {
+        Self {
             status: Status::Connecting,
             client: None,
             threads: Vec::new(),
@@ -206,7 +223,7 @@ impl Workspace {
             draft: Transcript::new(),
             loading: HashSet::new(),
             models: Vec::new(),
-            settings: Settings::load(),
+            settings,
             signed_in: None,
             backend_label: "Codex".into(),
             timings: HashMap::new(),
@@ -241,20 +258,7 @@ impl Workspace {
             tailnet: None,
             _discovery: None,
             _pump: None,
-        };
-        workspace.connect(cx);
-        workspace.init_agents(cx);
-        workspace.init_projects(cx);
-        workspace.init_devices(cx);
-        if let Some(agent) = workspace.settings.default_agent.clone()
-            && (agent == CODEX
-                || workspace
-                    .agent(&agent)
-                    .is_some_and(|a| a.status != AgentStatus::NotInstalled))
-        {
-            workspace.draft_backend = agent;
         }
-        workspace
     }
 
     /// Starts (or restarts) the Codex server and pumps its events into the state.
@@ -1842,3 +1846,7 @@ mod tests {
         assert_eq!(composed.mentions, vec![PathBuf::from("/a/src/main.rs")]);
     }
 }
+
+#[cfg(all(test, unix, feature = "workspace-ticker-test"))]
+#[path = "workspace_ticker_test.rs"]
+mod ticker_test;
