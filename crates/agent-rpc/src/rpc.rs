@@ -53,7 +53,12 @@ pub enum Incoming {
     Closed,
 }
 
-type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, RpcError>>>>>;
+#[derive(Default)]
+struct PendingState {
+    closed: bool,
+    waiters: HashMap<i64, oneshot::Sender<Result<Value, RpcError>>>,
+}
+type Pending = Arc<Mutex<PendingState>>;
 
 /// One JSON-RPC connection. Cheap to clone; all clones share the stream.
 #[derive(Clone)]
@@ -113,13 +118,25 @@ impl Connection {
 
     /// Sends a request and waits for its result.
     pub async fn request(&self, method: &str, params: impl Serialize) -> Result<Value, RpcError> {
+        let params = serde_json::to_value(params).map_err(|e| RpcError::Write(e.to_string()))?;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().expect("pending lock").insert(id, tx);
-        let params = serde_json::to_value(params).map_err(|e| RpcError::Write(e.to_string()))?;
+        {
+            // Registration and EOF closure share one linearization point:
+            // either EOF drains this waiter, or we observe closed and never send.
+            let mut pending = self.pending.lock().expect("pending lock");
+            if pending.closed {
+                return Err(RpcError::Closed);
+            }
+            pending.waiters.insert(id, tx);
+        }
         log::debug!("{} >> #{id} {method}", self.peer);
         if let Err(error) = self.send(&json!({ "id": id, "method": method, "params": params })) {
-            self.pending.lock().expect("pending lock").remove(&id);
+            self.pending
+                .lock()
+                .expect("pending lock")
+                .waiters
+                .remove(&id);
             return Err(error);
         }
         rx.await.unwrap_or(Err(RpcError::Closed))
@@ -199,7 +216,13 @@ fn read_loop(reader: impl BufRead, pending: Pending, tx: mpsc::UnboundedSender<I
             log::debug!("codex: event dropped, no listener");
         }
     }
-    for (_, waiter) in pending.lock().expect("pending lock").drain() {
+    let waiters = {
+        let mut pending = pending.lock().expect("pending lock");
+        pending.closed = true;
+        std::mem::take(&mut pending.waiters)
+    };
+    // Waking arbitrary executors under the pending mutex can re-enter request.
+    for (_, waiter) in waiters {
         let _ = waiter.send(Err(RpcError::Closed));
     }
     let _ = tx.unbounded_send(Incoming::Closed);
@@ -233,7 +256,7 @@ fn route(mut message: Value, pending: &Pending) -> Option<Incoming> {
                 log::warn!("codex: response with a foreign id {id}");
                 return None;
             };
-            let waiter = pending.lock().expect("pending lock").remove(&key);
+            let waiter = pending.lock().expect("pending lock").waiters.remove(&key);
             let Some(waiter) = waiter else {
                 log::warn!("codex: response to unknown request #{key}");
                 return None;
@@ -362,21 +385,76 @@ mod tests {
         assert_eq!(got[2], Incoming::Closed);
     }
 
+    fn within<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(work());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(3))
+            .expect("RPC operation exceeded test deadline")
+    }
+
     #[test]
     fn a_closed_server_fails_waiting_requests() {
-        let (to_server, _server_in) = pipe();
-        let (server_out, from_server) = pipe();
-        let (connection, _events) = Connection::new(from_server, to_server);
-        drop(server_out);
-        let result = block_on(connection.request("initialize", json!({})));
+        let result = within(|| {
+            let (to_server, _server_in) = pipe();
+            let (server_out, from_server) = pipe();
+            let (connection, _events) = Connection::new(from_server, to_server);
+            drop(server_out);
+            block_on(connection.request("initialize", json!({})))
+        });
         assert_eq!(result, Err(RpcError::Closed));
+    }
+
+    #[test]
+    fn close_before_request_fails_immediately_without_writing() {
+        within(|| {
+            let (to_server, server_in) = pipe();
+            let (server_out, from_server) = pipe();
+            let (connection, mut events) = Connection::new(from_server, to_server);
+            drop(server_out);
+            assert_eq!(block_on(events.next()), Some(Incoming::Closed));
+            assert_eq!(
+                block_on(connection.request("after-close", json!({}))),
+                Err(RpcError::Closed)
+            );
+            assert!(
+                server_in.get_ref().rx.try_recv().is_err(),
+                "request after observed EOF must not write"
+            );
+        });
+    }
+
+    #[test]
+    fn concurrent_close_and_request_always_resolve() {
+        for _ in 0..64 {
+            let (to_server, _server_in) = pipe();
+            let (server_out, from_server) = pipe();
+            let (connection, _events) = Connection::new(from_server, to_server);
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let worker_barrier = barrier.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let worker = thread::spawn(move || {
+                worker_barrier.wait();
+                let result = block_on(connection.request("racing-close", json!({})));
+                let _ = tx.send(result);
+            });
+            barrier.wait();
+            drop(server_out);
+            assert_eq!(
+                rx.recv_timeout(std::time::Duration::from_secs(3))
+                    .expect("close/request race hung"),
+                Err(RpcError::Closed)
+            );
+            worker.join().unwrap();
+        }
     }
 
     #[test]
     fn server_errors_come_back_as_errors() {
         let pending: Pending = Arc::default();
         let (tx, rx) = oneshot::channel();
-        pending.lock().unwrap().insert(3, tx);
+        pending.lock().unwrap().waiters.insert(3, tx);
         let routed = route(
             json!({"id": 3, "error": {"code": -32600, "message": "bad"}}),
             &pending,

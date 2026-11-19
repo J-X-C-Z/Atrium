@@ -6,11 +6,14 @@
 //! [`crate::Connection`] takes as it takes a child's stdio. Underneath, a
 //! thread keeps the WebSocket up: when it drops (a laptop sleeps, Wi-Fi
 //! changes) it reconnects and asks for what came after the last line it has,
-//! so nothing is lost or repeated, and lines written meanwhile wait and go
-//! out once it is back.
+//! replaying retained output after that sequence. Evicted history is reported
+//! as a gap. Input may wait while disconnected, but delivery during connection
+//! failure can be uncertain; this transport does not guarantee exactly-once
+//! input delivery or execution. A confirmed runtime change stops the old link
+//! rather than replaying its queued input into a new runtime.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     io::{self, BufReader, Read, Write},
     net::TcpStream,
     sync::{
@@ -86,6 +89,7 @@ pub struct MagpieInfo {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NodeInfo {
+    pub instance_id: Option<String>,
     pub name: String,
     pub version: String,
     pub protocol: u32,
@@ -108,6 +112,7 @@ pub struct ProcExit {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Proc {
+    pub instance_id: Option<String>,
     pub id: String,
     pub agent: String,
     pub cwd: String,
@@ -143,6 +148,7 @@ pub struct NodeClient {
     pub base: String,
     token: Option<String>,
     agent: ureq::Agent,
+    instances: Arc<Mutex<VecDeque<(String, String)>>>,
 }
 
 impl std::fmt::Debug for NodeClient {
@@ -175,6 +181,7 @@ impl NodeClient {
             base,
             token: token.filter(|t| !t.is_empty()),
             agent,
+            instances: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
@@ -217,16 +224,36 @@ impl NodeClient {
         if let Some(owner) = owner {
             request = request.query("owner", owner);
         }
-        self.json(request.call())
+        let processes: Vec<Proc> = self.json(request.call())?;
+        for process in &processes {
+            self.remember(process);
+        }
+        Ok(processes)
+    }
+
+    fn remember(&self, process: &Proc) {
+        if let Some(instance) = &process.instance_id {
+            let mut cache = self.instances.lock().expect("process identities");
+            if !cache.iter().any(|(id, _)| id == &process.id) {
+                // Active links pin their own identity independently of this
+                // bounded convenience cache. Explicit attach can pin older IDs.
+                if cache.len() >= 256 {
+                    cache.pop_front();
+                }
+                cache.push_back((process.id.clone(), instance.clone()));
+            }
+        }
     }
 
     /// Starts `agent` in `cwd` on the device.
     pub fn spawn(&self, agent: &str, cwd: &str, owner: &str) -> Result<Proc> {
-        self.json(self.request("POST", "/v1/procs").send_json(json!({
+        let process: Proc = self.json(self.request("POST", "/v1/procs").send_json(json!({
             "agent": agent,
             "cwd": cwd,
             "owner": owner,
-        })))
+        })))?;
+        self.remember(&process);
+        Ok(process)
     }
 
     pub fn kill(&self, id: &str) -> Result<()> {
@@ -291,6 +318,19 @@ impl NodeClient {
     /// Attaches to a process's input and output. `after` is the last output
     /// line already seen (0 for all kept, -1 for only new output).
     pub fn attach(&self, id: &str, after: i64) -> Attachment {
+        let expected = self
+            .instances
+            .lock()
+            .expect("process identities")
+            .iter()
+            .find(|(key, _)| key == id)
+            .map(|(_, instance)| instance.clone());
+        self.attach_with_instance(id, after, expected.as_deref())
+    }
+
+    /// Optionally pin a saved lifecycle identity, without persisting work content.
+    /// Missing identities keep legacy-server behavior until a handshake supplies one.
+    pub fn attach_with_instance(&self, id: &str, after: i64, expected: Option<&str>) -> Attachment {
         let (to_reader, from_link) = mpsc::channel::<Vec<u8>>();
         let (to_link, outgoing) = mpsc::channel::<String>();
         let state = Arc::new(Mutex::new(LinkState::Connecting));
@@ -299,6 +339,7 @@ impl NodeClient {
             id: id.to_string(),
             token: self.token.clone(),
             last: after,
+            instance: expected.map(str::to_owned),
             state: state.clone(),
         };
         let peer = self.base.clone();
@@ -443,6 +484,7 @@ struct Link {
     token: Option<String>,
     /// The last output line delivered.
     last: i64,
+    instance: Option<String>,
     state: Arc<Mutex<LinkState>>,
 }
 
@@ -503,7 +545,7 @@ impl Link {
         }
     }
 
-    fn connect(&self) -> std::result::Result<Socket, ConnectError> {
+    fn connect(&mut self) -> std::result::Result<Socket, ConnectError> {
         let url = format!(
             "{}/v1/procs/{}/attach?after={}",
             self.ws_base, self.id, self.last
@@ -515,13 +557,61 @@ impl Link {
         {
             request.headers_mut().insert("Authorization", value);
         }
+        if let Some(instance) = &self.instance {
+            if instance.is_empty() || instance.len() > 128 || !instance.is_ascii() {
+                return Err(ConnectError::Gone(
+                    "invalid saved node instance identity".into(),
+                ));
+            }
+            let value = instance
+                .parse()
+                .map_err(|_| ConnectError::Gone("invalid saved node instance identity".into()))?;
+            request.headers_mut().insert("x-atrium-instance-id", value);
+        }
         match tungstenite::connect(request) {
-            Ok((socket, _)) => {
+            Ok((socket, response)) => {
+                if let Some(instance) = response.headers().get("x-atrium-instance-id") {
+                    let instance = instance
+                        .to_str()
+                        .ok()
+                        .filter(|v| !v.is_empty() && v.len() <= 128)
+                        .ok_or_else(|| {
+                            ConnectError::Gone("invalid node instance identity".into())
+                        })?;
+                    if self
+                        .instance
+                        .as_deref()
+                        .is_some_and(|expected| expected != instance)
+                    {
+                        return Err(ConnectError::Gone(
+                            "node restarted; previous process state is lost".into(),
+                        ));
+                    }
+                    self.instance = Some(instance.to_owned());
+                } else if self.instance.is_some() {
+                    return Err(ConnectError::Gone(
+                        "node no longer supports pinned lifecycle identity".into(),
+                    ));
+                }
                 if let MaybeTlsStream::Plain(stream) = socket.get_ref() {
                     let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
                     let _ = stream.set_nodelay(true);
                 }
                 Ok(socket)
+            }
+            Err(tungstenite::Error::Http(response))
+                if response.status() == 409
+                    && response
+                        .body()
+                        .as_deref()
+                        .and_then(|b| serde_json::from_slice::<Value>(b).ok())
+                        .is_some_and(|body| {
+                            body["error"] == "node_restarted" || body["code"] == "node_restarted"
+                        }) =>
+            {
+                Err(ConnectError::Gone(
+                    "node restarted; previous process state is lost".into(),
+                ))
             }
             Err(tungstenite::Error::Http(response)) if response.status() == 404 => Err(
                 ConnectError::Gone("the process is no longer on the node".into()),
@@ -747,6 +837,234 @@ mod tests {
         assert_eq!(peers[1].dns.as_deref(), Some("studio.tail1.ts.net"));
         assert_eq!(peers[1].ip.as_deref(), Some("100.64.0.2"));
         assert!(!peers[0].online && peers[0].dns.is_none());
+    }
+
+    #[test]
+    fn temporary_disconnect_reconnects_with_learned_instance() {
+        struct IdentityHandshake {
+            reconnect: bool,
+        }
+        impl tungstenite::handshake::server::Callback for IdentityHandshake {
+            fn on_request(
+                self,
+                req: &tungstenite::handshake::server::Request,
+                mut response: tungstenite::handshake::server::Response,
+            ) -> std::result::Result<
+                tungstenite::handshake::server::Response,
+                tungstenite::handshake::server::ErrorResponse,
+            > {
+                if self.reconnect {
+                    assert_eq!(req.headers()["x-atrium-instance-id"], "same-runtime");
+                }
+                response
+                    .headers_mut()
+                    .insert("x-atrium-instance-id", "same-runtime".parse().unwrap());
+                Ok(response)
+            }
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (disconnect, drop_now) = mpsc::channel();
+        let server = thread::spawn(move || {
+            for attempt in 0..2 {
+                let (stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut ws = tungstenite::accept_hdr(
+                    stream,
+                    IdentityHandshake {
+                        reconnect: attempt == 1,
+                    },
+                )
+                .unwrap();
+                if attempt == 0 {
+                    drop_now.recv_timeout(Duration::from_secs(5)).unwrap();
+                    drop(ws);
+                } else {
+                    let message = ws.read().unwrap();
+                    assert_eq!(
+                        serde_json::from_str::<Value>(message.to_text().unwrap()).unwrap()["line"],
+                        "queued"
+                    );
+                    ws.send(Message::text(
+                        json!({"seq":1,"exit":{"code":0,"signal":null}}).to_string(),
+                    ))
+                    .unwrap();
+                }
+            }
+        });
+        let client = NodeClient::new(&format!("http://{address}"), None);
+        let mut attachment = client.attach("p", 0);
+        let wait = |predicate: fn(&LinkState) -> bool| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(8);
+            while !predicate(&attachment.state.lock().unwrap()) {
+                assert!(std::time::Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(10));
+            }
+        };
+        wait(|s| matches!(s, LinkState::Connected));
+        client.remember(&Proc {
+            id: "p".into(),
+            instance_id: Some("same-runtime".into()),
+            ..Proc::default()
+        });
+        for index in 0..257 {
+            client.remember(&Proc {
+                id: format!("other-{index}"),
+                instance_id: Some("other-runtime".into()),
+                ..Proc::default()
+            });
+        }
+        assert_eq!(client.instances.lock().unwrap().len(), 256);
+        assert!(
+            !client
+                .instances
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(id, _)| id == "p")
+        );
+        disconnect.send(()).unwrap();
+        wait(|s| matches!(s, LinkState::Reconnecting { .. }));
+        attachment.writer.write_all(b"queued\n").unwrap();
+        wait(|s| matches!(s, LinkState::Ended { code: Some(0) }));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn pinned_handshake_without_identity_never_sends_queued_input() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            // A legacy/downgraded server completes WS upgrade without identity.
+            let mut ws = tungstenite::accept(stream).unwrap();
+            assert!(
+                !matches!(ws.read(), Ok(Message::Text(_))),
+                "queued stdin escaped before instance verification"
+            );
+        });
+        let state = Arc::new(Mutex::new(LinkState::Connecting));
+        let link = Link {
+            ws_base: format!("ws://{address}"),
+            id: "old".into(),
+            token: None,
+            last: 0,
+            instance: Some("previous-runtime".into()),
+            state: state.clone(),
+        };
+        let (reader, _incoming) = mpsc::channel();
+        let (writer, outgoing) = mpsc::channel();
+        writer.send("must-not-send".into()).unwrap();
+        link.run(reader, outgoing);
+        assert_eq!(
+            *state.lock().unwrap(),
+            LinkState::Gone("node no longer supports pinned lifecycle identity".into())
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn pinned_handshake_with_different_identity_never_sends_queued_input() {
+        struct WrongIdentity;
+        impl tungstenite::handshake::server::Callback for WrongIdentity {
+            fn on_request(
+                self,
+                request: &tungstenite::handshake::server::Request,
+                mut response: tungstenite::handshake::server::Response,
+            ) -> std::result::Result<
+                tungstenite::handshake::server::Response,
+                tungstenite::handshake::server::ErrorResponse,
+            > {
+                assert_eq!(
+                    request.headers()["x-atrium-instance-id"],
+                    "previous-runtime"
+                );
+                response
+                    .headers_mut()
+                    .insert("x-atrium-instance-id", "different-runtime".parse().unwrap());
+                Ok(response)
+            }
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            // A faulty server accepts upgrade despite the expected identity mismatch.
+            let mut ws = tungstenite::accept_hdr(stream, WrongIdentity).unwrap();
+            assert!(
+                !matches!(ws.read(), Ok(Message::Text(_))),
+                "queued stdin escaped before instance verification"
+            );
+        });
+        let state = Arc::new(Mutex::new(LinkState::Connecting));
+        let link = Link {
+            ws_base: format!("ws://{address}"),
+            id: "old".into(),
+            token: None,
+            last: 0,
+            instance: Some("previous-runtime".into()),
+            state: state.clone(),
+        };
+        let (reader, _incoming) = mpsc::channel();
+        let (writer, outgoing) = mpsc::channel();
+        writer.send("must-not-send".into()).unwrap();
+        link.run(reader, outgoing);
+        assert_eq!(
+            *state.lock().unwrap(),
+            LinkState::Gone("node restarted; previous process state is lost".into())
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn invalid_saved_identity_is_terminal_before_network_io() {
+        for identity in [
+            "".to_owned(),
+            "x".repeat(129),
+            "é".to_owned(),
+            "bad\r\nheader".to_owned(),
+        ] {
+            let mut link = Link {
+                ws_base: "ws://127.0.0.1:1".into(),
+                id: "p".into(),
+                token: None,
+                last: 0,
+                instance: Some(identity),
+                state: Arc::new(Mutex::new(LinkState::Connecting)),
+            };
+            assert!(
+                matches!(link.connect(), Err(ConnectError::Gone(why)) if why.contains("invalid saved"))
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_metadata_and_bounded_process_identity_pins() {
+        let info: NodeInfo = serde_json::from_value(json!({"protocol":1})).unwrap();
+        assert_eq!(info.instance_id, None);
+        let client = NodeClient::new("http://127.0.0.1:1", None);
+        let mut p = Proc {
+            id: "p-1".into(),
+            instance_id: Some("old".into()),
+            ..Proc::default()
+        };
+        client.remember(&p);
+        p.instance_id = Some("new".into());
+        client.remember(&p);
+        assert_eq!(client.instances.lock().unwrap().front().unwrap().1, "old");
+        for i in 2..300 {
+            p.id = format!("p-{i}");
+            client.remember(&p);
+        }
+        assert_eq!(client.instances.lock().unwrap().len(), 256);
     }
 
     #[test]

@@ -12,7 +12,7 @@ use axum::{
         DefaultBodyLimit, Path, Query, State as AxState,
         ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
     },
-    http::{StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
 };
@@ -27,6 +27,7 @@ pub struct State {
     pub roots: Arc<Roots>,
     pub procs: ProcessManager,
     info: RwLock<Value>,
+    instance_id: String,
 }
 impl State {
     pub async fn new(config: Arc<Config>, path: String) -> Result<Arc<Self>> {
@@ -42,6 +43,7 @@ impl State {
             path,
             roots,
             info: RwLock::new(Value::Null),
+            instance_id: uuid::Uuid::new_v4().to_string(),
         });
         s.refresh(false).await;
         let c = s.clone();
@@ -90,7 +92,7 @@ impl State {
         } else {
             None
         };
-        *self.info.write().await = json!({"name":"atrium-node","version":env!("CARGO_PKG_VERSION"),"protocol":1,"device":{"name":self.config.name,"hostname":crate::config::hostname(),"os":std::env::consts::OS,"arch":std::env::consts::ARCH},"roots":self.roots.paths(),"home":dirs::home_dir(),"agents":agents,"magpie":magpie});
+        *self.info.write().await = json!({"instance_id":self.instance_id,"name":"atrium-node","version":env!("CARGO_PKG_VERSION"),"protocol":1,"device":{"name":self.config.name,"hostname":crate::config::hostname(),"os":std::env::consts::OS,"arch":std::env::consts::ARCH},"roots":self.roots.paths(),"home":dirs::home_dir(),"agents":agents,"magpie":magpie});
     }
 }
 pub fn router(s: Arc<State>) -> Router {
@@ -174,9 +176,11 @@ async fn list(
     AxState(s): AxState<Arc<State>>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Json<Value> {
-    Json(json!(
-        s.procs.list(q.get("owner").map(String::as_str)).await
-    ))
+    let mut processes = s.procs.list(q.get("owner").map(String::as_str)).await;
+    for process in &mut processes {
+        process["instance_id"] = json!(s.instance_id);
+    }
+    Json(json!(processes))
 }
 #[derive(Deserialize)]
 struct Spawn {
@@ -226,7 +230,9 @@ async fn spawn(
                 e.to_string(),
             )
         })?;
-    Ok((StatusCode::CREATED, Json(p.json().await)))
+    let mut process = p.json().await;
+    process["instance_id"] = json!(s.instance_id);
+    Ok((StatusCode::CREATED, Json(process)))
 }
 async fn stop(
     AxState(s): AxState<Arc<State>>,
@@ -242,8 +248,30 @@ async fn attach(
     AxState(s): AxState<Arc<State>>,
     Path(id): Path<String>,
     Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, ApiError> {
+    // Authentication middleware runs first. This is lifecycle identity, not auth.
+    if let Some(expected) = headers.get("x-atrium-instance-id") {
+        let expected = expected
+            .to_str()
+            .ok()
+            .filter(|v| !v.is_empty() && v.len() <= 128)
+            .ok_or_else(|| {
+                ApiError(
+                    StatusCode::BAD_REQUEST,
+                    "bad_request",
+                    "invalid instance identity".into(),
+                )
+            })?;
+        if expected != s.instance_id {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "node_restarted",
+                "node restarted; previous process state is lost".into(),
+            ));
+        }
+    }
     let p =
         s.procs.get(&id).await.ok_or_else(|| {
             ApiError(StatusCode::NOT_FOUND, "not_found", "unknown process".into())
@@ -267,10 +295,15 @@ async fn attach(
             "invalid after".into(),
         ));
     }
-    Ok(ws
+    let mut response = ws
         .max_message_size(MAX_LINE_BYTES * 6 + 1024)
         .max_frame_size(MAX_LINE_BYTES * 6 + 1024)
-        .on_upgrade(move |socket| socket_loop(socket, p, after)))
+        .on_upgrade(move |socket| socket_loop(socket, p, after));
+    response.headers_mut().insert(
+        "x-atrium-instance-id",
+        HeaderValue::from_str(&s.instance_id).expect("UUID header"),
+    );
+    Ok(response)
 }
 async fn send_message(socket: &mut WebSocket, m: Message) -> bool {
     tokio::time::timeout(Duration::from_secs(10), socket.send(m))

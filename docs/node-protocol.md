@@ -251,3 +251,46 @@ stderr bytes, so budget pressure cannot hide process completion (including an
 ended process attached with `after=-1`). Removing the final process handle
 releases its retained-output allocation; ending a process alone retains its
 history until the existing retention cleanup. Output is not persisted to disk.
+
+### Optional node lifecycle identity (v1-compatible)
+
+The native node emits `instance_id` in `/v1/node`, spawned process responses,
+and process listings. It is a fresh random UUID for each server start, stable
+across metadata refreshes, and is never persisted. It identifies a runtime,
+not an authenticated user or proof that an OS process was terminated.
+
+WebSocket attach accepts the optional `X-Atrium-Instance-Id` header (nonempty,
+at most 128 bytes). After normal authentication, a mismatch returns HTTP 409
+with `{"error":"node_restarted","message":"..."}` before process lookup.
+A matching identity with an unknown process still returns 404 `not_found`.
+Successful upgrades include the current identity in the same response header,
+so identity validation and attachment do not have a separate GET/upgrade race.
+
+New clients pin identity per process/attachment, never from a mutable latest
+node-info cache. An attached link retains its pin across transient reconnects.
+A confirmed `node_restarted` terminates that link with a clear `Gone` reason;
+queued stdin is discarded, no command is spawned automatically, and old stdout
+is not restored or persisted. Network errors alone remain retryable.
+
+`NodeClient` keeps a bounded FIFO convenience cache of at most 256 process
+identities learned from spawn/list responses; active links have independent
+pins. `attach_with_instance` accepts an explicit previously retained identity
+for older IDs or a newly constructed client. This API does not persist anything
+or alter UI storage. If an identity was never learned, evicted, or lost with a
+client restart, the client cannot retrospectively distinguish a prior restart
+from generic process absence. A successful new handshake learns an identity
+for that link, not an identity for unknown past runtime state.
+
+Old clients omit the header and ignore additive response fields. Old servers
+without lifecycle fields/headers retain their prior generic-404/reconnect
+behavior for clients without a pinned identity. If an already pinned link
+receives an upgrade without identity, it stops with an explicit identity-support
+error instead of sending queued input to an unverified runtime; this is not
+reported as a confirmed restart. No durable tombstones or work-content storage are introduced.
+
+Input delivery across disconnects is not exactly-once: a connection can fail
+after sending bytes but before the client knows whether the agent consumed
+them. Existing queued-input retry/send-failure behavior is unchanged by the
+lifecycle-identity extension, and callers must not infer reliable delivery or
+automatically retry consequential commands from a reconnect alone. Output
+replay covers only retained sequences and may report a `gap`.
