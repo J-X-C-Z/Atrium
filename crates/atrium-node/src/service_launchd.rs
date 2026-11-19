@@ -1,5 +1,5 @@
 //! Conservative launchd recovery. Real commands are only wired on macOS;
-//! tests use a scripted runner and temporary files, never launchctl.
+//! ordinary tests use a scripted runner and temporary files.
 use anyhow::{Context, Result, bail};
 use std::{
     fs::{File, OpenOptions},
@@ -124,14 +124,19 @@ fn publish(path: &Path, content: &str) -> Result<Definition> {
         bytes: content.as_bytes().to_vec(),
     })
 }
-fn managed(bytes: &[u8]) -> bool {
-    fn validate(bytes: &[u8]) -> Option<()> {
+fn job_label<'a>(domain: &str, job: &'a str) -> Option<&'a str> {
+    let label = job.strip_prefix(domain)?.strip_prefix('/')?;
+    (!label.is_empty() && !label.contains('/')).then_some(label)
+}
+
+fn managed(bytes: &[u8], label: &str) -> bool {
+    fn validate(bytes: &[u8], label: &str) -> Option<()> {
         let text = std::str::from_utf8(bytes).ok()?;
         const EXE: &str = "/__ATRIUM_EXE__";
         const CONFIG: &str = "/__ATRIUM_CONFIG__";
         const LOG: &str = "/__ATRIUM_LOG__";
         let current =
-            super::render_launchd(Path::new(EXE), Path::new(CONFIG), Path::new(LOG)).ok()?;
+            super::render_launchd(label, Path::new(EXE), Path::new(CONFIG), Path::new(LOG)).ok()?;
         let legacy = !text.starts_with(&format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n{MARKER}\n"
         ));
@@ -161,6 +166,7 @@ fn managed(bytes: &[u8]) -> bool {
         // Re-rendering validates all literal structure, escaped path values,
         // duplicate log paths, and excludes extra keys or comment decoys.
         let expected = super::render_launchd(
+            label,
             Path::new(&decode(exe)),
             Path::new(&decode(config)),
             Path::new(&decode(log)),
@@ -173,7 +179,7 @@ fn managed(bytes: &[u8]) -> bool {
         };
         (expected == text).then_some(())
     }
-    validate(bytes).is_some()
+    validate(bytes, label).is_some()
 }
 
 fn same_path(loaded: &Path, target: &Path) -> bool {
@@ -233,8 +239,9 @@ pub(super) fn uninstall(
     label: &str,
     path: &Path,
 ) -> Result<()> {
+    let service = job_label(domain, label).context("invalid launchd service target")?;
     let owned = Definition::read(path)?;
-    if owned.as_ref().is_some_and(|d| !managed(&d.bytes)) {
+    if owned.as_ref().is_some_and(|d| !managed(&d.bytes, service)) {
         bail!("unrecognized service definition preserved; refusing to unload by label alone");
     }
     match runner.state(domain, label) {
@@ -268,7 +275,17 @@ pub(super) fn uninstall(
 // launchctl print is not a stable structured API. Fail closed for new/localized
 // diagnostics. Never equate an arbitrary failed print with an absent job.
 #[cfg(any(target_os = "macos", test))]
-fn classify(code: Option<i32>, stdout: &str, stderr: &str, domain_ok: bool, domain: &str) -> State {
+fn classify(
+    code: Option<i32>,
+    stdout: &str,
+    stderr: &str,
+    domain_ok: bool,
+    domain: &str,
+    job: &str,
+) -> State {
+    let Some(label) = job_label(domain, job) else {
+        return State::Unknown;
+    };
     if code == Some(0) {
         let path = stdout
             .lines()
@@ -282,8 +299,7 @@ fn classify(code: Option<i32>, stdout: &str, stderr: &str, domain_ok: bool, doma
     else {
         return State::Unknown;
     };
-    let expected =
-        format!("Could not find service \"dev.atrium.node\" in domain for user gui: {uid}");
+    let expected = format!("Could not find service \"{label}\" in domain for user gui: {uid}");
     let missing = stderr.lines().any(|line| line.trim() == expected);
     if code == Some(113) && missing && domain_ok {
         State::Absent
@@ -316,6 +332,7 @@ impl Runner for Launchctl {
             std::str::from_utf8(&out.stderr).unwrap_or(""),
             domain_ok,
             domain,
+            label,
         )
     }
     fn bootstrap(&mut self, domain: &str, path: &Path) -> Result<()> {
@@ -340,6 +357,10 @@ impl Runner for Launchctl {
     }
 }
 
+#[cfg(all(test, target_os = "macos"))]
+#[path = "service_launchd_live_test.rs"]
+mod live_test;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -357,6 +378,7 @@ mod tests {
         }
         fn content(&self) -> String {
             super::super::render_launchd(
+                super::super::LABEL,
                 &self.0.join("node"),
                 &self.0.join("config"),
                 &self.0.join("log"),
@@ -559,15 +581,15 @@ mod tests {
     fn absence_requires_specific_diagnostic_and_live_domain() {
         let missing = "Bad request.\nCould not find service \"dev.atrium.node\" in domain for user gui: 123\n";
         assert_eq!(
-            classify(Some(113), "", missing, true, DOMAIN),
+            classify(Some(113), "", missing, true, DOMAIN, JOB),
             State::Absent
         );
         assert_eq!(
-            classify(Some(113), "", missing, false, DOMAIN),
+            classify(Some(113), "", missing, false, DOMAIN, JOB),
             State::Unknown
         );
         assert_eq!(
-            classify(Some(1), "", "Permission denied", true, DOMAIN),
+            classify(Some(1), "", "Permission denied", true, DOMAIN, JOB),
             State::Unknown
         );
         assert_eq!(
@@ -576,12 +598,20 @@ mod tests {
                 "",
                 "Could not find service \"other\" in domain x",
                 true,
-                DOMAIN
+                DOMAIN,
+                JOB,
             ),
             State::Unknown
         );
         assert_eq!(
-            classify(Some(0), "\tpath = /tmp/node.plist\n", "", false, DOMAIN),
+            classify(
+                Some(0),
+                "\tpath = /tmp/node.plist\n",
+                "",
+                false,
+                DOMAIN,
+                JOB
+            ),
             State::Loaded(Some(PathBuf::from("/tmp/node.plist")))
         );
     }
@@ -643,7 +673,8 @@ mod tests {
     fn comment_decoys_duplicate_keys_and_extra_commands_are_foreign() {
         let f = Fixture::new();
         let valid = f.content();
-        assert!(managed(valid.as_bytes()));
+        assert!(managed(valid.as_bytes(), super::super::LABEL));
+        assert!(!managed(valid.as_bytes(), "org.atrium.acceptance.other"));
         for invalid in [
             format!("<!--{valid}-->"),
             valid.replace("</dict>", "<key>Label</key><string>other</string></dict>"),
@@ -656,13 +687,26 @@ mod tests {
                 "<key>StandardErrorPath</key><string>/other",
             ),
         ] {
-            assert!(!managed(invalid.as_bytes()));
+            assert!(!managed(invalid.as_bytes(), super::super::LABEL));
         }
         let missing = "Could not find service \"dev.atrium.node\" in domain for user gui: 123";
-        assert_eq!(classify(Some(1), "", missing, true, DOMAIN), State::Unknown);
-        assert_eq!(classify(None, "", missing, true, DOMAIN), State::Unknown);
         assert_eq!(
-            classify(Some(113), "", missing, true, "gui/456"),
+            classify(Some(1), "", missing, true, DOMAIN, JOB),
+            State::Unknown
+        );
+        assert_eq!(
+            classify(None, "", missing, true, DOMAIN, JOB),
+            State::Unknown
+        );
+        assert_eq!(
+            classify(
+                Some(113),
+                "",
+                missing,
+                true,
+                "gui/456",
+                "gui/456/dev.atrium.node"
+            ),
             State::Unknown
         );
     }

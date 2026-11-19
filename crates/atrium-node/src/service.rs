@@ -28,8 +28,9 @@ fn path_text(p: &Path) -> Result<&str> {
     Ok(s)
 }
 #[cfg(any(target_os = "macos", test))]
-pub fn render_launchd(exe: &Path, config: &Path, log: &Path) -> Result<String> {
+fn render_launchd(label: &str, exe: &Path, config: &Path, log: &Path) -> Result<String> {
     let marker = "<!-- atrium-node managed service v1 -->";
+    let label = xml(label);
     let e = xml(path_text(exe)?);
     let c = xml(path_text(config)?);
     let l = xml(path_text(log)?);
@@ -38,7 +39,7 @@ pub fn render_launchd(exe: &Path, config: &Path, log: &Path) -> Result<String> {
 {marker}
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>Label</key><string>{LABEL}</string>
+<key>Label</key><string>{label}</string>
 <key>ProgramArguments</key><array><string>{e}</string><string>serve</string><string>--config</string><string>{c}</string></array>
 <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
 <key>StandardOutPath</key><string>{l}</string><key>StandardErrorPath</key><string>{l}</string>
@@ -209,7 +210,7 @@ pub fn run(action: &str, config_path: &Path) -> Result<()> {
                     &domain,
                     &label,
                     &target,
-                    &render_launchd(&exe, &config, &log)?,
+                    &render_launchd(LABEL, &exe, &config, &log)?,
                 )?;
             }
             "uninstall" => {
@@ -283,6 +284,7 @@ mod tests {
     #[test]
     fn plist_escapes_and_has_separate_arguments() {
         let p = render_launchd(
+            LABEL,
             &std::env::temp_dir().join("a & b"),
             &std::env::temp_dir().join("c<d"),
             &std::env::temp_dir().join("log"),
