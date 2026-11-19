@@ -16,10 +16,10 @@ use windows_sys::Win32::{
         JobObjects::{
             AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
             JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-            SetInformationJobObject, TerminateJobObject,
+            SetInformationJobObject,
         },
         Threading::{
-            CREATE_SUSPENDED, GetProcessIdOfThread, OpenThread, ResumeThread,
+            CREATE_NO_WINDOW, CREATE_SUSPENDED, GetProcessIdOfThread, OpenThread, ResumeThread,
             THREAD_QUERY_LIMITED_INFORMATION, THREAD_SUSPEND_RESUME, TerminateProcess,
         },
     },
@@ -52,12 +52,6 @@ impl Job {
     }
     fn raw(&self) -> HANDLE {
         self.0.as_raw_handle()
-    }
-    pub(super) fn terminate(&self) -> std::io::Result<()> {
-        if unsafe { TerminateJobObject(self.raw(), 1) } == 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(())
     }
 }
 
@@ -103,7 +97,8 @@ fn primary_thread(pid: u32) -> Result<OwnedHandle> {
 
 pub(super) fn spawn(cmd: &mut Command) -> Result<(Child, Job)> {
     let job = Job::new()?;
-    cmd.creation_flags(CREATE_SUSPENDED).kill_on_drop(true);
+    cmd.creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW)
+        .kill_on_drop(true);
     let child = cmd.spawn().context("spawn suspended agent")?;
     let process = child.raw_handle().context("owned process handle missing")?;
     let setup = (|| -> Result<()> {
@@ -113,7 +108,11 @@ pub(super) fn spawn(cmd: &mut Command) -> Result<(Child, Job)> {
         let thread = primary_thread(child.id().context("suspended process id missing")?)?;
         // Exactly one suspension was requested by CREATE_SUSPENDED. A different
         // count means external interference: fail closed instead of guessing.
-        if unsafe { ResumeThread(thread.as_raw_handle()) } != 1 {
+        let previous_count = unsafe { ResumeThread(thread.as_raw_handle()) };
+        if previous_count == u32::MAX {
+            return Err(std::io::Error::last_os_error()).context("resume assigned agent");
+        }
+        if previous_count != 1 {
             bail!("unexpected primary thread suspend count");
         }
         Ok(())

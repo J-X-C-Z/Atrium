@@ -214,13 +214,13 @@ async fn spawn(
         .agents
         .get(&q.agent)
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "not_found", "unknown agent".into()))?;
-    if find_binary(&a.command[0], &s.path).is_none() {
+    let Some(_binary) = find_binary(&a.command[0], &s.path) else {
         return Err(ApiError(
             StatusCode::CONFLICT,
             "agent_unavailable",
             "executable not found".into(),
         ));
-    }
+    };
     let cwd = s.roots.resolve(&q.cwd)?;
     if !cwd.is_dir() {
         return Err(ApiError(
@@ -230,6 +230,17 @@ async fn spawn(
         ));
     }
     let mut command = a.command.clone();
+    #[cfg(windows)]
+    {
+        // Rust launches a resolved .cmd/.bat using its Windows batch quoting.
+        command[0] = _binary.into_os_string().into_string().map_err(|_| {
+            ApiError(
+                StatusCode::CONFLICT,
+                "agent_unavailable",
+                "executable path is not UTF-8".into(),
+            )
+        })?;
+    }
     command.extend(q.args);
     let p = s
         .procs

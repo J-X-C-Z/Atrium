@@ -6,12 +6,15 @@ mod launchd;
 #[cfg(any(target_os = "linux", all(unix, test)))]
 #[path = "service_systemd.rs"]
 mod systemd;
+#[cfg(any(windows, test))]
+#[path = "service_windows.rs"]
+mod windows;
 use anyhow::{Context, Result, bail};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(not(windows))]
+use std::path::PathBuf;
 #[cfg(any(target_os = "macos", test))]
 const LABEL: &str = "dev.atrium.node";
-#[cfg(windows)]
-const TASK: &str = "AtriumNode";
 #[cfg(any(target_os = "macos", windows, test))]
 fn xml(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -47,46 +50,7 @@ fn render_launchd(label: &str, exe: &Path, config: &Path, log: &Path) -> Result<
 "#
     ))
 }
-/// Quote one Windows CommandLineToArgvW argument without a command shell.
-#[cfg(any(windows, test))]
-fn windows_arg(s: &str) -> String {
-    let mut out = String::from("\"");
-    let mut slashes = 0;
-    for c in s.chars() {
-        if c == '\\' {
-            slashes += 1;
-            continue;
-        }
-        if c == '"' {
-            out.push_str(&"\\".repeat(slashes * 2 + 1));
-            out.push('"');
-        } else {
-            out.push_str(&"\\".repeat(slashes));
-            out.push(c);
-        }
-        slashes = 0;
-    }
-    out.push_str(&"\\".repeat(slashes * 2));
-    out.push('"');
-    out
-}
-#[cfg(any(windows, test))]
-pub fn render_windows(exe: &Path, config: &Path) -> Result<String> {
-    let e = xml(path_text(exe)?);
-    let c = xml(&windows_arg(path_text(config)?));
-    Ok(format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-<RegistrationInfo><Description>Atrium per-user agent node</Description></RegistrationInfo>
-<Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>
-<Principals><Principal id="Author"><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
-<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Enabled>true</Enabled></Settings>
-<Actions Context="Author"><Exec><Command>{e}</Command><Arguments>serve --config {c}</Arguments></Exec></Actions>
-</Task>
-"#
-    ))
-}
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(target_os = "macos")]
 fn invoke(program: &str, args: &[&str]) -> Result<()> {
     let status = std::process::Command::new(program)
         .args(args)
@@ -97,7 +61,7 @@ fn invoke(program: &str, args: &[&str]) -> Result<()> {
     }
     Ok(())
 }
-#[cfg(any(target_os = "linux", windows, test))]
+#[cfg(any(target_os = "linux", test))]
 fn save(path: &Path, content: &str) -> Result<()> {
     use std::io::Write;
     let parent = path.parent().context("service path has no parent")?;
@@ -133,7 +97,8 @@ fn save(path: &Path, content: &str) -> Result<()> {
     }
     result
 }
-pub fn definition_path() -> Result<PathBuf> {
+#[cfg(not(windows))]
+fn definition_path() -> Result<PathBuf> {
     #[cfg(not(windows))]
     let home = dirs::home_dir().context("home unavailable")?;
     #[cfg(target_os = "macos")]
@@ -145,12 +110,6 @@ pub fn definition_path() -> Result<PathBuf> {
         return Ok(dirs::config_dir()
             .unwrap_or(home.join(".config"))
             .join("systemd/user/atrium-node.service"));
-    }
-    #[cfg(windows)]
-    {
-        return Ok(dirs::config_dir()
-            .context("APPDATA unavailable")?
-            .join("atrium-node/task.xml"));
     }
     #[allow(unreachable_code)]
     {
@@ -169,8 +128,10 @@ pub fn run(action: &str, config_path: &Path) -> Result<()> {
         // existing file (canonicalized in each platform branch below).
         crate::config::Config::load(config_path)?;
     }
+    #[cfg(not(windows))]
     let target = definition_path()?;
-    let t = path_text(&target)?;
+    #[cfg(not(windows))]
+    path_text(&target)?;
     #[cfg(target_os = "macos")]
     {
         let uid = unsafe { libc::getuid() };
@@ -204,29 +165,7 @@ pub fn run(action: &str, config_path: &Path) -> Result<()> {
     #[cfg(target_os = "linux")]
     systemd::run(action, &target, config_path)?;
     #[cfg(windows)]
-    {
-        match action {
-            "install" => {
-                let config = config_path
-                    .canonicalize()
-                    .context("create a valid config before installing")?;
-                let exe = std::env::current_exe()?.canonicalize()?;
-                save(&target, &render_windows(&exe, &config)?)?;
-                invoke("schtasks", &["/Create", "/TN", TASK, "/XML", t])?;
-                invoke("schtasks", &["/Run", "/TN", TASK])?;
-            }
-            "uninstall" => {
-                invoke("schtasks", &["/End", "/TN", TASK])?;
-                invoke("schtasks", &["/Delete", "/TN", TASK, "/F"])?;
-                if target.exists() {
-                    std::fs::remove_file(&target)?;
-                }
-            }
-            "status" => invoke("schtasks", &["/Query", "/TN", TASK, "/V", "/FO", "LIST"])?,
-            _ => unreachable!(),
-        }
-    }
-    let _ = (t, config_path);
+    windows::run(action, config_path)?;
     Ok(())
 }
 #[cfg(test)]
@@ -244,27 +183,6 @@ mod tests {
         assert!(p.contains("a &amp; b"));
         assert!(p.contains("c&lt;d"));
         assert!(p.contains("<string>--config</string>"));
-    }
-    #[test]
-    fn windows_quote_backslashes_and_quotes() {
-        assert_eq!(windows_arg("C:\\a b\\"), "\"C:\\a b\\\\\"");
-        assert_eq!(windows_arg("a\"b"), "\"a\\\"b\"");
-    }
-    #[test]
-    fn windows_task_is_unprivileged_and_escapes_arguments() {
-        // Use host-native absolute paths: this tests XML and command-line
-        // generation, not Windows task registration on another OS.
-        let base = std::env::temp_dir();
-        let exe = base.join("node & helper.exe");
-        let config = base.join("settings space & quote.toml");
-        let output = render_windows(&exe, &config).unwrap();
-        assert!(output.contains("node &amp; helper.exe</Command>"));
-        assert!(output.contains("<LogonType>InteractiveToken</LogonType>"));
-        assert!(output.contains("<RunLevel>LeastPrivilege</RunLevel>"));
-        assert!(output.contains("<Arguments>serve --config &quot;"));
-        assert!(output.contains("settings space &amp; quote.toml&quot;</Arguments>"));
-        assert!(!output.contains("cmd.exe"));
-        assert!(!output.contains("HighestAvailable"));
     }
     #[test]
     fn install_definition_never_clobbers_existing_file() {

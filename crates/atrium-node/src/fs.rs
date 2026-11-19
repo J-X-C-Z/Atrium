@@ -298,15 +298,45 @@ fn expand(input: &str) -> Result<PathBuf> {
     if input.contains('\0') {
         bail!(FsError::BadRequest);
     }
+    let home_relative = input.strip_prefix("~/");
+    #[cfg(windows)]
+    let home_relative = home_relative.or_else(|| input.strip_prefix("~\\"));
     let path = if input == "~" {
         dirs::home_dir().ok_or(FsError::BadRequest)?
-    } else if let Some(rest) = input.strip_prefix("~/") {
+    } else if let Some(rest) = home_relative {
+        let rest = Path::new(rest);
+        #[cfg(windows)]
+        if rest.has_root() || matches!(rest.components().next(), Some(Component::Prefix(_))) {
+            bail!(FsError::BadRequest);
+        }
         dirs::home_dir().ok_or(FsError::BadRequest)?.join(rest)
     } else {
         PathBuf::from(input)
     };
     if !path.is_absolute() {
         bail!(FsError::BadRequest);
+    }
+    #[cfg(windows)]
+    for component in path.components() {
+        use std::path::Prefix;
+        match component {
+            Component::Prefix(prefix)
+                if !matches!(
+                    prefix.kind(),
+                    Prefix::Disk(_)
+                        | Prefix::VerbatimDisk(_)
+                        | Prefix::UNC(..)
+                        | Prefix::VerbatimUNC(..)
+                ) =>
+            {
+                bail!(FsError::BadRequest)
+            }
+            // Alternate data streams are outside the node's regular-file API.
+            Component::Normal(name) if name.as_encoded_bytes().contains(&b':') => {
+                bail!(FsError::BadRequest);
+            }
+            _ => {}
+        }
     }
     // Existing paths retain filesystem semantics for '..'. For missing suffixes
     // reject it rather than interpreting a nonexistent component as a directory.
@@ -319,6 +349,21 @@ fn expand(input: &str) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    fn windows_home_paths_and_file_namespaces() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(expand(r"~\atrium").unwrap(), home.join("atrium"));
+        assert_eq!(expand(r"~/atrium").unwrap(), home.join("atrium"));
+        assert!(expand(r"~\C:\atrium").is_err());
+        assert!(expand(r"\\.\C:\atrium").is_err());
+        let f = Fixture::new();
+        let roots = f.roots();
+        roots.write(&f.path("plain.txt"), b"content").unwrap();
+        assert!(roots.stat(&f.path("plain.txt:metadata")).is_err());
+        let canonical = f.0.canonicalize().unwrap().join("plain.txt");
+        assert_eq!(roots.read(canonical.to_str().unwrap()).unwrap(), b"content");
+    }
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {

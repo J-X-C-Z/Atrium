@@ -290,8 +290,6 @@ pub struct Process {
     total_input_limit: usize,
     ws_slots: Arc<Semaphore>,
     stop: watch::Sender<bool>,
-    #[cfg(windows)]
-    job: windows_process::Job,
 }
 impl Process {
     pub fn reserve_ws(&self) -> Result<OwnedSemaphorePermit> {
@@ -489,15 +487,22 @@ impl ProcessManager {
             total_input_limit: self.input_limit,
             ws_slots: Arc::new(Semaphore::new(self.ws_limit)),
             stop,
-            #[cfg(windows)]
-            job,
         });
         processes.insert(proc.id.clone(), proc.clone());
         drop(registry);
         let writer = tokio::spawn(write_input(stdin, input_rx, stop_rx.clone()));
         let out = tokio::spawn(read_output(stdout, proc.clone(), false));
         let err = tokio::spawn(read_output(stderr, proc.clone(), true));
-        tokio::spawn(reap(child, proc.clone(), stop_rx, writer, out, err));
+        tokio::spawn(reap(
+            child,
+            proc.clone(),
+            stop_rx,
+            writer,
+            out,
+            err,
+            #[cfg(windows)]
+            job,
+        ));
         Ok(proc)
     }
     pub async fn get(&self, id: &str) -> Option<Arc<Process>> {
@@ -640,29 +645,29 @@ async fn reap(
     writer: JoinHandle<()>,
     mut out: JoinHandle<()>,
     mut err: JoinHandle<()>,
+    #[cfg(windows)] job: windows_process::Job,
 ) {
     #[cfg(unix)]
     let status = wait_owned_group(&mut child, p.pid, &mut stop).await;
     #[cfg(windows)]
     let status = tokio::select! {
-        status = child.wait() => status,
+        status = child.wait() => Some(status),
         _ = async { if !*stop.borrow() { let _ = stop.changed().await; } } => {
             // The writer observes the same stop signal and drops stdin. Allow
             // cooperative EOF shutdown before terminating the Windows job.
-            match tokio::time::timeout(Duration::from_secs(2), child.wait()).await {
-                Ok(status) => status,
-                Err(_) => match p.job.terminate() {
-                    Ok(()) => child.wait().await,
-                    Err(error) => Err(error),
-                },
-            }
+            tokio::time::timeout(Duration::from_secs(2), child.wait()).await.ok()
         }
     };
     #[cfg(windows)]
-    if let Err(error) = p.job.terminate() {
-        p.push(json!({"stderr":format!("node: job cleanup failed: {error}")}))
-            .await;
-    }
+    let status = {
+        // Kill-on-close covers both the stop timeout and inherited pipes left
+        // open by descendants after a normal leader exit.
+        drop(job);
+        match status {
+            Some(status) => status,
+            None => child.wait().await,
+        }
+    };
     writer.abort();
     let _ = writer.await;
     // A descendant can keep a pipe open after the direct child exits. Bound

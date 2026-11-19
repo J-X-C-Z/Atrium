@@ -178,6 +178,10 @@ pub async fn login_path() -> String {
             paths.push(h.join(p));
         }
     }
+    #[cfg(windows)]
+    if let Some(roaming) = dirs::config_dir() {
+        paths.push(roaming.join("npm"));
+    }
     std::env::join_paths(paths)
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or(value)
@@ -197,6 +201,7 @@ fn executable(p: &Path) -> bool {
         true
     }
 }
+#[cfg(not(windows))]
 pub fn find_binary(name: &str, path: &str) -> Option<PathBuf> {
     let p = PathBuf::from(name);
     let bases: Vec<PathBuf> = if p.is_absolute() {
@@ -204,30 +209,48 @@ pub fn find_binary(name: &str, path: &str) -> Option<PathBuf> {
     } else {
         std::env::split_paths(path).map(|p| p.join(name)).collect()
     };
-    #[cfg(not(windows))]
+    bases.into_iter().find(|p| executable(p))
+}
+
+#[cfg(windows)]
+pub fn find_binary(name: &str, path: &str) -> Option<PathBuf> {
+    let program = Path::new(name);
+    let bases: Vec<_> = if program.is_absolute() {
+        vec![program.to_path_buf()]
+    } else if matches!(
+        program.components().next(),
+        Some(std::path::Component::Normal(_))
+    ) && program.components().count() == 1
     {
-        bases.into_iter().find(|p| executable(p))
-    }
-    #[cfg(windows)]
-    {
-        for p in bases {
-            if executable(&p) {
-                return Some(p);
+        std::env::split_paths(path)
+            .filter(|dir| dir.is_absolute())
+            .map(|dir| dir.join(program))
+            .collect()
+    } else {
+        return None;
+    };
+    let supported = ["exe", "com", "cmd", "bat"];
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+    for base in bases {
+        if let Some(ext) = base.extension().and_then(|ext| ext.to_str()) {
+            if supported.iter().any(|kind| ext.eq_ignore_ascii_case(kind)) && executable(&base) {
+                return Some(base);
             }
-            if p.extension().is_none() {
-                for ext in std::env::var("PATHEXT")
-                    .unwrap_or_else(|_| ".EXE;.CMD;.BAT;.COM".into())
-                    .split(';')
-                {
-                    let candidate = p.with_extension(ext.trim_start_matches('.'));
+        } else {
+            for ext in pathext
+                .split(';')
+                .filter_map(|ext| ext.trim().strip_prefix('.'))
+            {
+                if supported.iter().any(|kind| ext.eq_ignore_ascii_case(kind)) {
+                    let candidate = base.with_extension(ext);
                     if executable(&candidate) {
                         return Some(candidate);
                     }
                 }
             }
         }
-        None
     }
+    None
 }
 #[cfg(test)]
 mod tests {
