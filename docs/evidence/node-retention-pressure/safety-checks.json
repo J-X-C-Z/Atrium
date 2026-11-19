@@ -1,0 +1,6 @@
+{
+  "injected_monitor_failure": "truncated_or_failed; own socket shutdown + node TERM; all owned PID paths absent after cleanup",
+  "existing_output": "refused before starting node; original bytes unchanged",
+  "existing_output_elapsed_seconds": 0.11015405699981784,
+  "driver_sha256": "d5e58e00d6f40151ebd607727b1982a1373a66dbcf08a5749961997ee2122fe1"
+}

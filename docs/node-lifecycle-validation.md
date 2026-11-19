@@ -72,3 +72,15 @@ Covered failure cases include:
 No real provider account, user service installation, GUI, or cross-device tailnet
 was exercised. These new source changes were not used for the earlier bounded-
 load comparison; that report identifies its own executable hashes and scope.
+
+## Additional combined RPC/node restart acceptance
+
+A subsequent test composes the real temporary node/cat, NodeClient Attachment
+and JSON-RPC Connection, rather than testing their closure independently. One
+request is confirmed sent but unanswered; two more are registered while the
+link is disconnected. After restarting the owned node at the same port, all
+three pending requests return Closed within five seconds, the event stream
+closes, and a new post-Gone request returns Closed within three seconds. The
+new runtime's process list remains empty, and the old fixture cat terminates.
+No real commands/accounts are used. All four native protocol tests pass,
+including an independent repeat; this addition changes test coverage only.

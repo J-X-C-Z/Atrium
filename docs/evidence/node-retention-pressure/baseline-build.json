@@ -1,0 +1,13 @@
+{
+  "source_commit": "faac71a5d19815aa09c91d9e48b04717153c5b87",
+  "source_method": "unmodified git archive of exact commit into isolated directory",
+  "source_archive_sha256": "d20dce0911b7549e0a60b92bdc1920635f8561687f37a8e0ae6afac0a0e92c31",
+  "cargo_lock_sha256": "75f196b5500b2ea884da7e9bc8249332bab210282762b18f086331fac086dc0e",
+  "rustc": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
+  "build_command": "cargo build --locked --offline -p atrium-node",
+  "build_profile": "debug",
+  "target_dir": "isolated atrium-load-baseline-target",
+  "binary_sha256": "e47a3771d4bbc809234f411a06f2af8b491b5cd7ff149629ec153a89ec4492dc",
+  "node_tracked_diff_sha256": null,
+  "created_utc": "2026-11-19T05:08:55.995703+00:00"
+}

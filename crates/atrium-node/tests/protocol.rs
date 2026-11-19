@@ -428,3 +428,145 @@ fn instance_identity_detects_restart_without_replaying_queued_input() {
         |s| matches!(s,LinkState::Gone(why) if why.contains("node restarted")),
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_closes_rpc_waiters_and_discards_disconnected_requests() {
+    use agent_rpc::{
+        Connection, Incoming, RpcError,
+        node::{LinkState, NodeClient},
+    };
+    use futures::StreamExt;
+
+    async fn state_matches(
+        state: &std::sync::Arc<std::sync::Mutex<LinkState>>,
+        check: impl Fn(&LinkState) -> bool,
+    ) {
+        tokio::time::timeout(Duration::from_secs(12), async {
+            loop {
+                if check(&state.lock().unwrap()) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("RPC attachment state deadline");
+    }
+
+    let mut node = Node::start();
+    let client = NodeClient::new(&node.url, Some("test-only-token".into()));
+    let process = client
+        .spawn("echo", node.root.to_str().unwrap(), "rpc-restart-fixture")
+        .unwrap();
+    let original_instance = process.instance_id.clone();
+    let attachment = client.attach(&process.id, 0);
+    let state = attachment.state.clone();
+    let (rpc, mut events) = Connection::new(attachment.reader, attachment.writer);
+    state_matches(&state, |s| matches!(s, LinkState::Connected)).await;
+
+    // cat echoes this JSON-RPC request as a server request, deliberately not a
+    // response. Observing it proves the first waiter was sent and is outstanding.
+    let waiting = rpc.request("fixture/no-response", json!({"stage":"before-restart"}));
+    tokio::pin!(waiting);
+    assert!(futures::poll!(waiting.as_mut()).is_pending());
+    let echo = tokio::time::timeout(Duration::from_secs(5), events.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(echo, Incoming::Request { method, .. } if method == "fixture/no-response"));
+    assert!(futures::poll!(waiting.as_mut()).is_pending());
+
+    node.child.kill().unwrap();
+    node.child.wait().unwrap();
+    state_matches(&state, |s| matches!(s, LinkState::Reconnecting { .. })).await;
+    // Polling registers these waiters and writes into the disconnected Link's
+    // queue. No model command or real account is involved in either payload.
+    let queued_one = rpc.request("fixture/queued-one", json!({"must_not_replay":true}));
+    let queued_two = rpc.request("fixture/queued-two", json!({"must_not_replay":true}));
+    tokio::pin!(queued_one, queued_two);
+    assert!(futures::poll!(queued_one.as_mut()).is_pending());
+    assert!(futures::poll!(queued_two.as_mut()).is_pending());
+
+    let config = node.root.join("config.toml");
+    let text = std::fs::read_to_string(&config).unwrap().replacen(
+        "port=0",
+        &format!("port={}", node.url.rsplit(':').next().unwrap()),
+        1,
+    );
+    std::fs::write(&config, text).unwrap();
+    node.child = Command::new(env!("CARGO_BIN_EXE_atrium-node"))
+        .args(["serve", "--config"])
+        .arg(config)
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = node.child.stdout.take().unwrap();
+    let (started, announcement) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let result = BufReader::new(stdout).read_line(&mut line).map(|_| line);
+        let _ = started.send(result);
+    });
+    let line = announcement
+        .recv_timeout(Duration::from_secs(10))
+        .expect("restart startup deadline")
+        .unwrap();
+    assert!(line.starts_with("listening on "));
+    assert_ne!(client.info().unwrap().instance_id, original_instance);
+    state_matches(
+        &state,
+        |s| matches!(s, LinkState::Gone(why) if why.contains("node restarted")),
+    )
+    .await;
+
+    let results = tokio::time::timeout(Duration::from_secs(5), async {
+        futures::join!(waiting, queued_one, queued_two)
+    })
+    .await
+    .expect("Gone must close every outstanding RPC, not leave waiters hanging");
+    assert_eq!(
+        results,
+        (
+            Err(RpcError::Closed),
+            Err(RpcError::Closed),
+            Err(RpcError::Closed)
+        )
+    );
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(3), events.next())
+            .await
+            .unwrap(),
+        Some(Incoming::Closed)
+    );
+    assert_eq!(
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            rpc.request("fixture/after-gone", json!({}))
+        )
+        .await
+        .unwrap(),
+        Err(RpcError::Closed)
+    );
+    assert!(
+        client.procs(None).unwrap().is_empty(),
+        "restart must not recreate a process or execute queued requests"
+    );
+    // Only the PID returned by this fixture is inspected. A zombie is already
+    // exited and awaits its OS adopter; never kill processes by name.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let output = Command::new("ps")
+            .args(["-o", "stat=", "-p", &process.pid.unwrap().to_string()])
+            .output()
+            .unwrap();
+        let status = String::from_utf8_lossy(&output.stdout);
+        if status.trim().is_empty() || status.trim().starts_with('Z') {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "owned cat did not exit after node death"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}

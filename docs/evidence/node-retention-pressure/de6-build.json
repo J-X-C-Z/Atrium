@@ -1,0 +1,22 @@
+{
+  "source_commit": "de6f66d1569ed274e6a6e67904b06b31783a3e89",
+  "build_profile": "debug",
+  "build_command": "cargo build --locked --offline -p atrium-node",
+  "rustc": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
+  "binary_sha256": "f983a6c27046c07a27f18f5dab9449bdeb1b1d7dfe67b629a5aa3bbb4e1c192c",
+  "source_files": {
+    "crates/atrium-node/src/auth.rs": "38ce18a8010d6afeaa2518983cbcc3c25a93286ba050e31362c2ba6d54259881",
+    "crates/atrium-node/src/windows_process.rs": "5d23a0b76b5ae7a6749ec990b6ac9601e5918d7d5260030076871383f926af92",
+    "crates/atrium-node/src/service.rs": "1ed73cc595b94da28d2762f45e46c4947d68a735fab2e29cba49f417fe961a29",
+    "crates/atrium-node/src/main.rs": "946010fa48cee022e5c4cd61df6ef9b828d91ff631d4ffae3f4b6fa3b0ddfcd9",
+    "crates/atrium-node/src/fs.rs": "a95a60a67cd33a0089dbd8773ae8307cc3818513512a395600f3eace1e7dc505",
+    "crates/atrium-node/src/server.rs": "a25df805c0e5998179f1a78dd33d0a111f2fa318f038f1ab1394de7db5d44adc",
+    "crates/atrium-node/src/config.rs": "6a92f2486d3d877697f15eb8980df069ee9f0f86f67df77e137a4b1d614c3533",
+    "crates/atrium-node/src/magpie.rs": "62f8a056a95e250a00e7568fcd6b28447d2748dcd77b4e93f651c5d704cc987e",
+    "crates/atrium-node/src/procs.rs": "c5cec64c2dd342e6fe4af6ab756009f71de1c7172b8aa479be2a984eba203bf7",
+    "crates/atrium-node/src/service_launchd.rs": "5b612aa7777510d7ba0a12213b1dacebc8a99444d611c7c148a2af4f82b3ae63",
+    "crates/atrium-node/tests/protocol.rs": "81aec51d688f955949e24f8f47ad2648ae7e9cfd79911002a5ba5f36e9c62cd5",
+    "crates/atrium-node/tests/agents.rs": "8884ddb7282ce506f00bd133521ea854074e549506bada0598bf4fa2c3000b66"
+  },
+  "cargo_lock_sha256": "75f196b5500b2ea884da7e9bc8249332bab210282762b18f086331fac086dc0e"
+}
