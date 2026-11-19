@@ -26,9 +26,12 @@ knows who you are; you cannot act as someone else.
 | Tool | When |
 | --- | --- |
 | `whoami` | First, every session: your role, scope, goal, parent, roadmap with the current phase, and your tasks |
-| `create_task` | Controller: once per lead, with `phases`. Lead: for a self-contained piece of work |
+| `create_task` | Controller: once per lead, with `phases` |
+| `create_tasks` | Lead: fill your task pool with a batch of self-contained tasks (`after` for order, `priority`) |
+| `pool_status` | Lead: what is ready, waiting, in progress, and who holds what |
+| `claim_next` | Pool sub-agent: take the next task (you get back the one you hold, if any) |
 | `check_step` | Lead: the moment a step is done (`"2.1"`, or the step's text). Finishing a phase tells your parent |
-| `finish_task` | When your whole task is done (`status: done`) or cannot be (`failed`), with a report |
+| `finish_task` | When your task is done (`status: done`) or cannot be (`failed`), with a report. For a pool sub-agent it also claims and returns the next task |
 | `notify` | Anything another workstream must know: a changed interface, a decision, a question across scopes. `to` is ids, `all` or `you` (the user) |
 | `read_notices` | Rarely: notices already arrive with your next message |
 | `write_status` | Lead: keep `.atrium/status/<you>.md` current (Focus, Done, Next, Touching, Questions) |
@@ -59,20 +62,36 @@ knows who you are; you cannot act as someone else.
    `write_status`.
 2. Work through the current phase. After **each** step, `check_step` — the
    user follows every lead on a flowchart built from these ticks.
-3. Hand off work that is self-contained and checkable with `create_task`
-   (`scope` inside yours; no `phases` needed). At most a few run at once;
-   more wait. When told one finished, read its result (`list_tasks`) and
-   review its changes before building on them.
+3. Break the current phase into self-contained, checkable tasks and add them
+   **all at once** with `create_tasks` (5–20 is typical; `scope` inside
+   yours; `after` for tasks that need others first). Sub-agents start by
+   themselves and work through the pool without you. Do the parts that need
+   your judgement yourself meanwhile, or stop: you are woken with a digest of
+   results when fewer than one task per sub-agent is left. Then review the
+   results (and their changes), tick your roadmap, and add the next batch so
+   the pool never runs dry.
 4. Roadmap wrong? `notify` the controller; do not rewrite phases yourself.
 5. When the whole goal is done: `finish_task` with `status: done`.
 
 ### Sub-agent
 
+You work a pool: one task at a time, many tasks per session.
+
 1. `whoami`; read `.atrium/brief.md`. Stay inside your scope.
-2. Do the task. If something outside your scope must change, say so in your
+2. Your kickoff may already hold your first task; otherwise `claim_next`.
+3. Do it. If something outside your scope must change, say so in your
    result instead of changing it.
-3. `finish_task`: what you changed, how you checked it, what is left open.
-   Then stop.
+4. `finish_task`: what you changed, how you checked it, what is left open.
+   It hands you the next task: carry straight on. Stop only when it says the
+   pool is empty. Do not trust memory from earlier tasks without re-checking
+   the files.
+
+### Unattended projects
+
+If your kickoff says the project runs unattended, nobody answers questions.
+Never stop to ask: choose the reasonable option, write it in your status file
+or result, `notify` your parent, and keep going. When Atrium wakes you to
+continue, re-read your task and status files and pick up where you left off.
 
 ## Without the tools: the files
 
@@ -120,5 +139,9 @@ touch server/.
   controller a notice.
 - Finish: add `## Result` at the end with your report, then set the
   `status:` line to `done` (or `failed`, with the reason in the result).
+- Pool sub-agents claim by hand like this: in the first task file of the
+  lead's folder whose `status:` is `open`, with no `claimed_by:` and whose
+  `after:` tasks are all `done`, set `status: running` and add
+  `claimed_by: <your id>` under the title.
 - `status:` values are `open` (Atrium will start it), `running` (Atrium set
   it), `done` and `failed`. Do not set `running` yourself.

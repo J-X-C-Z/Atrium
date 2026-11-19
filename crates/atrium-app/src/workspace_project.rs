@@ -350,7 +350,7 @@ impl Workspace {
                 _ => None,
             },
             task: None,
-            reported: false,
+            ..Workstream::default()
         };
         let id = stream.id.clone();
         let title = format!("{} · {}", project.file.name, stream.name);
@@ -636,6 +636,24 @@ impl Workspace {
     }
 
     /// Whether to hold the controller's leads for approval.
+    /// A lead's task pool in the shown project.
+    pub fn pool(&self, lead: &str) -> Option<project::pool::Pool> {
+        self.active_project().map(|p| p.pool(lead))
+    }
+
+    /// Turns the shown project's autopilot on or off: whether Atrium keeps
+    /// its agents going around the clock without the user.
+    pub fn set_autopilot(&mut self, on: bool, cx: &mut Context<Self>) {
+        let Some(root) = self.project_root() else {
+            return;
+        };
+        if let Some(project) = self.project_mut(&root) {
+            project.file.autopilot.on = on;
+            let _ = project.save();
+        }
+        cx.notify();
+    }
+
     pub fn set_approve_leads(&mut self, on: bool, cx: &mut Context<Self>) {
         let Some(root) = self.project_root() else {
             return;

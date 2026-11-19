@@ -23,7 +23,7 @@ Everything you need to read and write the files is in the
 | Need | Call |
 | --- | --- |
 | Parse a task file | `Task::parse(owner, id, text)` (done for you by `Project::reload` into `project.tasks`) |
-| Tasks that should get an agent now | `Project::startable()`: honours roles, approval and `max_workers` |
+| Controller tasks that should get a lead now | `Project::startable()`: honours approval. A lead's own tasks form a **pool** worked by pool workers instead: see `docs/autopilot-implementation.md` §1 |
 | The `Workstream` to create for one | `Project::stream_from_task(&task, backend)`: id, role, parent, scope, goal |
 | Mark a task running / failed | `Project::set_task_status(key, TaskStatus::…)` |
 | Finished tasks whose parent was not told | `Project::unreported()` |
@@ -145,7 +145,7 @@ Do not archive or delete threads; the user may open them.
 
 ### 6. Safety limits
 
-- `max_workers` (per lead, default 3) is already enforced by `startable()`.
+- `max_workers` (per lead, default 3) caps pool workers: `workers_needed()`.
 - Add a project-wide cap of 12 running workstreams (any role, counted from
   `stream_views` states `Working`/`Starting`); over it, leave tasks open.
 - Never start an agent for a task whose owner is a `worker` (the model already
@@ -163,8 +163,9 @@ and test those. Required:
    `approve_leads` off), and only after approval when it is on.
 2. Two ticks in a row start one agent per task, never two (status is set to
    `running` first).
-3. With `max_workers = 2` and 3 open tasks under one lead, two start; when one
-   finishes, the third starts on the next tick.
+3. With `max_workers = 2` and 3 open tasks under one lead, two pool workers
+   start (`workers_needed`); when one finishes its task it claims the third
+   itself (see the autopilot brief for the rest of the pool).
 4. A finished task posts exactly one notice to its parent, and only once
    across reloads and restarts (`reported` is saved).
 5. A notice `lead → controller` wakes the controller; `lead → all` does not.

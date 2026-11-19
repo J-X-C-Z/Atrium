@@ -128,38 +128,45 @@ fn run(project: &mut Project, me: &str, name: &str, args: &Value) -> Result<Stri
     match name {
         "whoami" => project.whoami(me),
         "list_tasks" => project.list_tasks(me, args["all"].as_bool().unwrap_or(false)),
-        "create_task" => {
-            let phases = args["phases"]
+        "create_task" => project.create_task(me, &new_task(args)),
+        "create_tasks" => {
+            let tasks: Vec<NewTask> = args["tasks"]
                 .as_array()
-                .map(|phases| {
-                    phases
-                        .iter()
-                        .map(|p| {
-                            let steps = p["steps"]
-                                .as_array()
-                                .map(|s| {
-                                    s.iter()
-                                        .filter_map(|v| v.as_str())
-                                        .map(str::to_string)
-                                        .collect()
-                                })
-                                .unwrap_or_default();
-                            (p["title"].as_str().unwrap_or("").to_string(), steps)
-                        })
-                        .collect()
-                })
+                .map(|tasks| tasks.iter().map(new_task).collect())
                 .unwrap_or_default();
-            project.create_task(
-                me,
-                &NewTask {
-                    id: text("id"),
-                    title: text("title"),
-                    goal: text("goal"),
-                    agent: text("agent"),
-                    scope: list("scope"),
-                    phases,
-                },
-            )
+            project.create_tasks(me, &tasks)
+        }
+        "claim_next" => Ok(match project.claim_next(me)? {
+            Some(task) => format!(
+                "Claimed for you:\n\n{}\n\nDo it, then `finish_task`; that hands you the next one.",
+                crate::agent::task_brief(&task)
+            ),
+            None => {
+                "The pool is empty: nothing to claim. Stop here; you are woken if new tasks arrive."
+                    .into()
+            }
+        }),
+        "pool_status" => {
+            let pool = project.pool(me);
+            let mut out = format!(
+                "{} ready, {} waiting on others, {} in progress, {} done, {} failed.\n",
+                pool.ready.len(),
+                pool.waiting.len(),
+                pool.running.len(),
+                pool.done,
+                pool.failed
+            );
+            for (worker, task) in &pool.workers {
+                out.push_str(&format!(
+                    "- `{worker}`: {}\n",
+                    task.as_deref()
+                        .map_or("idle".to_string(), |t| format!("on `{t}`"))
+                ));
+            }
+            if !pool.ready.is_empty() {
+                out.push_str(&format!("Next up: {}\n", pool.ready.join(", ")));
+            }
+            Ok(out)
         }
         "check_step" => {
             let ticked =
@@ -187,15 +194,64 @@ fn run(project: &mut Project, me: &str, name: &str, args: &Value) -> Result<Stri
     }
 }
 
+/// A task as the tools describe one.
+fn new_task(args: &Value) -> NewTask {
+    let text = |key: &str| args[key].as_str().unwrap_or("").to_string();
+    let list = |value: &Value| -> Vec<String> {
+        match value {
+            Value::Array(items) => items
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(str::to_string)
+                .collect(),
+            Value::String(one) => one
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            _ => Vec::new(),
+        }
+    };
+    let phases = args["phases"]
+        .as_array()
+        .map(|phases| {
+            phases
+                .iter()
+                .map(|p| {
+                    (
+                        p["title"].as_str().unwrap_or("").to_string(),
+                        list(&p["steps"]),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    NewTask {
+        id: text("id"),
+        title: text("title"),
+        goal: text("goal"),
+        agent: text("agent"),
+        scope: list(&args["scope"]),
+        phases,
+        after: list(&args["after"]),
+        priority: match text("priority").as_str() {
+            "high" => 1,
+            "low" => -1,
+            _ => 0,
+        },
+    }
+}
+
 /// The tools `target`'s role may use.
 fn tools(target: &Target) -> Vec<Value> {
-    let role = Project::load(&target.root)
+    let own = Project::load(&target.root)
         .ok()
-        .and_then(|p| p.stream(&target.stream).map(|s| s.role));
-    let has_task = Project::load(&target.root)
-        .ok()
-        .and_then(|p| p.stream(&target.stream).and_then(|s| s.task.clone()))
-        .is_some();
+        .and_then(|p| p.stream(&target.stream).cloned());
+    let role = own.as_ref().map(|s| s.role);
+    let has_task = own.as_ref().is_some_and(|s| s.task.is_some());
+    let pooled = own
+        .as_ref()
+        .is_some_and(|s| s.role == Role::Worker && s.task.is_none());
     let mut tools = vec![
         tool(
             "whoami",
@@ -217,7 +273,7 @@ fn tools(target: &Target) -> Vec<Value> {
             if lead {
                 "Ask for a lead: a long-running agent that owns one part of the project, with a phased roadmap. Atrium starts it (after the user's approval when that is on) and tells you when it finishes."
             } else {
-                "Hand a self-contained piece of your work to a sub-agent. Atrium starts it as soon as you have room and tells you when it finishes; then read its result and review its changes."
+                "Add one task to your pool. Prefer `create_tasks` to add a whole batch at once."
             },
             json!({
                 "title": { "type": "string", "description": "Short name, such as \"Web app\"." },
@@ -245,7 +301,46 @@ fn tools(target: &Target) -> Vec<Value> {
             },
         ));
     }
-    if has_task || role.is_none() {
+    if role == Some(Role::Lead) {
+        tools.push(tool(
+            "create_tasks",
+            "Fill your task pool with a batch of self-contained tasks at once (5–20 is typical). Sub-agents start on their own, each claims a task, finishes it and claims the next, without you. You are woken with their results when the pool runs low: then review and add the next batch.",
+            json!({
+                "tasks": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": { "type": "string" },
+                            "goal": { "type": "string", "description": "What to do, what done looks like, how to check it." },
+                            "id": { "type": "string", "description": "File name, to refer to it in `after`; made from the title when left out." },
+                            "scope": { "type": "array", "items": { "type": "string" }, "description": "Inside yours; yours when left out." },
+                            "after": { "type": "array", "items": { "type": "string" }, "description": "Ids of tasks in your pool that must be done first." },
+                            "priority": { "type": "string", "enum": ["high", "normal", "low"] },
+                            "agent": { "type": "string", "description": "codex, claude, deepseek or antigravity." }
+                        },
+                        "required": ["title", "goal"]
+                    }
+                }
+            }),
+            &["tasks"],
+        ));
+        tools.push(tool(
+            "pool_status",
+            "Your task pool: how many tasks are ready, waiting, in progress, done and failed, and what each sub-agent is on.",
+            json!({}),
+            &[],
+        ));
+    }
+    if pooled || role.is_none() {
+        tools.push(tool(
+            "claim_next",
+            "Claim the next task from your lead's pool. If you already hold one you get it back. Then do it and `finish_task`, which hands you the next.",
+            json!({}),
+            &[],
+        ));
+    }
+    if has_task || pooled || role.is_none() {
         tools.push(tool(
             "check_step",
             "Tick a step of your roadmap as soon as it is done: the user follows your progress through it. Finishing a phase tells your parent.",
@@ -257,7 +352,11 @@ fn tools(target: &Target) -> Vec<Value> {
         ));
         tools.push(tool(
             "finish_task",
-            "End your task with a report. Your parent is told at once; stop working afterwards.",
+            if pooled {
+                "End the task you hold with a report. It claims your next task and returns it: keep going until it says the pool is empty."
+            } else {
+                "End your task with a report. Your parent is told at once; stop working afterwards."
+            },
             json!({
                 "status": { "type": "string", "enum": ["done", "failed"] },
                 "result": { "type": "string", "description": "What you changed, how you checked it, and anything left open (or why it failed)." }
@@ -305,7 +404,7 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
     })
 }
 
-const INSTRUCTIONS: &str = "Atrium runs this project as a controller, leads and sub-agents working side by side; these tools are how you take part. Call `whoami` first. Leads: tick each roadmap step with `check_step` as soon as it is done (the user watches progress there), hand self-contained work to sub-agents with `create_task`, and end with `finish_task` when your goal is done. Sub-agents: do your one task, then `finish_task`. The controller: `write_plan`, then `create_task` once per lead with a phased roadmap, then stop until woken. Use `notify` for anything another workstream must know. Everything is also in plain files under .atrium/, which you may read.";
+const INSTRUCTIONS: &str = "Atrium runs this project as a controller, leads and sub-agents working side by side; these tools are how you take part. Call `whoami` first. Leads: tick each roadmap step with `check_step` as soon as it is done (the user watches progress there), hand self-contained work to sub-agents with `create_task`, and end with `finish_task` when your goal is done. Leads fill a task pool with `create_tasks` and are woken when it runs low. Sub-agents: `claim_next`, do the task, `finish_task` (which hands you the next), and keep going until the pool is empty. The controller: `write_plan`, then `create_task` once per lead with a phased roadmap, then stop until woken. Use `notify` for anything another workstream must know. Everything is also in plain files under .atrium/, which you may read.";
 
 #[cfg(test)]
 mod tests {

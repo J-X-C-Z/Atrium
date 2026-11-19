@@ -87,7 +87,15 @@ script/bundle-macos.sh
   它只改 agent 本来也能手改的文件（任务文件、`plan.md`、`status/`、`notices.md`），从不写 `project.json`，所以和调度引擎、手工编辑完全兼容。已用真实的 Claude Code 验证过：主控通过它建出分阶段的负责人任务，负责人勾步骤、阶段完成自动通知主控、交结果。
 - **Skill**：[`skills/atrium/SKILL.md`](skills/atrium/SKILL.md) 讲清三种角色各自怎么做、什么时候用哪个工具，以及没有工具时直接改文件的格式。`atrium skill install` 会把它装到 `~/.claude/skills/atrium/` 和 `~/.codex/skills/atrium/`；`atrium skill` 直接打印。没装 skill 也能用：每个会话的开场说明和 MCP 服务的 instructions 里都有要点。
 
-**分工**：界面、数据模型和文件格式在这里实现并有测试；按任务文件启动 agent、汇报、唤醒的调度引擎交给 Codex 按 [`docs/hierarchy-implementation.md`](docs/hierarchy-implementation.md) 实现。调度引擎完成之前，批准过的负责人会显示为"即将启动"，子 agent 会显示为"排队中"。
+**任务池：子 agent 不停地干活**（参考 [Paperclip](https://github.com/paperclipai/paperclip) 的 checkout 机制）
+
+负责人不再一个一个地派子 agent，而是用 `create_tasks` 一次往自己的任务池里放一批任务（可以写 `after:` 依赖和 `priority:` 优先级）。Atrium 为它启动几个常驻的子 agent（最多 `max_workers` 个），每个子 agent 领一个任务、做完交结果、`finish_task` 当场帮它领下一个，一直做到池子空。领任务是原子的（跨进程文件锁），同一个任务不会被两个人领走；已经领了的再领会拿回同一个。只有当待领任务少于子 agent 数、或者有任务失败时，才叫醒负责人：附上这期间所有结果的摘要，让它审阅、勾路线图、补下一批。子 agent 做满若干个任务后会换一个新会话，避免上下文越来越乱。概览里每个负责人的当前阶段下会显示任务池（待领 · 进行中 · 已完成）和每个子 agent 手上的任务。
+
+**无人值守：24 小时持续运行**
+
+项目菜单里打开"无人值守，24 小时持续运行"后，概览标题栏会出现一个绿色的"无人值守"标记，所有 agent 的开场说明里都会写明"没人回答问题，不要停下来问，自己做合理决定并记录"。调度上借鉴 Paperclip 的心跳和存活恢复：还有活没干完的 agent 一轮结束就被续上；空闲的负责人和主控定期心跳检查；一轮长时间没输出就打断重来；失败按退避重试（最长每 30 分钟一次，不放弃）；Atrium 重启后自动恢复所有没做完的会话；项目目录内的审批自动通过、目录外的拒绝并通知；可设每日轮数上限；运行期间阻止电脑休眠。真正 24 小时不停，建议把 agent 放在一台常开的机器上（`agent@设备`，通过 atrium-node）。
+
+**分工**：界面、数据模型和文件格式在这里实现并有测试；按任务文件启动 agent、汇报、唤醒的调度引擎交给 Codex 按 [`docs/hierarchy-implementation.md`](docs/hierarchy-implementation.md) 实现，任务池派子 agent、叫醒补任务和无人值守的计时、续跑、重试、恢复按 [`docs/autopilot-implementation.md`](docs/autopilot-implementation.md) 实现。调度引擎完成之前，批准过的负责人会显示为"即将启动"，子 agent 会显示为"排队中"。
 
 当前限制：工作线共用一个代码目录（还没有每条线独立 worktree）；越界提醒只针对 agent 报告的文件修改，不包括它在命令里直接写的文件。
 

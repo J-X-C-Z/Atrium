@@ -28,6 +28,10 @@ pub struct NewTask {
     pub scope: Vec<String>,
     /// `(phase title, steps)`, in order.
     pub phases: Vec<(String, Vec<String>)>,
+    /// Ids of tasks of the same asker that must be done first.
+    pub after: Vec<String>,
+    /// 1 high, 0 normal, -1 low.
+    pub priority: i32,
 }
 
 /// What ticking a step changed.
@@ -183,6 +187,62 @@ impl Project {
         if child == Role::Lead && new.phases.iter().all(|(_, steps)| steps.is_empty()) {
             bail!("A lead needs a roadmap: give `phases`, each with a title and a few steps.");
         }
+        let key = self.write_task(me, new)?;
+        let task = self.task(&key).expect("just written");
+        let when = if child == Role::Worker {
+            "It goes into your task pool; your sub-agents claim tasks from it one after another."
+                .to_string()
+        } else if self.awaits_approval(task) {
+            "Atrium starts it once the user approves it.".to_string()
+        } else {
+            "Atrium starts it now.".to_string()
+        };
+        Ok(format!(
+            "Wrote `{}`: a {} \"{}\". {when} You are told when it finishes.",
+            task.rel_path(),
+            child.label().to_lowercase(),
+            task.title,
+        ))
+    }
+
+    /// Several tasks at once into `me`'s pool (a lead's), in order. All are
+    /// checked before any is written.
+    pub fn create_tasks(&mut self, me: &str, tasks: &[NewTask]) -> Result<String> {
+        if self.me(me)?.role != Role::Lead {
+            bail!("Only leads fill a task pool; the controller asks for leads with `create_task`.");
+        }
+        if tasks.is_empty() {
+            bail!("Give at least one task.");
+        }
+        for (i, new) in tasks.iter().enumerate() {
+            if new.title.trim().is_empty() || new.goal.trim().is_empty() {
+                bail!(
+                    "Task {} needs a title and a goal; nothing was written.",
+                    i + 1
+                );
+            }
+        }
+        let mut keys = Vec::new();
+        for new in tasks {
+            keys.push(self.write_task(me, new)?);
+        }
+        let pool = self.pool(me);
+        Ok(format!(
+            "Added {} task(s) to your pool: {}. Pool now: {} ready, {} waiting on others, {} in progress. Sub-agents start and claim them on their own (at most {} at once); you are woken when the pool runs low, with their results.",
+            keys.len(),
+            keys.iter()
+                .map(|k| format!("`{k}`"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            pool.ready.len(),
+            pool.waiting.len(),
+            pool.running.len(),
+            self.file.max_workers.max(1),
+        ))
+    }
+
+    /// Writes one task file under `me`; returns its key.
+    fn write_task(&mut self, me: &str, new: &NewTask) -> Result<String> {
         let text = render_task(new);
         let key = if new.id.trim().is_empty() {
             self.add_task(me, &new.title, &text)?
@@ -198,23 +258,7 @@ impl Project {
             self.reload();
             format!("{me}/{id}")
         };
-        let task = self.task(&key).expect("just written");
-        let when = if self.awaits_approval(task) {
-            "Atrium starts it once the user approves it.".to_string()
-        } else if self.startable().iter().any(|t| t.key() == key) {
-            "Atrium starts it now.".to_string()
-        } else {
-            format!(
-                "Atrium starts it when one of your running {}s finishes.",
-                child.label().to_lowercase()
-            )
-        };
-        Ok(format!(
-            "Wrote `{}`: a {} \"{}\". {when} You are told when it finishes.",
-            task.rel_path(),
-            child.label().to_lowercase(),
-            task.title,
-        ))
+        Ok(key)
     }
 
     /// Ticks (or unticks) a step of `me`'s own roadmap. `step` is its text,
@@ -269,7 +313,9 @@ impl Project {
         if result.trim().is_empty() {
             bail!("Say what you did, how you checked it and what is left open.");
         }
+        let pooled = own.role == Role::Worker && own.task.is_none();
         let path = self.root.join(task.rel_path());
+        let lock = crate::pool::TaskLock::take(self)?;
         let text =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         let status = if done {
@@ -279,8 +325,21 @@ impl Project {
         };
         let text = with_status(&with_result(&text, result), status);
         fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+        drop(lock);
         self.stamp = None;
         self.reload();
+        if pooled {
+            let done = format!("Marked `{}` {}.", task.rel_path(), status.word());
+            return Ok(match self.claim_next(me)? {
+                Some(next) => format!(
+                    "{done} Your next task, claimed for you:\n\n{}\n\nDo it now, then `finish_task` again.",
+                    task_brief(&next)
+                ),
+                None => format!(
+                    "{done} The pool is empty: nothing left to claim. Stop here; you are woken if new tasks arrive."
+                ),
+            });
+        }
         Ok(format!(
             "Marked `{}` {}. Atrium tells {}; you can stop.",
             task.rel_path(),
@@ -384,6 +443,23 @@ impl Project {
     }
 }
 
+/// A claimed task as a worker is handed it.
+pub fn task_brief(task: &Task) -> String {
+    let mut out = format!(
+        "`{}` ({}): {}\nScope: {}.\n\n{}",
+        task.key(),
+        task.rel_path(),
+        task.title,
+        scope_label(&task.scope),
+        task.body.trim()
+    );
+    if !task.phases.is_empty() {
+        out.push_str("\n\n");
+        out.push_str(&roadmap_text(task));
+    }
+    out
+}
+
 /// A task file with a phased roadmap.
 pub fn render_task(new: &NewTask) -> String {
     let mut text = format!("# {}\nstatus: open\n", new.title.trim());
@@ -392,6 +468,14 @@ pub fn render_task(new: &NewTask) -> String {
     }
     if !new.scope.is_empty() {
         text.push_str(&format!("scope: {}\n", new.scope.join(", ")));
+    }
+    if !new.after.is_empty() {
+        text.push_str(&format!("after: {}\n", new.after.join(", ")));
+    }
+    match new.priority {
+        p if p > 0 => text.push_str("priority: high\n"),
+        p if p < 0 => text.push_str("priority: low\n"),
+        _ => {}
     }
     text.push('\n');
     text.push_str(new.goal.trim());
