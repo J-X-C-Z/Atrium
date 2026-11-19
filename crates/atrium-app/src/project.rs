@@ -28,7 +28,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
-    time::SystemTime,
+    time::{Duration, Instant, SystemTime},
 };
 
 use anyhow::{Context as _, Result};
@@ -1217,6 +1217,22 @@ impl Project {
             dir = DIR,
         )
     }
+}
+
+pub(crate) fn controller_notice(notice: &ProjectNotice, controller: &str) -> bool {
+    notice.from != controller && notice.to.iter().any(|to| to == controller)
+}
+
+pub(crate) fn wake_allowed(
+    last: Option<Instant>,
+    now: Instant,
+    needs_user: bool,
+    running: bool,
+    codex: bool,
+) -> bool {
+    !needs_user
+        && (!running || codex)
+        && last.is_none_or(|last| now.duration_since(last) >= Duration::from_secs(30))
 }
 
 /// `text` with the notices `stream` has not seen in front of it.

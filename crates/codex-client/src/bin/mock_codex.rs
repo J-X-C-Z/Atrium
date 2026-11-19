@@ -786,7 +786,14 @@ fn run_turn(
     );
     items.push(reasoning);
 
-    let lower = text.to_lowercase();
+    let hierarchy = std::env::var_os("ATRIUM_HIERARCHY_MOCK").is_some();
+    // Kickoff prose contains demo trigger words (for example "failed");
+    // the hierarchy fixture exercises the protocol without triggering them.
+    let lower = if hierarchy {
+        String::new()
+    } else {
+        text.to_lowercase()
+    };
     let mut chosen: Option<String> = None;
     if !interrupted && lower.contains("plan") {
         let steps = ["Read the code", "Make the change", "Run the tests"];
@@ -973,6 +980,11 @@ fn run_turn(
         "Here is what I found about **{}**.\n\n1. The request reached the mock agent.\n2. It streamed this answer word by word.\n\n```rust\nfn main() {{\n    println!(\"hello from mock-codex\");\n}}\n```\n\nAsk me to *run* or *edit* something to see approvals and file changes.",
         text.lines().next().unwrap_or("your message")
     );
+    let answer = if hierarchy && text.starts_with("[Atrium] New notices for you:") {
+        format!("Fixture received:\n{text}")
+    } else {
+        answer
+    };
     let answer = if opts.plan {
         "## Proposed plan\n\n1. Read `transcript.rs` and its tests.\n2. Add the new row kind.\n3. Cover it with a test.\n\nSay **go** and I'll do it.".to_string()
     } else {

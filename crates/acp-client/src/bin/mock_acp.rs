@@ -373,7 +373,14 @@ fn prompt(out: &Out, state: &State, id: Value, params: &Value) {
         .lock()
         .unwrap()
         .insert(session_id.clone(), stop.clone());
-    let lower = text.to_lowercase();
+    let hierarchy = std::env::var_os("ATRIUM_HIERARCHY_MOCK").is_some();
+    // Kickoff prose contains demo trigger words (for example "failed");
+    // the hierarchy fixture exercises the protocol without triggering them.
+    let lower = if hierarchy {
+        String::new()
+    } else {
+        text.to_lowercase()
+    };
     let who = match state.name.as_str() {
         "deepseek" => "DeepSeek",
         "antigravity" => "Antigravity",
@@ -484,6 +491,11 @@ fn prompt(out: &Out, state: &State, id: Value, params: &Value) {
             text.lines().next().unwrap_or(""),
             state.name
         )
+    };
+    let answer = if hierarchy && text.starts_with("[Atrium] New notices for you:") {
+        format!("Fixture received:\n{text}")
+    } else {
+        answer
     };
     if !cancelled {
         cancelled = !stream(out, &session_id, "agent_message_chunk", &answer, &stop);

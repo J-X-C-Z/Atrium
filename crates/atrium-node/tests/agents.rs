@@ -3,6 +3,9 @@
 //! `cargo test -p atrium-node --test agents -- --ignored`
 #![cfg(unix)]
 
+#[path = "support/hierarchy.rs"]
+mod hierarchy;
+
 use acp_client::AcpClient;
 use agent_rpc::{
     Incoming,
@@ -28,6 +31,9 @@ struct Node {
 }
 impl Node {
     fn start() -> Self {
+        Self::start_with_hierarchy(false)
+    }
+    fn start_with_hierarchy(hierarchy: bool) -> Self {
         // Use Cargo's binary output path, not the version-dependent test layout.
         let executable = PathBuf::from(env!("CARGO_BIN_EXE_atrium-node"));
         let bin = executable.parent().unwrap().to_path_buf();
@@ -57,9 +63,16 @@ impl Node {
         }
         let cfg = root.join("config.toml");
         std::fs::write(&cfg, config).unwrap();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_atrium-node"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_atrium-node"));
+        command.env_remove("ATRIUM_HIERARCHY_MOCK");
+        if hierarchy {
+            command.env("ATRIUM_HIERARCHY_MOCK", "1");
+        }
+        let mut child = command
             .args(["serve", "--config"])
             .arg(cfg)
+            .env("HOME", &root)
+            .env("SHELL", "/bin/sh")
             .stdout(Stdio::piped())
             .spawn()
             .unwrap();

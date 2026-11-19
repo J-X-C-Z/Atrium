@@ -21,6 +21,7 @@ cap-std = "3"
 ureq.workspace = true
 
 [dev-dependencies]
+jiff.workspace = true
 codex-client.workspace = true
 acp-client.workspace = true
 agent-rpc.workspace = true

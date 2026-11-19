@@ -15,7 +15,9 @@ use super::{CODEX, Composed, Notice, View, Workspace};
 use crate::i18n::tf;
 use crate::{
     agents,
-    project::{self, ATRIUM, Project, Role, Task, TaskStatus, Workstream},
+    project::{
+        self, ATRIUM, Project, Role, Task, TaskStatus, Workstream, controller_notice, wake_allowed,
+    },
 };
 
 /// Where the user is: the everyday chats, or a project.
@@ -90,22 +92,6 @@ fn start_decision(known: bool, ready: bool, running: usize) -> StartDecision {
     } else {
         StartDecision::Start
     }
-}
-
-fn controller_notice(notice: &project::ProjectNotice, controller: &str) -> bool {
-    notice.from != controller && notice.to.iter().any(|to| to == controller)
-}
-
-fn wake_allowed(
-    last: Option<Instant>,
-    now: Instant,
-    needs_user: bool,
-    running: bool,
-    codex: bool,
-) -> bool {
-    !needs_user
-        && (!running || codex)
-        && last.is_none_or(|last| now.duration_since(last) >= Duration::from_secs(30))
 }
 
 /// Temporarily route an automated message without consuming the user's edit.
