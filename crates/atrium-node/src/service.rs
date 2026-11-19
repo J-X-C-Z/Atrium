@@ -3,11 +3,11 @@
 #[cfg(all(unix, any(target_os = "macos", test)))]
 #[path = "service_launchd.rs"]
 mod launchd;
+#[cfg(any(target_os = "linux", all(unix, test)))]
+#[path = "service_systemd.rs"]
+mod systemd;
 use anyhow::{Context, Result, bail};
-use std::{
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::path::{Path, PathBuf};
 #[cfg(any(target_os = "macos", test))]
 const LABEL: &str = "dev.atrium.node";
 #[cfg(windows)]
@@ -45,26 +45,6 @@ fn render_launchd(label: &str, exe: &Path, config: &Path, log: &Path) -> Result<
 <key>StandardOutPath</key><string>{l}</string><key>StandardErrorPath</key><string>{l}</string>
 </dict></plist>
 "#
-    ))
-}
-#[cfg(any(target_os = "linux", test))]
-fn systemd_arg(s: &str) -> String {
-    // ExecStart is not a shell. Escape systemd specifiers and environment
-    // expansion in addition to its double-quoted argument grammar.
-    format!(
-        "\"{}\"",
-        s.replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('%', "%%")
-            .replace('$', "$$")
-    )
-}
-#[cfg(any(target_os = "linux", test))]
-pub fn render_systemd(exe: &Path, config: &Path) -> Result<String> {
-    let e = systemd_arg(path_text(exe)?);
-    let c = systemd_arg(path_text(config)?);
-    Ok(format!(
-        "[Unit]\nDescription=Atrium agent node\nAfter=network.target\n\n[Service]\nType=simple\nExecStart={e} serve --config {c}\nRestart=on-failure\nRestartSec=3\nKillMode=mixed\nTimeoutStopSec=30\n\n[Install]\nWantedBy=default.target\n"
     ))
 }
 /// Quote one Windows CommandLineToArgvW argument without a command shell.
@@ -106,8 +86,9 @@ pub fn render_windows(exe: &Path, config: &Path) -> Result<String> {
 "#
     ))
 }
+#[cfg(any(target_os = "macos", windows))]
 fn invoke(program: &str, args: &[&str]) -> Result<()> {
-    let status = Command::new(program)
+    let status = std::process::Command::new(program)
         .args(args)
         .status()
         .with_context(|| format!("running {program}"))?;
@@ -221,37 +202,7 @@ pub fn run(action: &str, config_path: &Path) -> Result<()> {
         }
     }
     #[cfg(target_os = "linux")]
-    {
-        match action {
-            "install" => {
-                let config = config_path
-                    .canonicalize()
-                    .context("create a valid config before installing")?;
-                let exe = std::env::current_exe()?.canonicalize()?;
-                save(&target, &render_systemd(&exe, &config)?)?;
-                invoke("systemctl", &["--user", "daemon-reload"])?;
-                invoke(
-                    "systemctl",
-                    &["--user", "enable", "--now", "atrium-node.service"],
-                )?;
-                println!(
-                    "For operation after logout, enable user lingering explicitly with loginctl enable-linger."
-                );
-            }
-            "uninstall" => {
-                invoke(
-                    "systemctl",
-                    &["--user", "disable", "--now", "atrium-node.service"],
-                )?;
-                if target.exists() {
-                    std::fs::remove_file(&target)?;
-                }
-                invoke("systemctl", &["--user", "daemon-reload"])?;
-            }
-            "status" => invoke("systemctl", &["--user", "status", "atrium-node.service"])?,
-            _ => unreachable!(),
-        }
-    }
+    systemd::run(action, &target, config_path)?;
     #[cfg(windows)]
     {
         match action {
@@ -293,23 +244,6 @@ mod tests {
         assert!(p.contains("a &amp; b"));
         assert!(p.contains("c&lt;d"));
         assert!(p.contains("<string>--config</string>"));
-    }
-    #[test]
-    fn systemd_escapes_expansion() {
-        let config = std::env::temp_dir().join("config space");
-        let p = render_systemd(&std::env::temp_dir().join("a%b$"), &config).unwrap();
-        assert!(p.contains("a%%b$$"));
-        assert!(p.contains(&systemd_arg(config.to_str().unwrap())));
-    }
-    #[test]
-    fn rejects_control_paths() {
-        assert!(
-            render_systemd(
-                Path::new("/tmp/a\nExecStart=evil"),
-                Path::new("/tmp/config")
-            )
-            .is_err()
-        );
     }
     #[test]
     fn windows_quote_backslashes_and_quotes() {
