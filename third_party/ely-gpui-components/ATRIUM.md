@@ -11,5 +11,11 @@ Atrium's changes, meant to go upstream:
   `src/i18n/builtin.rs`: conversation list, welcome greeting, composer,
   thinking and error rows, message actions, permission prompt, tool calls,
   file changes.
+- `ToolCallCard::expanded` and `ThinkingBlock::expanded` open or fold the
+  card regardless of the reader's last click, for a "verbose" view of a
+  whole conversation.
+- `typography::fit` joins line breaks before shaping, so `Ellipsis` and
+  friends no longer panic on multi-line text (such as a multi-line command
+  in a tool call's summary).
 
 Examples and the web gallery are left out of this copy.

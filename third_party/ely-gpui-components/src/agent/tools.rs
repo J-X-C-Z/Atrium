@@ -53,6 +53,7 @@ pub struct ToolCallCard {
     took: Option<Duration>,
     arguments: Option<SharedString>,
     result: Option<SharedString>,
+    expanded: Option<bool>,
 }
 
 impl ToolCallCard {
@@ -65,7 +66,15 @@ impl ToolCallCard {
             took: None,
             arguments: None,
             result: None,
+            expanded: None,
         }
+    }
+
+    /// Opens (or folds) the card regardless of the reader's last click,
+    /// such as for a verbose view of the whole conversation.
+    pub fn expanded(mut self, open: bool) -> Self {
+        self.expanded = Some(open);
+        self
     }
 
     /// A few words on what the call touched, such as a path or a query.
@@ -95,7 +104,7 @@ impl ToolCallCard {
 impl RenderOnce for ToolCallCard {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let state = window.use_keyed_state((self.id.clone(), "open"), cx, |_, _| false);
-        let open = *state.read(cx);
+        let open = self.expanded.unwrap_or(*state.read(cx));
         let opens = self.arguments.is_some() || self.result.is_some();
         let failed = self.status == StepState::Failed;
         let mark = step_mark((self.id.clone(), "mark").into(), self.status, window, cx);

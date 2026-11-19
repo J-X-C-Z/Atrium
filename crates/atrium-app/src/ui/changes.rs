@@ -62,9 +62,22 @@ pub struct LineComment {
 #[derive(Default)]
 pub struct Review {
     pub open: bool,
+    /// Which of the side panel's views shows.
+    pub tab: SideTab,
+    /// Conversations watched side by side, by thread id.
+    pub watched: Vec<String>,
     pub comments: Vec<LineComment>,
     /// The line being commented on: `(path, row)`.
     pub target: Option<(String, usize)>,
+}
+
+/// The side panel's views.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SideTab {
+    #[default]
+    Changes,
+    Activity,
+    Watch,
 }
 
 /// Reads a unified diff leniently: hunk headers with or without numbers, and
@@ -208,7 +221,17 @@ fn short(path: &str, cwd: &str) -> String {
 
 impl RootView {
     pub(super) fn toggle_changes(&mut self, cx: &mut Context<Self>) {
-        self.review.open = !self.review.open;
+        self.toggle_side(SideTab::Changes, cx);
+    }
+
+    /// Opens the side panel on `tab`, or closes it when `tab` already shows.
+    pub(super) fn toggle_side(&mut self, tab: SideTab, cx: &mut Context<Self>) {
+        if self.review.open && self.review.tab == tab {
+            self.review.open = false;
+        } else {
+            self.review.open = true;
+            self.review.tab = tab;
+        }
         cx.notify();
     }
 
@@ -264,47 +287,31 @@ impl RootView {
             .iter()
             .fold((0, 0), |(a, r), f| (a + f.added, r + f.removed));
 
-        let close = root.clone();
-        let header = div()
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap_2()
-            .px_3()
-            .py_2()
-            .border_b_1()
-            .border_color(colors.border)
-            .child(
+        let header = self.side_tabs(
+            Some(
                 div()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child(t("Changes")),
-            )
-            .child(
-                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
                     .text_size(tiny)
-                    .text_color(colors.fg_subtle)
-                    .child(tf("{n} files", &[("n", &files.len())])),
-            )
-            .child(
-                div()
-                    .text_size(tiny)
-                    .text_color(colors.success)
-                    .child(format!("+{added}")),
-            )
-            .child(
-                div()
-                    .text_size(tiny)
-                    .text_color(colors.danger)
-                    .child(format!("−{removed}")),
-            )
-            .child(div().flex_1())
-            .child(
-                IconButton::new("changes-close", IconName::X)
-                    .variant(ButtonVariant::Ghost)
-                    .size(ControlSize::Sm)
-                    .tooltip(t("Close"))
-                    .on_click(move |_, _, cx| close.update(cx, |r, cx| r.toggle_changes(cx))),
-            );
+                    .child(
+                        div()
+                            .text_color(colors.fg_subtle)
+                            .child(tf("{n} files", &[("n", &files.len())])),
+                    )
+                    .child(div().text_color(colors.success).child(format!("+{added}")))
+                    .child(div().text_color(colors.danger).child(format!("−{removed}")))
+                    .into_any_element(),
+            ),
+            cx,
+        );
+        if self.review.tab != SideTab::Changes {
+            let body = match self.review.tab {
+                SideTab::Activity => self.activity_body(cx),
+                _ => self.watch_body(cx),
+            };
+            return Some(Self::side_frame(header, body, None, cx));
+        }
 
         let mut body = div().flex().flex_col().gap_3().p_3();
         if files.is_empty() {
@@ -574,28 +581,103 @@ impl RootView {
                 )
         });
 
-        Some(
+        Some(Self::side_frame(
+            header,
+            body.into_any_element(),
+            footer.map(|f| f.into_any_element()),
+            cx,
+        ))
+    }
+
+    /// The side panel around one view's `body`.
+    fn side_frame(
+        header: AnyElement,
+        body: AnyElement,
+        footer: Option<AnyElement>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let colors = cx.theme().colors.clone();
+        div()
+            .flex_none()
+            .w(px(480.))
+            .h_full()
+            .flex()
+            .flex_col()
+            .border_l_1()
+            .border_color(colors.border)
+            .bg(colors.bg)
+            .child(header)
+            .child(
+                div()
+                    .id("side-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(body),
+            )
+            .children(footer)
+            .into_any_element()
+    }
+
+    /// The side panel's tab bar, with `extra` after the tabs.
+    fn side_tabs(&self, extra: Option<AnyElement>, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let colors = theme.colors.clone();
+        let root = cx.entity();
+        let tab = |id: &'static str, label: &str, which: SideTab| {
+            let on = self.review.tab == which;
+            let go = root.clone();
             div()
-                .flex_none()
-                .w(px(480.))
-                .h_full()
-                .flex()
-                .flex_col()
-                .border_l_1()
-                .border_color(colors.border)
-                .bg(colors.bg)
-                .child(header)
-                .child(
-                    div()
-                        .id("changes-scroll")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .child(body),
-                )
-                .children(footer)
-                .into_any_element(),
-        )
+                .id(id)
+                .px_2()
+                .py_0p5()
+                .rounded(theme.radius(Radius::Md))
+                .cursor_pointer()
+                .text_size(theme.text_size(TextSize::Sm))
+                .when(on, |el| {
+                    el.bg(colors.selection)
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                })
+                .when(!on, |el| {
+                    el.text_color(colors.fg_muted)
+                        .hover(|el| el.bg(colors.hover))
+                })
+                .on_click(move |_, _, cx| {
+                    go.update(cx, |r, cx| {
+                        r.review.tab = which;
+                        cx.notify();
+                    })
+                })
+                .child(label.to_string())
+        };
+        let close = root.clone();
+        div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_1p5()
+            .border_b_1()
+            .border_color(colors.border)
+            .child(tab("side-changes", t("Changes"), SideTab::Changes))
+            .child(tab("side-activity", t("Activity"), SideTab::Activity))
+            .child(tab("side-watch", t("Side by side"), SideTab::Watch))
+            .child(div().flex_1())
+            .children(extra.filter(|_| self.review.tab == SideTab::Changes))
+            .child(
+                IconButton::new("side-close", IconName::X)
+                    .variant(ButtonVariant::Ghost)
+                    .size(ControlSize::Sm)
+                    .tooltip(t("Close"))
+                    .on_click(move |_, _, cx| {
+                        close.update(cx, |r, cx| {
+                            r.review.open = false;
+                            cx.notify();
+                        })
+                    }),
+            )
+            .into_any_element()
     }
 }
 

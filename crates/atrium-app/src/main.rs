@@ -6,6 +6,7 @@ mod alerts;
 mod i18n;
 use atrium_project as project;
 mod settings;
+mod skills;
 mod ui;
 mod workspace;
 
@@ -16,8 +17,8 @@ use gpui::{
 };
 
 use ui::{
-    AttachFiles, CompactChat, FocusComposer, NewChat, OpenPalette, OpenSettings, Quit, Reconnect,
-    ReviewChanges, RootView, ShowContext, StopTurn, ToggleChanges, ToggleSidebar,
+    AttachFiles, CompactChat, CycleTranscript, FocusComposer, NewChat, OpenPalette, OpenSettings,
+    Quit, Reconnect, ReviewChanges, RootView, ShowContext, StopTurn, ToggleChanges, ToggleSidebar,
 };
 
 fn main() {
@@ -81,6 +82,7 @@ fn main() {
                 KeyBinding::new("cmd-i", ShowContext, None),
                 KeyBinding::new("ctrl-i", ShowContext, None),
                 KeyBinding::new("cmd-shift-d", ToggleChanges, None),
+                KeyBinding::new("ctrl-o", CycleTranscript, None),
                 KeyBinding::new("ctrl-shift-d", ToggleChanges, None),
                 KeyBinding::new("cmd-.", StopTurn, None),
                 KeyBinding::new("ctrl-.", StopTurn, None),
@@ -156,6 +158,7 @@ pub fn set_menus(cx: &mut App) {
                 MenuItem::action(t("Stop Answer"), StopTurn),
                 MenuItem::action(t("Context & Speed"), ShowContext),
                 MenuItem::action(t("Changes"), ToggleChanges),
+                MenuItem::action(t("Cycle Normal / Thinking / Verbose"), CycleTranscript),
                 MenuItem::separator(),
                 MenuItem::action(t("Review Uncommitted Changes"), ReviewChanges),
                 MenuItem::action(t("Compact Conversation"), CompactChat),

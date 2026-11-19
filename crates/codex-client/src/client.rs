@@ -42,6 +42,8 @@ pub struct StartThread {
     pub sandbox: Option<String>,
     /// MCP servers this thread has on top of the user's own.
     pub mcp_servers: Vec<McpServer>,
+    /// Environment variables for the commands the thread runs.
+    pub env: Vec<(String, String)>,
 }
 
 /// Config overrides adding `servers`, one dotted key each so the user's own
@@ -311,8 +313,19 @@ impl CodexClient {
         put(&mut params, "model", options.model);
         put(&mut params, "approvalPolicy", options.approval_policy);
         put(&mut params, "sandbox", options.sandbox);
-        if let Some(config) = mcp_config(&options.mcp_servers) {
-            params.insert("config".into(), config);
+        let mut config = mcp_config(&options.mcp_servers)
+            .and_then(|c| c.as_object().cloned())
+            .unwrap_or_default();
+        if !options.env.is_empty() {
+            let vars: serde_json::Map<String, Value> = options
+                .env
+                .iter()
+                .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                .collect();
+            config.insert("shell_environment_policy.set".into(), Value::Object(vars));
+        }
+        if !config.is_empty() {
+            params.insert("config".into(), Value::Object(config));
         }
         let result = self
             .connection

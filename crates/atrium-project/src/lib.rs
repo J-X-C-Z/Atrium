@@ -500,6 +500,29 @@ pub struct Workstream {
     /// A pool worker taken out of service (its session was replaced by a
     /// fresh one, or it kept failing). Kept so its chat stays readable.
     pub retired: bool,
+    /// The pull request of its branch, as the scheduler last saw it.
+    pub pr: Option<PullRequest>,
+}
+
+/// A workstream's pull request and its checks.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PullRequest {
+    pub number: u64,
+    pub url: String,
+    /// `open`, `draft`, `merged` or `closed`.
+    pub state: String,
+    pub checks: Checks,
+}
+
+/// How a pull request's CI stands.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Checks {
+    #[default]
+    None,
+    Pending,
+    Passing,
+    Failing,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -827,6 +850,13 @@ impl Project {
     /// `.atrium/worktrees/<id>`, kept out of git by the project's exclude file.
     pub fn worktree_dir(&self, id: &str) -> PathBuf {
         self.dir().join("worktrees").join(id)
+    }
+
+    /// The latest screenshot of workstream `id`'s work, when one was saved
+    /// to `.atrium/previews/<id>.png` (by the agent, or by Atrium's preview).
+    pub fn preview_of(&self, id: &str) -> Option<PathBuf> {
+        let path = self.dir().join("previews").join(format!("{id}.png"));
+        path.is_file().then_some(path)
     }
 
     /// The branch of workstream `id`'s worktree: `atrium/<id>`.
@@ -1597,6 +1627,7 @@ impl Project {
              - `{dir}/notices.md`: append-only. To tell others something, append one line: `- YYYY-MM-DD HH:MM · {id} → <id or all>: <message>`.\n\
              New notices for you are added to your next message, so there is no need to check for them.\n\n\
              You have a task pool and up to {max} sub-agents to work it. Break the current phase into self-contained, checkable tasks and add them all at once (`create_tasks`, or one file each as `{dir}/tasks/{id}/<task-id>.md` with a `# Title`, `status: open`, optionally `scope:` inside yours, `after: <ids>` for tasks that must be done first and `priority: high`, then what to do and how it will be checked). Sub-agents start on their own; each claims a task, finishes it and claims the next, without you. You are woken with their results when fewer than one task per sub-agent is left: review them, tick your roadmap, and add the next batch so they never run dry. Do the parts that need your judgement yourself.\n\n\
+             If your part has a user interface, save a screenshot of it to `{dir}/previews/{id}.png` at the end of each phase (overwrite the last one): the user sees it beside your progress.\n\n\
              Read the brief and the contracts, write your status file, then work toward your goal on your own. Stop to ask only when a decision really needs me.",
             name = stream.name,
             id = stream.id,

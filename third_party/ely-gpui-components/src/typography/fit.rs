@@ -39,6 +39,15 @@ pub(crate) fn text_width(text: &str, size: Pixels, window: &Window) -> Pixels {
 }
 
 fn shape(text: &str, window: &mut Window) -> ShapedLine {
+    // One line only: a label handed a multi-line text (a command, a
+    // message) shows it joined, rather than failing to shape.
+    let joined;
+    let text = if text.contains(['\n', '\r']) {
+        joined = text.replace("\r\n", " ").replace(['\n', '\r'], " ");
+        joined.as_str()
+    } else {
+        text
+    };
     let style = window.text_style();
     let run = style.to_run(text.len());
     let size = style.font_size.to_pixels(window.rem_size());

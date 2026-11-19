@@ -25,7 +25,7 @@ use super::{
 use atrium_core::GoalStatus;
 
 use crate::i18n::{t, tf};
-use crate::workspace::{AgentStatus, CODEX, Status, View, Workspace};
+use crate::workspace::{AgentStatus, CODEX, Composed, Status, View, Workspace};
 
 const STARTERS: [(&str, IconName); 4] = [
     ("Explain this project", IconName::FileText),
@@ -432,6 +432,20 @@ fn header(
                     .on_click(move |_, _, cx| toggle.update(cx, |r, cx| r.toggle_changes(cx)))
             })
         })
+        .when(thread_id.is_some(), |bar| {
+            let toggle = root.clone();
+            bar.child(
+                IconButton::new("header-side", IconName::Columns2)
+                    .variant(ButtonVariant::Ghost)
+                    .size(ControlSize::Sm)
+                    .tooltip(t("Activity and side by side"))
+                    .on_click(move |_, _, cx| {
+                        toggle.update(cx, |r, cx| {
+                            r.toggle_side(super::changes::SideTab::Activity, cx)
+                        })
+                    }),
+            )
+        })
         .children(chat_menu)
         .when(thread_id.is_some(), |bar| {
             bar.child(
@@ -567,9 +581,140 @@ fn body(
     let messages = MessageList::new(list_id, count, move |ix, window, cx| {
         rows::row(&rows_from, ix, window, cx)
     });
+    let next = next_steps_strip(workspace, cx);
     ChatContainer::new(messages)
-        .composer(composer_column(composer))
+        .composer(
+            div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .children(next)
+                .child(composer_column(composer)),
+        )
         .into_any_element()
+}
+
+/// The follow-ups the agent proposed, each to send here or start in a new
+/// conversation, or all at once.
+fn next_steps_strip(workspace: &Entity<Workspace>, cx: &App) -> Option<AnyElement> {
+    let steps = workspace.read(cx).suggested_next();
+    if steps.is_empty() {
+        return None;
+    }
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let small = theme.text_size(TextSize::Sm);
+    let mut list = div()
+        .w_full()
+        .max_w(px(COLUMN))
+        .flex()
+        .flex_col()
+        .gap_1()
+        .p_2()
+        .rounded(theme.radius(Radius::Lg))
+        .border_1()
+        .border_color(colors.border)
+        .bg(colors.surface)
+        .child({
+            let (all, all_steps, dismiss) = (workspace.clone(), steps.clone(), workspace.clone());
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_1()
+                .child(
+                    Icon::new(IconName::Sparkles)
+                        .size(IconSize::Xs)
+                        .color(colors.accent),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(theme.text_size(TextSize::Xs))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(colors.fg_subtle)
+                        .child(t("Suggested next")),
+                )
+                .child(
+                    Button::new("next-all", tf("Start all {n}", &[("n", &steps.len())]))
+                        .variant(ButtonVariant::Ghost)
+                        .size(ControlSize::Sm)
+                        .on_click(move |_, _, cx| {
+                            let steps = all_steps.clone();
+                            all.update(cx, |ws, cx| {
+                                for step in steps {
+                                    ws.start_chat(step, cx);
+                                }
+                                ws.dismiss_next(cx);
+                            })
+                        }),
+                )
+                .child(
+                    IconButton::new("next-dismiss", IconName::X)
+                        .variant(ButtonVariant::Ghost)
+                        .size(ControlSize::Sm)
+                        .tooltip(t("Dismiss"))
+                        .on_click(move |_, _, cx| dismiss.update(cx, |ws, cx| ws.dismiss_next(cx))),
+                )
+        });
+    for (ix, step) in steps.into_iter().enumerate() {
+        let (here, new, text_here, text_new) = (
+            workspace.clone(),
+            workspace.clone(),
+            step.clone(),
+            step.clone(),
+        );
+        list = list.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_1()
+                .py_0p5()
+                .rounded(theme.radius(Radius::Md))
+                .hover(|el| el.bg(colors.hover))
+                .text_size(small)
+                .child(div().flex_1().min_w_0().truncate().child(step))
+                .child(
+                    IconButton::new(
+                        gpui::SharedString::from(format!("next-here-{ix}")),
+                        IconName::Send,
+                    )
+                    .variant(ButtonVariant::Ghost)
+                    .size(ControlSize::Sm)
+                    .tooltip(t("Send here"))
+                    .on_click(move |_, _, cx| {
+                        let text = text_here.clone();
+                        here.update(cx, |ws, cx| {
+                            ws.dismiss_next(cx);
+                            ws.send(Composed::text(text), cx);
+                        })
+                    }),
+                )
+                .child(
+                    IconButton::new(
+                        gpui::SharedString::from(format!("next-new-{ix}")),
+                        IconName::SquarePen,
+                    )
+                    .variant(ButtonVariant::Ghost)
+                    .size(ControlSize::Sm)
+                    .tooltip(t("Start in a new conversation"))
+                    .on_click(move |_, _, cx| {
+                        let text = text_new.clone();
+                        new.update(cx, |ws, cx| ws.start_chat(text, cx))
+                    }),
+                ),
+        );
+    }
+    Some(
+        div()
+            .w_full()
+            .flex()
+            .justify_center()
+            .child(list)
+            .into_any_element(),
+    )
 }
 
 /// The chat's goal under the title bar: what, how far, and its controls.
