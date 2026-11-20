@@ -12,9 +12,14 @@ machine's tailnet address. Your phone, on the same tailnet, opens
 `http://<machine>:7879/`. Nothing goes through a cloud service.
 
 The **API and the server are yours** (backend). The **web page is mine**
-(frontend): I build it against the API below once it exists. Until then,
-serve a placeholder `index.html` that lists the projects from
-`/api/projects`.
+(frontend). **Done:** `crates/atrium-phone/src/index.html` is the whole
+phone UI in one file (no build step, no outside requests): projects,
+project progress, a workstream's roadmap and pool, its conversation,
+the needs-you inbox (approvals and questions), notices, and this device.
+Routes mirror the deep links: `#/project/<ix>/stream/<id>` (append
+`/chat` for the conversation), `#/inbox`, `#/notices`, `#/device`, so the
+app shell maps `atrium://project/<ix>/stream/<id>` straight onto the page.
+Settings → Phone has the `remote_view` switch and the `push_topic` field.
 
 ## Server
 

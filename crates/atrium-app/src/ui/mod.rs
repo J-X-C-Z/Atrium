@@ -665,6 +665,8 @@ impl RootView {
         let codex_path =
             cx.new(|cx| TextInput::new(window, cx).placeholder(t("Found on PATH (leave empty)")));
         codex_path.update(cx, |input, cx| input.set_text(current, cx));
+        let topic = self.workspace.read(cx).settings.push_topic.clone().unwrap_or_default();
+        self.extras.push_topic.update(cx, |input, cx| input.set_text(topic, cx));
         let node_address = cx.new(|cx| {
             TextInput::new(window, cx).placeholder(t("Add a node by address, such as studio:7381"))
         });
@@ -899,6 +901,7 @@ impl RootView {
     ) -> AnyElement {
         let agents = self.agents_list(cx);
         let devices = devices::section(&self.workspace, node_address, cx);
+        let phone = self.phone_section(cx);
         let mcp = self.mcp_section(cx);
         let environments = self.environments_section(cx);
         let skills = self.skills_section(cx);
@@ -1059,6 +1062,11 @@ impl RootView {
                             }
                         })
                         .into_any_element(),
+                ))
+                .child(section(
+                    t("Phone"),
+                    t("Follow projects, answer approvals and post notices from your phone, over Tailscale only. Pushes go through ntfy and carry only project and workstream names."),
+                    phone,
                 ))
                 .child(section(
                     t("MCP servers"),

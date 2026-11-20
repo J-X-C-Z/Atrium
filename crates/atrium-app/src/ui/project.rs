@@ -1215,6 +1215,7 @@ fn flow_view(workspace: &Entity<Workspace>, views: &[StreamView], cx: &App) -> A
             )
             .child(Badge::new(agent_short(ws, &lead.stream.backend)))
             .children(lead.stream.pr.as_ref().map(|pr| pr_badge(pr, cx)))
+            .children(merge_button(ws, &lead.stream.id, workspace))
             .child(
                 div()
                     .text_size(tiny)
@@ -1611,6 +1612,26 @@ fn preview_menu_item(
 }
 
 /// "PR #12 · CI passing", linking to the pull request.
+/// "Merge" on a lead whose work sits on its own worktree branch: brings
+/// `atrium/<lead>` into the project's checkout. Conflicts come back as a notice.
+fn merge_button(ws: &Workspace, id: &str, workspace: &Entity<Workspace>) -> Option<AnyElement> {
+    let project = ws.active_project()?;
+    if !project.file.worktrees || !project.worktree_dir(id).exists() {
+        return None;
+    }
+    let (id, workspace) = (id.to_owned(), workspace.clone());
+    Some(
+        Button::new(SharedString::from(format!("merge-{id}")), t("Merge"))
+            .variant(ButtonVariant::Ghost)
+            .size(ControlSize::Sm)
+            .on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                workspace.update(cx, |ws, cx| ws.merge_lead(&id, cx));
+            })
+            .into_any_element(),
+    )
+}
+
 fn pr_badge(pr: &project::PullRequest, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let colors = theme.colors.clone();

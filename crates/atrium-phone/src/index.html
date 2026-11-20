@@ -1,11 +1,666 @@
-<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Atrium</title><h1>Atrium</h1><ul id="projects"></ul>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#F7F6F2" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#161513" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Atrium</title>
+<style>
+:root{
+  --bg:#F7F6F2;--card:#FFFFFF;--sunk:#F2F0EB;--fg:#1C1B19;--fg2:#5E5A53;--muted:#6B6862;
+  --line:#E3E0D9;--line2:#D4D0C7;--accent:#2F5BD3;--accent-bg:#EEF2FC;--accent-fg:#2A4A9E;
+  --ok:#23794A;--ok-bg:#E3F1E8;--warn:#B4690E;--warn-bg:#FBF1E2;--warn-line:#EBCB9C;--warn-fg:#4F2E06;
+  --bad:#C2362B;--bad-bg:#FBE9E7;--btn:#1C1B19;--btn-fg:#FFFFFF;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){:root{
+  --bg:#161513;--card:#201F1C;--sunk:#2A2925;--fg:#EDEBE6;--fg2:#C2BEB6;--muted:#A09C94;
+  --line:#34322E;--line2:#45423D;--accent:#7C9BF0;--accent-bg:#1E2740;--accent-fg:#AFC2F7;
+  --ok:#5CC08A;--ok-bg:#1B3326;--warn:#E0A050;--warn-bg:#33271A;--warn-line:#5C4426;--warn-fg:#F1D6B0;
+  --bad:#EE7B70;--bad-bg:#3A1F1C;--btn:#EDEBE6;--btn-fg:#161513;
+}}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg)}
+body{font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,"PingFang SC","Noto Sans SC","Microsoft YaHei",sans-serif;-webkit-text-size-adjust:100%;-webkit-tap-highlight-color:transparent}
+a{color:inherit;text-decoration:none}
+button,input,select,textarea{font:inherit;color:inherit}
+button{cursor:pointer}
+code,.mono{font-family:var(--mono);font-size:13px}
+#app{display:flex;flex-direction:column;height:100%;max-width:640px;margin:0 auto}
+#view{flex:1;min-height:0;display:flex;flex-direction:column}
+.scroll{flex:1;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:calc(env(safe-area-inset-top) + 20px) 16px 20px}
+.stack{display:flex;flex-direction:column;gap:10px}
+h1{margin:0;font-size:30px;font-weight:700;line-height:1.2}
+h2{margin:8px 0 0;font-size:13px;font-weight:600;color:var(--muted)}
+h3{margin:0;font-size:17px;font-weight:600;line-height:1.35}
+p{margin:0}
+.head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:6px}
+.sub{font-size:13px;color:var(--muted)}
+.card{display:flex;flex-direction:column;gap:8px;padding:14px;border-radius:16px;background:var(--card);border:1px solid var(--line)}
+.card.tap:active{background:var(--sunk)}
+.card.warn{background:var(--warn-bg);border-color:var(--warn-line)}
+.row{display:flex;align-items:center;gap:8px;min-width:0}
+.grow{flex:1;min-width:0}
+.clip{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dot{flex:none;width:8px;height:8px;border-radius:4px;background:var(--line2)}
+.dot.working,.dot.starting{background:var(--accent)}
+.dot.working{animation:pulse 1.6s ease-in-out infinite}
+.dot.needs_you{background:var(--warn)}.dot.failed{background:var(--bad)}.dot.done{background:var(--ok)}
+@keyframes pulse{50%{opacity:.35}}
+@media (prefers-reduced-motion:reduce){.dot.working{animation:none}}
+.chip{display:inline-flex;align-items:center;gap:4px;height:24px;padding:0 9px;border-radius:12px;font-size:12px;font-weight:600;background:var(--sunk);color:var(--fg2);white-space:nowrap}
+.chip.accent{background:var(--accent-bg);color:var(--accent-fg)}
+.chip.warn{background:var(--warn-bg);color:var(--warn)}
+.chip.ok{background:var(--ok-bg);color:var(--ok)}
+.chip.bad{background:var(--bad-bg);color:var(--bad)}
+.bar{height:6px;border-radius:3px;background:var(--sunk);overflow:hidden}
+.bar>i{display:block;height:100%;background:var(--accent);border-radius:3px}
+.bar.done>i{background:var(--ok)}
+.btn{white-space:nowrap;display:inline-flex;align-items:center;justify-content:center;gap:6px;height:44px;padding:0 16px;border-radius:12px;border:1px solid var(--line2);background:var(--card);font-size:15px;font-weight:500}
+.btn.primary{border:none;background:var(--btn);color:var(--btn-fg);font-weight:600}
+.btn.small{height:34px;padding:0 12px;border-radius:17px;font-size:13px}
+.btn:disabled{opacity:.5}
+.grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.pills{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;padding-bottom:2px}
+.pills::-webkit-scrollbar{display:none}
+.pill{flex:none;height:32px;padding:0 12px;border-radius:16px;border:1px solid var(--line2);background:var(--card);font-size:13px;font-weight:500}
+.pill.on{background:var(--btn);border-color:var(--btn);color:var(--btn-fg)}
+.code{padding:10px 12px;border-radius:12px;background:var(--sunk);font-family:var(--mono);font-size:13px;line-height:1.55;white-space:pre-wrap;word-break:break-word}
+.back{display:flex;align-items:center;gap:2px;height:44px;margin:-10px 0 0 -8px;padding:0 8px;border:none;background:none;color:var(--accent);font-size:16px}
+.steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.steps li{display:flex;gap:8px;align-items:flex-start;font-size:14px;line-height:1.45}
+.check{flex:none;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;margin-top:1px;border-radius:9px;border:1.5px solid var(--line2);font-size:11px}
+.check.on{border:none;background:var(--ok-bg);color:var(--ok)}
+.phase{display:flex;flex-direction:column;gap:8px;padding:12px 0;border-top:1px solid var(--line)}
+.phase:first-child{border-top:none;padding-top:0}
+.phase.past{opacity:.6}
+.indent{margin-left:16px;padding-left:12px;border-left:2px solid var(--line)}
+.empty{padding:40px 12px;text-align:center;color:var(--muted);font-size:14px}
+.banner{margin:0 0 10px;padding:10px 12px;border-radius:12px;background:var(--bad-bg);color:var(--bad);font-size:13px}
+nav{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));padding:6px 8px calc(env(safe-area-inset-bottom) + 6px);background:var(--card);border-top:1px solid var(--line)}
+nav a{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;min-height:50px;font-size:11px;font-weight:500;color:var(--muted)}
+nav a[aria-current]{color:var(--fg);font-weight:600}
+nav svg{width:22px;height:22px}
+.badge{position:absolute;top:3px;left:calc(50% + 6px);min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--warn);color:#fff;font-size:11px;font-weight:700;line-height:18px;text-align:center}
+/* chat */
+.topbar{display:flex;align-items:center;gap:6px;padding:calc(env(safe-area-inset-top) + 8px) 8px 8px;border-bottom:1px solid var(--line);background:var(--bg)}
+.topbar .back{margin:0}
+.topbar .title{flex:1;min-width:0;display:flex;flex-direction:column;align-items:center}
+.topbar .title b{font-size:16px}
+.msgs{display:flex;flex-direction:column;gap:12px}
+.me{align-self:flex-end;max-width:82%;padding:10px 14px;border-radius:18px 18px 4px 18px;background:var(--sunk);white-space:pre-wrap;word-break:break-word}
+.said{line-height:1.55;word-break:break-word}
+.said pre{margin:6px 0;padding:10px;border-radius:10px;background:var(--sunk);overflow-x:auto;font-family:var(--mono);font-size:12.5px}
+.said code{padding:1px 4px;border-radius:4px;background:var(--sunk)}
+.tool{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;background:var(--card);border:1px solid var(--line);font-size:13px}
+.tool .mono{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.think{font-size:13px;color:var(--muted)}
+.think summary{cursor:pointer}
+.err{color:var(--bad);font-size:14px}
+.compose{display:flex;flex-direction:column;gap:8px;padding:8px 12px calc(env(safe-area-inset-bottom) + 10px);background:var(--card);border-top:1px solid var(--line)}
+.field{flex:1;min-width:0;height:44px;padding:0 14px;border-radius:22px;border:1px solid var(--line2);background:var(--bg);font-size:16px}
+.field:focus,.pill:focus-visible,.btn:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.send{flex:none;display:flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:22px;border:none;background:var(--btn);color:var(--btn-fg)}
+.opt{display:flex;align-items:flex-start;gap:10px;min-height:44px;padding:10px 12px;border-radius:12px;border:1px solid var(--line);background:var(--card);font-size:15px}
+.opt:has(input:checked){border-color:var(--accent);background:var(--accent-bg)}
+.opt input{margin:3px 0 0;width:18px;height:18px;accent-color:var(--accent)}
+.opt small{display:block;color:var(--muted);font-size:12px}
+.toast{position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom) + 80px);transform:translateX(-50%);max-width:90%;padding:10px 16px;border-radius:20px;background:var(--btn);color:var(--btn-fg);font-size:14px;opacity:0;transition:opacity .2s;pointer-events:none}
+.toast.on{opacity:1}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="view"></div>
+  <nav id="tabs" aria-label="Atrium"></nav>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script>
-fetch('/api/projects').then(r => r.json()).then(projects => {
-  for (const project of projects) {
-    const row = document.createElement('li');
-    row.textContent = project.name;
-    document.querySelector('#projects').append(row);
+'use strict';
+// ---------- words ----------
+const ZH = /^zh/i.test(navigator.language || 'zh');
+const W = ZH ? {
+  projects:'项目', inbox:'需要你', notices:'公告', device:'设备', back:'返回',
+  noProjects:'电脑上还没有项目。在 Atrium 里打开一个项目，它就会出现在这里。',
+  streams:n=>`${n} 条工作线`, working:n=>`${n} 条在工作`, needs:n=>`${n} 件需要你`,
+  autopilot:'无人值守', controller:'主控', lead:'负责人', worker:'子 agent',
+  st:{starting:'启动中',offline:'离线',working:'工作中',needs_you:'需要你',failed:'失败',idle:'空闲'},
+  phaseOf:(n,t,title)=>`第 ${n}/${t} 阶段：${title}`, allDone:'全部阶段完成', noRoadmap:'还没有路线图',
+  pool:'任务池', ready:'就绪', waiting:'等待', running:'进行中', done:'完成', failedN:'失败',
+  workers:'子 agent', idleWorker:'空闲，等待认领', finishedWorkers:n=>`另有 ${n} 个已完成`,
+  plan:'计划', openChat:'打开对话', result:'结果', task:'任务', noTask:'没有分配任务',
+  inboxEmpty:'没有等你处理的事。', approveCmd:'想运行一条命令', approve:'需要你批准', question:'有问题问你',
+  decline:'拒绝', always:'始终允许', once:'允许一次', answer:'回答', other:'其他…',
+  handled:'已处理', stale:'已经在别处处理了', failed:'没成功，再试一次',
+  all:'全部', forMe:'给我的', fromAtrium:'Atrium', you:'你', everyone:'所有人', sendTo:'发给',
+  noticePh:'告诉各工作线一些事…', post:'发布', posted:'已发布', noNotices:'还没有公告。',
+  chatPh:name=>`补充给 ${name}…`, sent:'已发送', noThread:'这条工作线还没有开始对话。',
+  quick:[['汇报进度','说一下现在的进度和卡点'],['做完这步就停','做完当前这一步就停下，等我回来'],['继续','继续']],
+  thinking:'思考', live:'已连接，实时更新', offline:'连不上电脑上的 Atrium', reconnecting:'正在重新连接…',
+  thisComputer:'这台电脑', deviceHelp:'手机和电脑在同一个 Tailscale 网络里就能连上，数据不经过任何云服务。只有登录同一 Tailscale 账号的设备能打开这个页面。',
+  deviceApp:'装了 Atrium App 的话，可以在 App 里切换电脑，并在后台收到推送。',
+  pickProject:'选择项目', needsHere:n=>`${n} 件需要你处理`,
+} : {
+  projects:'Projects', inbox:'Needs you', notices:'Notices', device:'Device', back:'Back',
+  noProjects:'No projects on this computer yet. Open one in Atrium and it shows up here.',
+  streams:n=>`${n} workstream${n==1?'':'s'}`, working:n=>`${n} working`, needs:n=>`${n} need${n==1?'s':''} you`,
+  autopilot:'Unattended', controller:'Controller', lead:'Lead', worker:'Sub-agent',
+  st:{starting:'Starting',offline:'Offline',working:'Working',needs_you:'Needs you',failed:'Failed',idle:'Idle'},
+  phaseOf:(n,t,title)=>`Phase ${n} of ${t}: ${title}`, allDone:'All phases done', noRoadmap:'No roadmap yet',
+  pool:'Task pool', ready:'ready', waiting:'waiting', running:'running', done:'done', failedN:'failed',
+  workers:'Sub-agents', idleWorker:'Idle, waiting to claim', finishedWorkers:n=>`${n} more finished`,
+  plan:'Plan', openChat:'Open conversation', result:'Result', task:'Task', noTask:'No task assigned',
+  inboxEmpty:'Nothing is waiting for you.', approveCmd:'Wants to run a command', approve:'Needs your approval', question:'Has a question',
+  decline:'Decline', always:'Always', once:'Allow once', answer:'Answer', other:'Other…',
+  handled:'Handled', stale:'Already handled elsewhere', failed:'Did not go through. Try again.',
+  all:'All', forMe:'For me', fromAtrium:'Atrium', you:'You', everyone:'Everyone', sendTo:'To',
+  noticePh:'Tell the workstreams something…', post:'Post', posted:'Posted', noNotices:'No notices yet.',
+  chatPh:name=>`Add something for ${name}…`, sent:'Sent', noThread:'This workstream has not started a conversation yet.',
+  quick:[['Progress?','Where are you, and what is blocking you?'],['Stop after this step','Finish the current step, then stop and wait for me'],['Go on','Go on']],
+  thinking:'Thinking', live:'Connected, live', offline:'Cannot reach Atrium on the computer', reconnecting:'Reconnecting…',
+  thisComputer:'This computer', deviceHelp:'Your phone reaches the computer over your Tailscale network; nothing goes through a cloud service. Only devices signed in to the same Tailscale account can open this page.',
+  deviceApp:'With the Atrium app you can switch computers and get pushes in the background.',
+  pickProject:'Project', needsHere:n=>`${n} waiting for you`,
+};
+if (!ZH) document.documentElement.lang = 'en';
+
+// ---------- state ----------
+const S = {
+  projects: null,     // summaries
+  details: {},        // ix -> detail
+  threads: {},        // thread id -> rows
+  online: true,
+  live: false,
+  noticeProject: +(store('project') || 0),
+  noticeFilter: 0,
+  noticeTo: 'all',
+  answered: new Set(), // "thread|request_id" answered from here, hidden until the snapshot drops them
+};
+function store(k, v) {
+  try { if (v === undefined) return localStorage.getItem('atrium.' + k); localStorage.setItem('atrium.' + k, v); } catch (e) { return null; }
+}
+
+// ---------- helpers ----------
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const enc = encodeURIComponent;
+function toast(text) {
+  const t = $('#toast'); t.textContent = text; t.classList.add('on');
+  clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove('on'), 2200);
+}
+async function api(path, body) {
+  const opts = body === undefined ? {} : {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)};
+  let r;
+  try { r = await fetch(path, opts); } catch (e) { setOnline(false); throw e; }
+  setOnline(true);
+  if (!r.ok) { const e = new Error(r.status); e.status = r.status; throw e; }
+  return r.status === 204 || r.status === 202 ? null : r.json();
+}
+function setOnline(on) { if (S.online !== on) { S.online = on; paint(); } }
+const ICON = {
+  projects:'<path d="m12 2 9 5-9 5-9-5 9-5z"/><path d="m3 12 9 5 9-5"/><path d="m3 17 9 5 9-5"/>',
+  inbox:'<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
+  notices:'<path d="M3 11v2a1 1 0 0 0 1 1h3l5 4V6L7 10H4a1 1 0 0 0-1 1z"/><path d="M16 9a3 3 0 0 1 0 6"/>',
+  device:'<rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/>',
+  back:'<path d="m15 18-6-6 6-6"/>', send:'<path d="M12 19V5"/><path d="m5 12 7-7 7 7"/>',
+  shield:'<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>',
+  ask:'<circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3"/><path d="M12 17h.01"/>',
+  ok:'<path d="m5 12 5 5 9-10"/>', x:'<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+  file:'<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/>',
+  spin:'<path d="M21 12a9 9 0 1 1-6.2-8.6"/>', chev:'<path d="m9 18 6-6-6-6"/>',
+};
+const svg = (name, size = 22, color = 'currentColor', width = 2) =>
+  `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="${width}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON[name]}</svg>`;
+function md(text) {
+  // Just enough to read along: code fences, inline code, bold, line breaks.
+  const parts = String(text || '').split(/```[^\n]*\n?/);
+  return parts.map((p, i) => i % 2 ? `<pre>${esc(p.replace(/\n$/, ''))}</pre>`
+    : esc(p).replace(/`([^`\n]+)`/g, '<code>$1</code>').replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>').replace(/\n/g, '<br>')).join('');
+}
+function when(at) {
+  if (!at) return '';
+  const today = new Date(), pad = n => String(n).padStart(2, '0');
+  const d = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
+  return at.startsWith(d) ? at.slice(11) : at.slice(5);
+}
+
+// ---------- reading the snapshot ----------
+const stateOf = s => (s.task && s.task.status === 'done' && s.state === 'idle') ? 'done' : s.state;
+function stateLabel(s) { const st = stateOf(s); return st === 'done' ? W.done : (W.st[st] || st); }
+function progress(task) {
+  if (!task || !task.phases || !task.phases.length) return null;
+  let done = 0, total = 0, current = -1;
+  task.phases.forEach((p, i) => {
+    const d = p.steps.filter(s => s.done).length;
+    done += d; total += p.steps.length;
+    if (current < 0 && d < p.steps.length) current = i;
+  });
+  return {done, total, current, phases: task.phases.length};
+}
+function phaseLine(task) {
+  const p = progress(task);
+  if (!p) return W.noRoadmap;
+  if (p.current < 0) return W.allDone;
+  return W.phaseOf(p.current + 1, p.phases, task.phases[p.current].title);
+}
+function nameOf(detail, id) {
+  if (id === 'you') return W.you;
+  if (id === 'atrium') return 'Atrium';
+  if (id === 'all') return W.everyone;
+  const s = detail && detail.streams.find(s => s.id === id);
+  return s ? s.name : id;
+}
+const roleLabel = r => ({controller:W.controller, lead:W.lead, worker:W.worker}[r] || r);
+function pending() {
+  // Every open approval and question across the loaded projects.
+  const out = [];
+  (S.projects || []).forEach((p, ix) => {
+    const d = S.details[ix]; if (!d) return;
+    d.streams.forEach(s => (s.needs_you || []).forEach(req => {
+      if (!S.answered.has(s.thread_id + '|' + JSON.stringify(req.request_id))) out.push({ix, project: d, stream: s, req});
+    }));
+  });
+  return out;
+}
+const pendingCount = () => S.projects ? pending().length : 0;
+
+// ---------- routes ----------
+function route() {
+  const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
+  if (parts[0] === 'project' && parts[1] !== undefined) {
+    const ix = +parts[1];
+    if (parts[2] === 'stream' && parts[3]) return {tab:'projects', screen: parts[4] === 'chat' ? 'chat' : 'stream', ix, id: parts[3]};
+    return {tab:'projects', screen:'project', ix};
   }
+  if (parts[0] === 'inbox') return {tab:'inbox', screen:'inbox'};
+  if (parts[0] === 'notices') return {tab:'notices', screen:'notices'};
+  if (parts[0] === 'device') return {tab:'device', screen:'device'};
+  return {tab:'projects', screen:'projects'};
+}
+const go = hash => { location.hash = hash; };
+
+// ---------- painting ----------
+let current = null;
+function paint(full) {
+  const r = route();
+  const key = JSON.stringify(r);
+  if (full || key !== current) {
+    current = key;
+    const screen = SCREENS[r.screen];
+    $('#view').innerHTML = screen.frame(r);
+    screen.mount && screen.mount(r);
+  }
+  const live = $('#live');
+  if (live) {
+    const scroller = live.closest('.scroll');
+    const atBottom = scroller && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 40;
+    const keepTop = scroller && scroller.scrollTop;
+    const html = SCREENS[r.screen].live(r);
+    if (html === live.dataset.html) { paintTabs(r.tab); return; }
+    const kept = keepForms(live);
+    live.innerHTML = html; live.dataset.html = html;
+    restoreForms(live, kept);
+    if (scroller) scroller.scrollTop = (r.screen === 'chat' && atBottom) ? scroller.scrollHeight : keepTop;
+  }
+  paintTabs(r.tab);
+}
+// Answers being filled in survive a repaint: picked options, typed text, focus.
+function keepForms(root) {
+  const kept = [];
+  root.querySelectorAll('[data-req]').forEach(card => {
+    const fields = [...card.querySelectorAll('input')].map(i => i.type === 'radio' ? i.checked : i.value);
+    const focus = [...card.querySelectorAll('input')].indexOf(document.activeElement);
+    kept.push([card.dataset.req, fields, focus]);
+  });
+  return kept;
+}
+function restoreForms(root, kept) {
+  for (const [key, fields, focus] of kept) {
+    const card = [...root.querySelectorAll('[data-req]')].find(c => c.dataset.req === key);
+    if (!card) continue;
+    const inputs = [...card.querySelectorAll('input')];
+    if (inputs.length !== fields.length) continue;
+    inputs.forEach((i, n) => { if (i.type === 'radio') i.checked = fields[n]; else i.value = fields[n]; });
+    if (focus >= 0) inputs[focus].focus();
+  }
+}
+function paintTabs(tab) {
+  const n = pendingCount();
+  const show = !/^(chat)$/.test(route().screen);
+  $('#tabs').style.display = show ? '' : 'none';
+  $('#tabs').innerHTML = [['projects','#/'],['inbox','#/inbox'],['notices','#/notices'],['device','#/device']].map(([k, h]) =>
+    `<a href="${h}"${tab === k ? ' aria-current="page"' : ''}>${svg(k)}${W[k]}${k === 'inbox' && n ? `<span class="badge">${n}</span>` : ''}</a>`).join('');
+}
+const banner = () => S.online ? '' : `<div class="banner" role="alert">${W.offline}</div>`;
+const backBtn = (hash, label) => `<a class="back" href="${hash}">${svg('back', 22)}${esc(label || W.back)}</a>`;
+
+const SCREENS = {
+  projects: {
+    frame: () => `<div class="scroll"><div class="head"><h1>${W.projects}</h1><span class="sub" id="conn"></span></div><div id="live" class="stack"></div></div>`,
+    live: () => {
+      $('#conn') && ($('#conn').textContent = S.live ? '● ' + location.hostname : '');
+      if (!S.projects) return banner();
+      if (!S.projects.length) return banner() + `<div class="empty">${W.noProjects}</div>`;
+      return banner() + S.projects.map((p, ix) => {
+        const d = S.details[ix];
+        const leads = d ? d.streams.filter(s => s.role === 'lead') : [];
+        return `<a class="card tap" href="#/project/${ix}">
+          <div class="row"><h3 class="grow clip">${esc(p.name)}</h3>${p.autopilot ? `<span class="chip accent">${W.autopilot}</span>` : ''}${svg('chev', 18, 'var(--muted)')}</div>
+          <div class="row sub">${W.streams(p.streams)}${p.working ? ' · ' + W.working(p.working) : ''}${p.needs_you ? ` · <span style="color:var(--warn);font-weight:600">${W.needs(p.needs_you)}</span>` : ''}</div>
+          ${leads.slice(0, 4).map(l => leadMini(l)).join('')}
+        </a>`;
+      }).join('');
+    },
+  },
+  project: {
+    frame: r => `<div class="scroll">${backBtn('#/', W.projects)}<div id="live" class="stack"></div></div>`,
+    live: r => {
+      const d = S.details[r.ix];
+      if (!d) return banner();
+      const ctl = d.streams.filter(s => s.role === 'controller');
+      const leads = d.streams.filter(s => s.role === 'lead');
+      const loose = d.streams.filter(s => s.role === 'worker' && !d.streams.some(l => l.id === s.parent));
+      const waiting = pending().filter(p => p.ix === r.ix).length;
+      return banner() + `<div class="head"><h1 class="clip">${esc(d.name)}</h1>${d.autopilot ? `<span class="chip accent">${W.autopilot}</span>` : ''}</div>
+        ${waiting ? `<a class="card warn tap" href="#/inbox"><div class="row"><span style="color:var(--warn)">${svg('shield', 18)}</span><b class="grow">${W.needsHere(waiting)}</b>${svg('chev', 18)}</div></a>` : ''}
+        ${ctl.map(s => streamCard(r.ix, s, d)).join('')}
+        ${leads.length ? `<h2>${W.lead}</h2>` : ''}
+        ${leads.map(s => streamCard(r.ix, s, d)).join('')}
+        ${loose.map(s => streamCard(r.ix, s, d)).join('')}
+        ${d.plan ? `<h2>${W.plan}</h2><details class="card"><summary class="sub">${esc(firstLine(d.plan))}</summary><div class="said" style="margin-top:8px">${md(d.plan)}</div></details>` : ''}`;
+    },
+  },
+  stream: {
+    frame: r => `<div class="scroll">${backBtn('#/project/' + r.ix, (S.details[r.ix] || {}).name)}<div id="live" class="stack"></div></div>`,
+    live: r => {
+      const d = S.details[r.ix]; if (!d) return banner();
+      const s = d.streams.find(s => s.id === r.id); if (!s) return banner() + `<div class="empty">—</div>`;
+      const st = stateOf(s), t = s.task, prog = progress(t);
+      const kids = d.streams.filter(w => w.parent === s.id);
+      let html = banner() + `<div class="stack" style="gap:4px"><div class="row"><span class="dot ${st}"></span><span class="sub">${roleLabel(s.role)} · ${esc(s.backend)} · ${stateLabel(s)}</span></div><h1>${esc(s.name)}</h1></div>`;
+      html += pending().filter(p => p.stream.id === s.id && p.ix === r.ix).map(requestCard).join('');
+      if (s.thread_id) html += `<a class="btn primary" href="#/project/${r.ix}/stream/${enc(s.id)}/chat">${W.openChat}</a>`;
+      if (t) {
+        html += `<h2>${W.task}</h2><div class="card"><h3>${esc(t.title)}</h3>
+          ${prog ? `<div class="bar${prog.current < 0 ? ' done' : ''}"><i style="width:${prog.total ? Math.round(prog.done / prog.total * 100) : 0}%"></i></div><div class="sub">${esc(phaseLine(t))} · ${prog.done}/${prog.total}</div>` : ''}
+          ${t.phases.length ? `<div>${t.phases.map((p, i) => phaseBlock(p, i, prog)).join('')}</div>` : ''}
+          ${t.result ? `<h2>${W.result}</h2><div class="said">${md(t.result)}</div>` : ''}
+        </div>`;
+      } else if (s.role !== 'controller') html += `<div class="sub">${W.noTask}</div>`;
+      if (s.pool && s.pool.total) html += `<h2>${W.pool}</h2>` + poolCard(s.pool, d);
+      if (kids.length) html += `<h2>${W.workers}</h2>` + workerList(r.ix, kids, d, s.pool);
+      return html;
+    },
+  },
+  chat: {
+    frame: r => {
+      const d = S.details[r.ix], s = d && d.streams.find(s => s.id === r.id);
+      const name = s ? s.name : r.id;
+      return `<div class="topbar">${backBtn(`#/project/${r.ix}/stream/${enc(r.id)}`, '')}<div class="title"><b class="clip">${esc(name)}</b><span class="sub" id="chat-state"></span></div><span style="width:44px"></span></div>
+        <div class="scroll" style="padding-top:12px"><div id="live" class="msgs"></div></div>
+        <form class="compose" id="compose"><div class="pills">${W.quick.map(([l, text], i) => `<button type="button" class="pill" data-quick="${i}">${esc(l)}</button>`).join('')}</div>
+        <div class="row"><label class="grow row"><span class="sr">${esc(W.chatPh(name))}</span><input class="field" id="msg" autocomplete="off" enterkeyhint="send" placeholder="${esc(W.chatPh(name))}"></label>
+        <button class="send" aria-label="send">${svg('send', 18, 'currentColor', 2.2)}</button></div></form>`;
+    },
+    mount: r => {
+      const form = $('#compose');
+      form.addEventListener('click', e => { const q = e.target.closest('[data-quick]'); if (q) { $('#msg').value = W.quick[+q.dataset.quick][1]; $('#msg').focus(); } });
+      form.addEventListener('submit', async e => {
+        e.preventDefault();
+        const s = streamOf(r), text = $('#msg').value.trim();
+        if (!s || !s.thread_id || !text) return;
+        try { await api(`/api/threads/${enc(s.thread_id)}/messages`, {text}); $('#msg').value = ''; toast(W.sent); loadThread(s.thread_id); }
+        catch (err) { toast(err.status === 409 ? W.stale : W.failed); }
+      });
+      const s = streamOf(r);
+      if (s && s.thread_id) loadThread(s.thread_id);
+      requestAnimationFrame(() => { const sc = $('.scroll'); sc && (sc.scrollTop = sc.scrollHeight); });
+    },
+    live: r => {
+      const s = streamOf(r);
+      $('#chat-state') && ($('#chat-state').innerHTML = s ? `<span class="row" style="gap:5px;justify-content:center"><span class="dot ${stateOf(s)}"></span>${stateLabel(s)}</span>` : '');
+      if (!s) return banner();
+      if (!s.thread_id) return banner() + `<div class="empty">${W.noThread}</div>`;
+      const rows = S.threads[s.thread_id] || [];
+      return banner() + rows.map(chatRow).join('') + pending().filter(p => p.stream.id === s.id && p.ix === r.ix).map(requestCard).join('');
+    },
+  },
+  inbox: {
+    frame: () => `<div class="scroll"><div class="head"><h1>${W.inbox}</h1><span class="sub" id="count"></span></div><div id="live" class="stack"></div></div>`,
+    live: () => {
+      const list = pending();
+      $('#count') && ($('#count').textContent = list.length ? String(list.length) : '');
+      return banner() + (list.length ? list.map(requestCard).join('') : `<div class="empty">${W.inboxEmpty}</div>`);
+    },
+  },
+  notices: {
+    frame: () => `<div class="scroll"><div class="head"><h1>${W.notices}</h1></div><div id="live" class="stack"></div></div>
+      <form class="compose" id="post"><div class="row sub">${W.sendTo}<select id="to" class="pill" style="font-weight:600"></select></div>
+      <div class="row"><label class="grow row"><span class="sr">${W.noticePh}</span><input class="field" id="notice" autocomplete="off" enterkeyhint="send" placeholder="${W.noticePh}"></label><button class="btn primary" style="border-radius:22px">${W.post}</button></div></form>`,
+    mount: () => {
+      $('#post').addEventListener('submit', async e => {
+        e.preventDefault();
+        const text = $('#notice').value.trim(); if (!text) return;
+        S.noticeTo = $('#to').value;
+        try { await api(`/api/projects/${S.noticeProject}/notices`, {to:[S.noticeTo], text}); $('#notice').value = ''; toast(W.posted); loadProject(S.noticeProject); }
+        catch (err) { toast(err.status === 409 ? W.stale : W.failed); }
+      });
+      $('#to').addEventListener('change', e => { S.noticeTo = e.target.value; });
+      $('#live').addEventListener('click', e => {
+        const p = e.target.closest('[data-project]'); if (p) { S.noticeProject = +p.dataset.project; store('project', S.noticeProject); S.noticeTo = 'all'; paint(); }
+        const f = e.target.closest('[data-filter]'); if (f) { S.noticeFilter = +f.dataset.filter; paint(); }
+      });
+    },
+    live: () => {
+      if (!S.projects) return banner();
+      if (!S.projects.length) return banner() + `<div class="empty">${W.noProjects}</div>`;
+      if (S.noticeProject >= S.projects.length) S.noticeProject = 0;
+      const d = S.details[S.noticeProject];
+      const to = $('#to');
+      if (to && d) {
+        const opts = [['all', W.everyone]].concat(d.streams.map(s => [s.id, s.name]));
+        if (!opts.some(o => o[0] === S.noticeTo)) S.noticeTo = 'all';
+        to.innerHTML = opts.map(([v, l]) => `<option value="${esc(v)}"${v === S.noticeTo ? ' selected' : ''}>${esc(l)}</option>`).join('');
+      }
+      let html = banner();
+      if (S.projects.length > 1) html += `<div class="pills">${S.projects.map((p, i) => `<button type="button" class="pill${i === S.noticeProject ? ' on' : ''}" data-project="${i}">${esc(p.name)}</button>`).join('')}</div>`;
+      html += `<div class="pills">${[W.all, W.forMe, W.fromAtrium].map((l, i) => `<button type="button" class="pill${i === S.noticeFilter ? ' on' : ''}" data-filter="${i}">${l}</button>`).join('')}</div>`;
+      if (!d) return html;
+      const list = d.notices.slice().reverse().filter(n => S.noticeFilter === 0 || (S.noticeFilter === 1 ? n.to.includes('you') : n.from === 'atrium'));
+      if (!list.length) return html + `<div class="empty">${W.noNotices}</div>`;
+      return html + list.map(n => {
+        const mine = n.from === 'you', atrium = n.from === 'atrium';
+        const style = mine ? 'background:var(--accent-bg);border-color:transparent' : atrium ? '' : '';
+        return `<article class="card${atrium ? ' warn' : ''}" style="gap:4px;${style}">
+          <div class="row sub" style="font-size:12px"><span class="grow clip"><b style="color:var(--fg)">${esc(nameOf(d, n.from))}</b> → ${esc(n.to.map(t => nameOf(d, t)).join('、'))}</span><span>${esc(when(n.at))}</span></div>
+          <div class="said" style="font-size:14px">${md(n.text)}</div></article>`;
+      }).join('');
+    },
+  },
+  device: {
+    frame: () => `<div class="scroll"><div class="head"><h1>${W.device}</h1></div><div id="live" class="stack"></div></div>`,
+    live: () => banner() + `<div class="card" style="border:1.5px solid var(--accent)"><div class="row">${svg('device', 22, 'var(--fg2)')}<div class="grow"><b>${W.thisComputer}</b><div class="sub clip">${esc(location.host)}${S.projects ? ' · ' + W.streams(S.projects.reduce((n, p) => n + p.streams, 0)) : ''}</div></div>
+      <span class="chip ${S.live ? 'ok' : 'warn'}">${S.live ? W.live : W.reconnecting}</span></div></div>
+      <p class="sub" style="font-size:14px;line-height:1.55">${W.deviceHelp}</p><p class="sub" style="font-size:14px;line-height:1.55">${W.deviceApp}</p>`,
+  },
+};
+const streamOf = r => { const d = S.details[r.ix]; return d && d.streams.find(s => s.id === r.id); };
+const firstLine = t => String(t).split('\n').find(l => l.trim()) || '';
+
+function leadMini(l) {
+  const p = progress(l.task);
+  return `<div class="row" style="font-size:13px"><span class="dot ${stateOf(l)}"></span><span class="clip" style="flex:0 1 auto;font-weight:600">${esc(l.name)}</span>
+    <span class="grow clip sub">${esc(phaseLine(l.task))}</span>${p ? `<span class="sub">${p.done}/${p.total}</span>` : ''}</div>`;
+}
+function streamCard(ix, s, d) {
+  const st = stateOf(s), p = progress(s.task);
+  const kids = d.streams.filter(w => w.parent === s.id && w.role === 'worker');
+  const active = kids.filter(w => ['working', 'needs_you', 'starting'].includes(w.state));
+  const pool = s.pool && s.pool.total ? s.pool : null;
+  return `<a class="card tap" href="#/project/${ix}/stream/${enc(s.id)}">
+    <div class="row"><span class="dot ${st}"></span><b class="clip" style="font-size:16px">${esc(s.name)}</b><span class="chip">${esc(s.role === 'controller' ? W.controller : s.backend)}</span><span class="grow"></span>
+      <span class="sub" style="color:${st === 'needs_you' ? 'var(--warn)' : st === 'failed' ? 'var(--bad)' : ''}">${stateLabel(s)}</span></div>
+    ${s.task ? `<div class="sub clip">${esc(s.role === 'controller' ? s.task.title : phaseLine(s.task))}</div>` : ''}
+    ${p && s.role !== 'controller' ? `<div class="bar${p.current < 0 ? ' done' : ''}"><i style="width:${p.total ? Math.round(p.done / p.total * 100) : 0}%"></i></div>` : ''}
+    ${pool ? `<div class="sub">${W.pool}：${poolLine(pool)}</div>` : ''}
+    ${active.length ? `<div class="stack indent" style="gap:4px">${active.map(w => `<div class="row" style="font-size:13px"><span class="dot ${w.state}"></span><span class="clip grow">${esc(w.task ? w.task.title : w.name)}</span></div>`).join('')}</div>` : ''}
+  </a>`;
+}
+function poolLine(p) {
+  return [[p.ready.length, W.ready], [p.waiting.length, W.waiting], [p.running.length, W.running], [p.done, W.done], [p.failed, W.failedN]]
+    .filter(([n]) => n).map(([n, l]) => `${n} ${l}`).join(' · ');
+}
+function poolCard(p, d) {
+  const cells = [[p.ready.length, W.ready, ''], [p.running.length, W.running, 'var(--accent)'], [p.done, W.done, 'var(--ok)'], [p.waiting.length, W.waiting, ''], [p.failed, W.failedN, 'var(--bad)']];
+  return `<div class="card"><div class="grid3" style="grid-template-columns:repeat(5,minmax(0,1fr));text-align:center">${cells.map(([n, l, c]) =>
+    `<div><div style="font-size:20px;font-weight:700;color:${n ? c || 'var(--fg)' : 'var(--muted)'}">${n}</div><div class="sub" style="font-size:11px">${l}</div></div>`).join('')}</div>
+    <div class="bar"><i style="width:${p.total ? Math.round(p.done / p.total * 100) : 0}%;background:var(--ok)"></i></div></div>`;
+}
+function workerList(ix, kids, d, pool) {
+  const busy = kids.filter(w => w.state !== 'idle' || (w.task && w.task.status === 'running'));
+  const rest = kids.length - busy.length;
+  const held = new Map((pool ? pool.workers : []).map(([w, t]) => [w, t]));
+  return `<div class="card" style="gap:0;padding:4px 14px">${busy.map((w, i) => `<a class="row" href="#/project/${ix}/stream/${enc(w.id)}" style="min-height:52px;${i ? 'border-top:1px solid var(--line)' : ''}">
+      <span class="dot ${w.state}"></span><div class="grow"><div class="clip" style="font-size:14px;font-weight:600">${esc(w.task ? w.task.title : w.name)}</div>
+      <div class="sub clip" style="font-size:12px">${esc(w.name)} · ${w.task ? esc(phaseLine(w.task)) : held.has(w.id) && !held.get(w.id) ? W.idleWorker : stateLabel(w)}</div></div>${svg('chev', 16, 'var(--muted)')}</a>`).join('')}
+    ${rest ? `<div class="sub" style="padding:10px 0;${busy.length ? 'border-top:1px solid var(--line)' : ''}">${W.finishedWorkers(rest)}</div>` : ''}</div>`;
+}
+function phaseBlock(p, i, prog) {
+  const past = prog && (prog.current < 0 || i < prog.current), now = prog && i === prog.current;
+  const steps = now || p.steps.length <= 3 ? p.steps : [];
+  return `<div class="phase${past ? ' past' : ''}"><div class="row"><b class="grow" style="font-size:14px">${i + 1}. ${esc(p.title)}</b><span class="sub">${p.steps.filter(s => s.done).length}/${p.steps.length}</span></div>
+    ${steps.length ? `<ul class="steps">${steps.map(s => `<li><span class="check${s.done ? ' on' : ''}">${s.done ? '✓' : ''}</span><span>${esc(s.text)}</span></li>`).join('')}</ul>` : ''}</div>`;
+}
+function chatRow(row) {
+  switch (row.role) {
+    case 'user': return `<div class="me">${esc(row.text)}</div>`;
+    case 'agent': return row.text ? `<div class="said">${md(row.text)}</div>` : '';
+    case 'reasoning': return row.text ? `<details class="think"><summary>${W.thinking}</summary><div class="said">${md(row.text)}</div></details>` : '';
+    case 'tool': {
+      const icon = row.status === 'working' ? svg('spin', 16, 'var(--accent)') : row.status === 'failed' || row.status === 'declined' ? svg('x', 16, 'var(--bad)', 2.4) : svg('ok', 16, 'var(--ok)', 2.4);
+      return `<div class="tool">${icon}<span class="mono">${esc(row.tool_title || '')}</span></div>`;
+    }
+    case 'approval': case 'question':
+      return row.status === 'pending' ? '' : `<div class="row sub" style="font-size:13px"><span class="check on">✓</span><span class="clip grow">${esc(firstLine(row.text))}</span></div>`;
+    case 'plan': return `<div class="card" style="font-size:14px"><div class="said">${md(row.text)}</div></div>`;
+    case 'error': return `<div class="err">${esc(row.text)}</div>`;
+    default: return row.text ? `<div class="said">${md(row.text)}</div>` : '';
+  }
+}
+function requestCard(p) {
+  const {ix, project, stream, req} = p;
+  const key = esc(JSON.stringify({thread: stream.thread_id, request_id: req.request_id}));
+  const where = `<div class="row sub">${svg(req.kind === 'approval' ? 'shield' : 'ask', 18, req.kind === 'approval' ? 'var(--warn)' : 'var(--accent)')}<a class="clip" href="#/project/${ix}/stream/${enc(stream.id)}">${esc(project.name)} · ${esc(stream.name)}</a></div>`;
+  if (req.kind === 'approval') {
+    const lines = String(req.text || '').split('\n');
+    return `<article class="card" style="border-color:var(--warn-line)" data-req="${key}">${where}<h3>${W.approve}</h3>
+      <div class="code">${esc(lines.join('\n'))}</div>
+      <div class="grid3"><button class="btn" data-decision="decline">${W.decline}</button><button class="btn" data-decision="accept_for_session">${W.always}</button><button class="btn primary" data-decision="accept">${W.once}</button></div></article>`;
+  }
+  const qs = req.questions || [];
+  return `<article class="card" data-req="${key}"><form class="stack" data-question>${where}${qs.map((q, qi) => `<fieldset class="stack" style="margin:0;padding:0;border:none" data-qid="${esc(q.id)}">
+      <legend class="stack" style="gap:2px;margin-bottom:8px">${q.header ? `<span class="sub">${esc(q.header)}</span>` : ''}<h3>${esc(q.question)}</h3></legend>
+      ${(q.options || []).map(([label, desc], oi) => `<label class="opt"><input type="radio" name="q${qi}" value="${esc(label)}"${oi === 0 ? ' checked' : ''}><span>${esc(label)}${desc ? `<small>${esc(desc)}</small>` : ''}</span></label>`).join('')}
+      ${q.allow_other || !(q.options || []).length ? `<label class="opt">${(q.options || []).length ? `<input type="radio" name="q${qi}" value="">` : ''}<input class="field" style="height:36px;flex:1" type="${q.secret ? 'password' : 'text'}" data-other placeholder="${W.other}" autocomplete="off"></label>` : ''}
+    </fieldset>`).join('')}<button class="btn primary">${W.answer}</button></form></article>`;
+}
+
+// Answering, wherever a request card is shown.
+document.addEventListener('click', async e => {
+  const b = e.target.closest('[data-decision]'); if (!b) return;
+  const card = b.closest('[data-req]'), req = JSON.parse(card.dataset.req);
+  card.querySelectorAll('button').forEach(x => x.disabled = true);
+  await answer(req, '/api/approvals', {thread: req.thread, request_id: req.request_id, decision: b.dataset.decision}, card);
 });
+document.addEventListener('focusin', e => {
+  // Typing into "Other" picks it.
+  if (e.target.matches('[data-other]')) { const r = e.target.closest('label').querySelector('input[type=radio]'); if (r) r.checked = true; }
+});
+document.addEventListener('submit', async e => {
+  const form = e.target.closest('[data-question]'); if (!form) return;
+  e.preventDefault();
+  const card = form.closest('[data-req]'), req = JSON.parse(card.dataset.req), answers = {};
+  for (const fs of form.querySelectorAll('[data-qid]')) {
+    const picked = fs.querySelector('input[type=radio]:checked'), other = fs.querySelector('[data-other]');
+    const value = picked && picked.value ? picked.value : (other ? other.value.trim() : '');
+    if (!value) { (other || fs).focus(); return; }
+    answers[fs.dataset.qid] = [value];
+  }
+  card.querySelectorAll('button').forEach(x => x.disabled = true);
+  await answer(req, '/api/questions', {thread: req.thread, request_id: req.request_id, answers}, card);
+});
+async function answer(req, path, body, card) {
+  try {
+    await api(path, body);
+    S.answered.add(req.thread + '|' + JSON.stringify(req.request_id));
+    toast(W.handled);
+  } catch (err) {
+    if (err.status === 409) { S.answered.add(req.thread + '|' + JSON.stringify(req.request_id)); toast(W.stale); }
+    else { toast(W.failed); card.querySelectorAll('button').forEach(x => x.disabled = false); return; }
+  }
+  paint(); refreshAll();
+}
+
+// ---------- loading ----------
+async function loadProjects() {
+  try { S.projects = await api('/api/projects'); } catch (e) { paint(); return; }
+  await Promise.all(S.projects.map((_, ix) => loadProject(ix, true)));
+  paint();
+}
+async function loadProject(ix, quiet) {
+  try {
+    const d = await api('/api/projects/' + ix);
+    S.details[ix] = d;
+    // Drop "answered here" marks once the desktop no longer lists the request.
+    const open = new Set();
+    Object.values(S.details).forEach(d => d.streams.forEach(s => (s.needs_you || []).forEach(r => open.add(s.thread_id + '|' + JSON.stringify(r.request_id)))));
+    for (const k of S.answered) if (!open.has(k)) S.answered.delete(k);
+  } catch (e) { if (e.status === 404) delete S.details[ix]; }
+  if (!quiet) paint();
+}
+async function loadThread(id) {
+  // Rows near the end can still change while they stream, so re-read a tail.
+  const rows = S.threads[id] || [];
+  const from = Math.max(0, rows.length - 30);
+  try {
+    const fresh = await api(`/api/threads/${enc(id)}` + (from ? `?after=${from - 1}` : ''));
+    S.threads[id] = rows.slice(0, from).concat(fresh);
+  } catch (e) { if (e.status === 404) S.threads[id] = []; }
+  paint();
+}
+const refreshAll = debounce(() => loadProjects(), 300);
+const refreshProject = {};
+function onChanged(ix) {
+  (refreshProject[ix] ||= debounce(async () => {
+    await loadProject(ix, true);
+    const r = route();
+    if (r.screen === 'chat' && r.ix === ix) { const s = streamOf(r); if (s && s.thread_id) await loadThread(s.thread_id); }
+    try { S.projects = await api('/api/projects'); } catch (e) {}
+    paint();
+  }, 250))();
+}
+function debounce(f, ms) { let t; return () => { clearTimeout(t); t = setTimeout(f, ms); }; }
+
+function listen() {
+  if (!window.EventSource) { setInterval(loadProjects, 5000); return; }
+  const es = new EventSource('/api/events');
+  es.onopen = () => { S.live = true; setOnline(true); paint(); };
+  es.onerror = () => { S.live = false; paint(); };  // the browser reconnects by itself
+  es.onmessage = e => {
+    let m; try { m = JSON.parse(e.data); } catch (_) { return; }
+    if (S.projects && m.project >= S.projects.length) { refreshAll(); return; }
+    if (m.type === 'changed' || m.type === 'needs_you') onChanged(m.project);
+  };
+}
+
+window.addEventListener('hashchange', () => paint());
+document.addEventListener('visibilitychange', () => { if (!document.hidden) loadProjects(); });
+paint();
+loadProjects();
+listen();
 </script>
+</body>
+</html>

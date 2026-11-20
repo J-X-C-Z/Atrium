@@ -2,7 +2,7 @@
 
 use ely_gpui_component::{
     buttons::{Button, ButtonVariant, IconButton},
-    forms::{Input, TextInput},
+    forms::{Input, Switch, TextInput},
     primitives::{Icon, IconName},
     theme::{ActiveTheme, ControlSize, IconSize, Radius, TextSize},
 };
@@ -22,6 +22,7 @@ pub struct ExtrasInputs {
     pub mcp_line: Entity<TextInput>,
     pub env_name: Entity<TextInput>,
     pub env_vars: Entity<TextInput>,
+    pub push_topic: Entity<TextInput>,
 }
 
 impl ExtrasInputs {
@@ -37,6 +38,10 @@ impl ExtrasInputs {
                 TextInput::new(window, cx)
                     .multi_line(2, 6)
                     .placeholder(t("One KEY=value per line"))
+            }),
+            push_topic: cx.new(|cx| {
+                TextInput::new(window, cx)
+                    .placeholder(t("ntfy topic, such as atrium-7f3k, or a full URL"))
             }),
         }
     }
@@ -57,6 +62,81 @@ fn row_box(cx: &Context<RootView>) -> gpui::Div {
 }
 
 impl RootView {
+    /// Following projects from a phone: the server switch and the push topic.
+    pub(super) fn phone_section(&self, cx: &mut Context<Self>) -> AnyElement {
+        let ws = self.workspace.read(cx);
+        let on = ws.settings.remote_view;
+        let saved = ws.settings.push_topic.clone().unwrap_or_default();
+        let theme = cx.theme();
+        let colors = theme.colors.clone();
+        let toggle = self.workspace.clone();
+        let mut body = div().flex().flex_col().gap_2().child(
+            Switch::new("remote-view", on)
+                .label(t("Let my other devices view projects"))
+                .on_change(move |on, _, cx| {
+                    toggle.update(cx, |ws, cx| {
+                        ws.settings.remote_view = on;
+                        ws.settings.save();
+                        cx.notify();
+                    })
+                })
+                .into_any_element(),
+        );
+        if on {
+            body = body.child(
+                row_box(cx)
+                    .child(
+                        Icon::new(IconName::Globe)
+                            .size(IconSize::Xs)
+                            .color(colors.fg_muted),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(colors.fg_subtle)
+                            .child(t("On the phone: <this computer>:7879")),
+                    )
+                    .child(
+                        Button::new("remote-view-open", t("Open here"))
+                            .variant(ButtonVariant::Ghost)
+                            .size(ControlSize::Sm)
+                            .on_click(|_, _, cx| cx.open_url("http://127.0.0.1:7879/")),
+                    ),
+            );
+            let (ws, field) = (self.workspace.clone(), self.extras.push_topic.clone());
+            body = body.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_1().child(Input::new(&self.extras.push_topic)))
+                    .child(
+                        Button::new("push-topic-save", t("Save"))
+                            .size(ControlSize::Sm)
+                            .on_click(move |_, _, cx| {
+                                let text = field.read(cx).text().trim().to_string();
+                                ws.update(cx, |ws, cx| {
+                                    ws.settings.push_topic = (!text.is_empty()).then_some(text);
+                                    ws.settings.save();
+                                    cx.notify();
+                                });
+                            }),
+                    ),
+            );
+            if !saved.is_empty() {
+                body = body.child(
+                    div()
+                        .text_size(theme.text_size(TextSize::Xs))
+                        .text_color(colors.fg_subtle)
+                        .child(tf("Pushes go to {topic}", &[("topic", &saved)])),
+                );
+            }
+        }
+        body.into_any_element()
+    }
+
     /// MCP servers every agent gets.
     pub(super) fn mcp_section(&self, cx: &mut Context<Self>) -> AnyElement {
         let ws = self.workspace.read(cx);

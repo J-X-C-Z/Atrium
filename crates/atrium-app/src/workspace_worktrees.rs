@@ -159,10 +159,6 @@ impl Workspace {
         self.finish_tree_job(job, cx);
     }
 
-    #[expect(
-        dead_code,
-        reason = "public hook for the lead card specified in the worktree brief"
-    )]
     pub fn merge_lead(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(mut project) = self.active_project().cloned() else {
             return;

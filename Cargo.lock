@@ -621,15 +621,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "atrium-process"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "libc",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "atrium-phone"
 version = "0.1.0"
 dependencies = [
@@ -644,6 +635,15 @@ dependencies = [
  "tokio",
  "ureq",
  "url",
+]
+
+[[package]]
+name = "atrium-process"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
