@@ -30,10 +30,10 @@ use crate::{
     },
 };
 
-#[path = "workspace_worktrees.rs"]
-mod worktrees;
 #[path = "workspace_autopilot.rs"]
 mod autopilot;
+#[path = "workspace_worktrees.rs"]
+mod worktrees;
 
 /// Where the user is: the everyday chats, or a project.
 #[derive(Clone, Debug, PartialEq)]
@@ -1027,12 +1027,24 @@ impl Workspace {
     ) {
         let backend = stream.backend.clone();
         let id = stream.id.clone();
-        let unattended = self.projects.iter().any(|p| p.root == root && p.file.autopilot.on);
-        if unattended && agents::split_backend(&backend).1.is_none()
-            && !cwd.canonicalize().ok().zip(root.canonicalize().ok())
+        let unattended = self
+            .projects
+            .iter()
+            .any(|p| p.root == root && p.file.autopilot.on);
+        if unattended
+            && agents::split_backend(&backend).1.is_none()
+            && !cwd
+                .canonicalize()
+                .ok()
+                .zip(root.canonicalize().ok())
                 .is_some_and(|(dir, root)| dir.is_dir() && dir.starts_with(root))
         {
-            self.stream_failed(&root, &id, anyhow::anyhow!("unavailable or unauthorized project work directory"), cx);
+            self.stream_failed(
+                &root,
+                &id,
+                anyhow::anyhow!("unavailable or unauthorized project work directory"),
+                cx,
+            );
             return;
         }
         if agents::is_codex(&backend) {

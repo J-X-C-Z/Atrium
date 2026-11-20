@@ -200,6 +200,11 @@ impl Workspace {
             }
             let idle = now.duration_since(activity.idle_since);
             let failures = activity.failures;
+            if let Some(stalled) = self.stalled_pool_claim(root, &worker.id).map(str::to_owned) {
+                self.retire_pool_worker(root, &worker, Some(&stalled), now, cx);
+                continue;
+            }
+            let unattended = project.file.autopilot.on;
             // Only a persisted, unbound worker with no live start can be a crashed launch.
             let retire = thread.is_none()
                 || if held.is_some() {
@@ -214,13 +219,8 @@ impl Workspace {
             let Some(thread) = thread.filter(|_| transcript.is_some()) else {
                 continue;
             };
-            if held.is_some()
-                && (!project.file.autopilot.on
-                    || idle
-                        < Duration::from_secs(u64::from(
-                            project.file.autopilot.continue_after_secs,
-                        )))
-            {
+            // Unattended retries of an existing claim go through the pilot clock.
+            if held.is_some() {
                 continue;
             }
             if project.notice_delivery_blocked(&worker.id)
@@ -245,6 +245,10 @@ impl Workspace {
             };
             match project.claim_next(&worker.id) {
                 Ok(Some(_)) => {
+                    if unattended {
+                        self.queue_autopilot_wake(root, &worker.id, Wake::TurnEnded, String::new());
+                        continue;
+                    }
                     let message = project.continuation(&worker, Wake::TurnEnded);
                     // Seed the current claim before sending, so a fast failed turn counts on it.
                     let held = project.task_of(&worker).map(|task| task.key());
@@ -379,6 +383,9 @@ impl Workspace {
                 break;
             }
             let worker_key = (root.clone(), worker.id.clone());
+            if !self.scheduler_turn_slot(root) {
+                break;
+            }
             self.start_stream(root, worker, cx);
             if !self
                 .project_schedule

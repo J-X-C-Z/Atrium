@@ -1247,7 +1247,13 @@ impl Project {
         Self::append_notice_at(root, from, to, text, now_label())
     }
 
-    fn append_notice_at(root: &Path, from: &str, to: Vec<String>, text: &str, at: String) -> Result<()> {
+    fn append_notice_at(
+        root: &Path,
+        from: &str,
+        to: Vec<String>,
+        text: &str,
+        at: String,
+    ) -> Result<()> {
         let notice = ProjectNotice {
             at,
             from: from.to_string(),
