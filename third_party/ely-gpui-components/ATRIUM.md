@@ -19,3 +19,7 @@ Atrium's changes, meant to go upstream:
   in a tool call's summary).
 
 Examples and the web gallery are left out of this copy.
+- `typography/fit.rs`: one-line labels (`Ellipsis`, `MiddleEllipsis`,
+  `EllipsisTooltip`) join a multi-line text into one line, trimming each
+  line, for both the painted line and the hidden text that sizes the box.
+  Before, a multi-line command kept one blank line of height per line.

@@ -832,7 +832,12 @@ fn run_turn(
     }
     if !interrupted && lower.contains("run") {
         let cmd_id = next_id("item");
-        let command = "cargo test --workspace";
+        // "script" runs a multi-line command, as heredocs in real transcripts do.
+        let command = if lower.contains("script") {
+            "/bin/zsh -lc \"python3 - <<'PY'\nfrom pathlib import Path\nimport json\nfor p in Path('.').glob('*.json'):\n    print(p, len(json.loads(p.read_text())))\nPY\""
+        } else {
+            "cargo test --workspace"
+        };
         let cwd = "/workspace";
         let mut item = json!({"type": "commandExecution", "id": cmd_id, "command": command, "cwd": cwd, "status": "inProgress",
             "aggregatedOutput": null, "exitCode": null, "durationMs": null, "commandActions": [], "source": "agent", "processId": null});

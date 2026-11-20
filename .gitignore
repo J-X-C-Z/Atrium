@@ -9,3 +9,4 @@
 # Python-only isolated test helpers
 __pycache__/
 *.pyc
+/third_party/ely-gpui-components/target

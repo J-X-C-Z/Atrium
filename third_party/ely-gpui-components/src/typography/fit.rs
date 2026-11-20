@@ -38,13 +38,28 @@ pub(crate) fn text_width(text: &str, size: Pixels, window: &Window) -> Pixels {
         .width
 }
 
+/// A label handed a multi-line text (a command, a message) shows it joined
+/// on one line. Both the painted line and the box that sizes it use this,
+/// or the box keeps the height of every original line.
+fn one_line(text: SharedString) -> SharedString {
+    if text.contains(['\n', '\r']) {
+        // Indentation left over from each line would read as gaps.
+        text.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+            .into()
+    } else {
+        text
+    }
+}
+
 fn shape(text: &str, window: &mut Window) -> ShapedLine {
-    // One line only: a label handed a multi-line text (a command, a
-    // message) shows it joined, rather than failing to shape.
     let joined;
     let text = if text.contains(['\n', '\r']) {
-        joined = text.replace("\r\n", " ").replace(['\n', '\r'], " ");
-        joined.as_str()
+        joined = one_line(text.to_string().into());
+        joined.as_ref()
     } else {
         text
     };
@@ -122,6 +137,7 @@ fn offset(align: TextAlign, free: Pixels) -> Pixels {
 
 /// One line, cut by `fit` to its box and aligned.
 fn cut_line(text: SharedString, fit: fn(&str, Pixels, &mut Window) -> String) -> Div {
+    let text = one_line(text);
     let line = text.clone();
     div()
         .relative()
@@ -213,7 +229,7 @@ impl RenderOnce for EllipsisTooltip {
         let cut = window.use_keyed_state(self.id.clone(), cx, |_, _| false);
         let is_cut = *cut.read(cx);
         let theme = cx.theme();
-        let measured = self.text.clone();
+        let measured = one_line(self.text.clone());
         div()
             .id(self.id)
             .relative()
@@ -221,7 +237,7 @@ impl RenderOnce for EllipsisTooltip {
             .text_size(theme.text_size(TextSize::Base))
             .line_height(relative(LEADING))
             .text_color(theme.colors.fg)
-            .child(self.text.clone())
+            .child(measured.clone())
             .child(
                 canvas(
                     move |bounds, window, cx| {
@@ -254,7 +270,14 @@ impl RenderOnce for EllipsisTooltip {
 mod tests {
     use gpui::{TextAlign, px};
 
-    use super::{elide, offset};
+    use super::{elide, offset, one_line};
+
+    #[test]
+    fn a_multi_line_label_sizes_as_one_line() {
+        assert_eq!(one_line("a\nb\r\nc".into()).as_ref(), "a b c");
+        assert_eq!(one_line("if x:\n    y\n\nz".into()).as_ref(), "if x: y z");
+        assert_eq!(one_line("plain".into()).as_ref(), "plain");
+    }
 
     #[test]
     fn a_line_starts_by_its_alignment() {
