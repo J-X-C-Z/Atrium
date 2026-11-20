@@ -538,14 +538,22 @@ async fn restart_closes_rpc_waiters_and_discards_disconnected_requests() {
     let (rpc, mut events) = Connection::new(attachment.reader, attachment.writer);
     state_matches(&state, |s| matches!(s, LinkState::Connected)).await;
 
-    // cat echoes this JSON-RPC request as a server request, deliberately not a
-    // response. Observing it proves the first waiter was sent and is outstanding.
+    // The WebSocket can connect before the Windows PowerShell echo loop starts.
+    rpc.notify("fixture/ready", None).unwrap();
+    let ready = tokio::time::timeout(Duration::from_secs(30), events.next())
+        .await
+        .expect("echo process startup deadline");
+    assert!(
+        matches!(ready, Some(Incoming::Notification { method, .. }) if method == "fixture/ready")
+    );
+
+    // The echo is a server request, leaving the original waiter outstanding.
     let waiting = rpc.request("fixture/no-response", json!({"stage":"before-restart"}));
     tokio::pin!(waiting);
     assert!(futures::poll!(waiting.as_mut()).is_pending());
     let echo = tokio::time::timeout(Duration::from_secs(5), events.next())
         .await
-        .unwrap()
+        .expect("ready fixture must echo the outstanding request")
         .unwrap();
     assert!(matches!(echo, Incoming::Request { method, .. } if method == "fixture/no-response"));
     assert!(futures::poll!(waiting.as_mut()).is_pending());
