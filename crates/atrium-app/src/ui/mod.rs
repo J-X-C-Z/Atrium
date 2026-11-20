@@ -678,7 +678,7 @@ impl RootView {
     fn palette(&self, cx: &mut Context<Self>) -> AnyElement {
         let ws = self.workspace.read(cx);
         let actions = [
-            ("new", t("New chat"), IconName::SquarePen, "⌘N"),
+            ("new", t("New chat"), IconName::SquarePen, "secondary-n"),
             ("review", t("Review uncommitted changes"), IconName::Eye, ""),
             (
                 "compact",
@@ -693,8 +693,13 @@ impl RootView {
                 IconName::FolderOpen,
                 "",
             ),
-            ("sidebar", t("Toggle sidebar"), IconName::PanelLeft, "⌘B"),
-            ("settings", t("Settings"), IconName::Settings, "⌘,"),
+            (
+                "sidebar",
+                t("Toggle sidebar"),
+                IconName::PanelLeft,
+                "secondary-b",
+            ),
+            ("settings", t("Settings"), IconName::Settings, "secondary-,"),
             ("restart", t("Restart Codex"), IconName::RefreshCw, ""),
             (
                 "goal",
@@ -710,7 +715,12 @@ impl RootView {
                 "",
             ),
             ("usage", t("Account & usage"), IconName::Gauge, ""),
-            ("context", t("Context & speed"), IconName::Zap, "⌘I"),
+            (
+                "context",
+                t("Context & speed"),
+                IconName::Zap,
+                "secondary-i",
+            ),
             (
                 "project",
                 t("Open a folder as a project…"),

@@ -97,14 +97,19 @@ fn header(
     for model in &ws.models {
         let id = model.id.clone();
         let workspace = workspace.clone();
-        let mut item = MenuItem::radio(
-            model.display_name.clone(),
-            ws.settings.model.as_deref() == Some(&model.id),
-        )
-        .on_click(move |_, cx| workspace.update(cx, |ws, cx| ws.set_model(Some(id.clone()), cx)));
-        if !model.description.is_empty() {
-            item = item.keys(truncate(&model.description, 36));
-        }
+        let label = if model.description.trim().is_empty() {
+            model.display_name.clone()
+        } else {
+            format!(
+                "{} · {}",
+                model.display_name,
+                truncate(model.description.trim(), 36)
+            )
+        };
+        let item = MenuItem::radio(label, ws.settings.model.as_deref() == Some(&model.id))
+            .on_click(move |_, cx| {
+                workspace.update(cx, |ws, cx| ws.set_model(Some(id.clone()), cx))
+            });
         models = models.item(item);
     }
 
@@ -222,7 +227,7 @@ fn header(
             .item(
                 MenuItem::new(t("Context & speed"))
                     .icon(IconName::Zap)
-                    .keys("⌘I")
+                    .keys("secondary-i")
                     .on_click(move |_, cx| details.update(cx, |root, cx| root.open_context(cx))),
             )
             .separator()
