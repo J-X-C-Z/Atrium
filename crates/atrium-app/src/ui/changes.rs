@@ -79,6 +79,7 @@ pub enum SideTab {
     Activity,
     Watch,
     Terminal,
+    Run,
 }
 
 /// Reads a unified diff leniently: hunk headers with or without numbers, and
@@ -316,7 +317,12 @@ impl RootView {
             ),
             cx,
         );
-        if self.review.tab == SideTab::Terminal {
+        if matches!(self.review.tab, SideTab::Terminal | SideTab::Run) {
+            let body = if self.review.tab == SideTab::Run {
+                self.run_body(cx)
+            } else {
+                div().size_full().p_1().child(self.terminal_body(cx)).into_any_element()
+            };
             return Some(
                 div()
                     .flex_none()
@@ -328,7 +334,7 @@ impl RootView {
                     .border_color(colors.border)
                     .bg(colors.bg)
                     .child(header)
-                    .child(div().flex_1().min_h_0().p_1().child(self.terminal_body(cx)))
+                    .child(div().flex_1().min_h_0().child(body))
                     .into_any_element(),
             );
         }
@@ -714,6 +720,7 @@ impl RootView {
             .child(tab("side-activity", t("Activity"), SideTab::Activity))
             .child(tab("side-watch", t("Side by side"), SideTab::Watch))
             .child(tab("side-terminal", t("Terminal"), SideTab::Terminal))
+            .child(tab("side-run", t("Run"), SideTab::Run))
             .child(div().flex_1())
             .children(extra.filter(|_| self.review.tab == SideTab::Changes))
             .child(

@@ -34,12 +34,14 @@ const STARTERS: [(&str, IconName); 4] = [
     ("Plan a feature", IconName::ListChecks),
 ];
 
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     workspace: &Entity<Workspace>,
     composer: &Entity<Composer>,
     root: Entity<RootView>,
     sidebar_collapsed: bool,
     changes_open: bool,
+    editor: Option<&'static str>,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -49,6 +51,7 @@ pub fn render(
         root.clone(),
         sidebar_collapsed,
         changes_open,
+        editor,
         window,
         cx,
     );
@@ -73,6 +76,7 @@ fn header(
     root: Entity<RootView>,
     sidebar_collapsed: bool,
     open: bool,
+    editor: Option<&'static str>,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -243,6 +247,45 @@ fn header(
                     .on_click(move |_, cx| undo.update(cx, |ws, cx| ws.undo_restore(cx))),
             );
         }
+        // The folder elsewhere, and the conversation as a file.
+        let local = ws.local_dir(id).is_some();
+        if local {
+            if let Some(editor) = editor {
+                let open = root.clone();
+                menu = menu.separator().item(
+                    MenuItem::new(tf("Open in {editor}", &[("editor", &editor)]))
+                        .icon(IconName::Code)
+                        .on_click(move |_, cx| {
+                            open.update(cx, |r, cx| {
+                                if let Some(dir) = r.chat_dir(cx) {
+                                    r.open_in_editor(&dir, None, cx)
+                                }
+                            })
+                        }),
+                );
+            } else {
+                menu = menu.separator();
+            }
+            let reveal = root.clone();
+            menu = menu.item(
+                MenuItem::new(t("Show in file manager"))
+                    .icon(IconName::FolderOpen)
+                    .on_click(move |_, cx| reveal.update(cx, |r, cx| r.reveal_chat_dir(cx))),
+            );
+        }
+        let (export, copy) = (root.clone(), root.clone());
+        menu = menu
+            .separator()
+            .item(
+                MenuItem::new(t("Export as Markdown…"))
+                    .icon(IconName::Download)
+                    .on_click(move |_, cx| export.update(cx, |r, cx| r.export_markdown(cx))),
+            )
+            .item(
+                MenuItem::new(t("Copy as Markdown"))
+                    .icon(IconName::Copy)
+                    .on_click(move |_, cx| copy.update(cx, |r, cx| r.copy_markdown(cx))),
+            );
         let archive = (workspace.clone(), id.clone());
         let details = root.clone();
         menu = menu
@@ -262,7 +305,7 @@ fn header(
                         ws.update(cx, |ws, cx| ws.archive(id, cx));
                     }),
             );
-        OverflowMenu::new("chat-menu", menu)
+        OverflowMenu::new("chat-menu", menu).tooltip(t("More"))
     });
 
     // Which agent, and on which device: chosen for a new chat, fixed once

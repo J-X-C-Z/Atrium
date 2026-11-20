@@ -841,6 +841,17 @@ impl Workspace {
                 .map(|t| t.cwd.clone())
                 .unwrap_or_else(|| self.settings.working_dir().display().to_string()),
         );
+        self.start_chat_in(text, backend, cwd, cx);
+    }
+
+    /// Starts a chat with `backend` in `cwd` in the background and sends `text`.
+    pub fn start_chat_in(
+        &mut self,
+        text: String,
+        backend: String,
+        cwd: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
         let title: String = text.chars().take(60).collect();
         if backend == CODEX {
             let Some(client) = self.client.clone() else {

@@ -83,6 +83,12 @@ pub struct Settings {
     pub editor: Option<String>,
     /// New chats in a git repository start in a worktree of their own.
     pub chat_worktrees: bool,
+    /// The command the Run view starts, by folder.
+    pub run_commands: std::collections::HashMap<String, String>,
+    /// Prompts Atrium sends by itself at set times.
+    pub schedules: Vec<crate::schedule::Schedule>,
+    /// Do not look for a newer Atrium.
+    pub no_update_check: bool,
     /// The interface's language.
     pub language: crate::i18n::Language,
     /// Where new chats run on each device, by device id.

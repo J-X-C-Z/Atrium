@@ -23,6 +23,10 @@ pub struct ExtrasInputs {
     pub env_name: Entity<TextInput>,
     pub env_vars: Entity<TextInput>,
     pub push_topic: Entity<TextInput>,
+    pub schedule_name: Entity<TextInput>,
+    pub schedule_time: Entity<TextInput>,
+    pub schedule_prompt: Entity<TextInput>,
+    pub schedule_days: crate::schedule::Days,
 }
 
 impl ExtrasInputs {
@@ -39,6 +43,14 @@ impl ExtrasInputs {
                     .multi_line(2, 6)
                     .placeholder(t("One KEY=value per line"))
             }),
+            schedule_name: cx.new(|cx| TextInput::new(window, cx).placeholder(t("Name, such as Morning CI check"))),
+            schedule_time: cx.new(|cx| TextInput::new(window, cx).placeholder("09:00")),
+            schedule_prompt: cx.new(|cx| {
+                TextInput::new(window, cx)
+                    .multi_line(2, 5)
+                    .placeholder(t("What to ask, such as: Check last night's CI runs and summarise the failures"))
+            }),
+            schedule_days: crate::schedule::Days::Weekdays,
             push_topic: cx.new(|cx| {
                 TextInput::new(window, cx)
                     .placeholder(t("ntfy topic, such as atrium-7f3k, or a full URL"))
@@ -62,6 +74,211 @@ fn row_box(cx: &Context<RootView>) -> gpui::Div {
 }
 
 impl RootView {
+    /// The editor files and folders open in.
+    pub(super) fn editor_section(&self, cx: &mut Context<Self>) -> AnyElement {
+        let chosen = self.editor(cx).map(|e| e.command);
+        if self.tools.editors.is_empty() {
+            return div()
+                .text_size(cx.theme().text_size(TextSize::Sm))
+                .text_color(cx.theme().colors.fg_muted)
+                .child(t("No editor found. Install the command-line launcher of VS Code, Cursor, Zed, Windsurf or Sublime Text."))
+                .into_any_element();
+        }
+        let mut row = div().flex().flex_wrap().gap_1();
+        for editor in &self.tools.editors {
+            let on = chosen == Some(editor.command);
+            let (ws, command) = (self.workspace.clone(), editor.command);
+            row = row.child(
+                Button::new(SharedString::from(format!("editor-{command}")), editor.name)
+                    .variant(if on { ButtonVariant::Primary } else { ButtonVariant::Ghost })
+                    .size(ControlSize::Sm)
+                    .on_click(move |_, _, cx| {
+                        ws.update(cx, |ws, cx| {
+                            ws.settings.editor = Some(command.to_string());
+                            ws.settings.save();
+                            cx.notify();
+                        })
+                    }),
+            );
+        }
+        row.into_any_element()
+    }
+
+    /// Scheduled chats: the list, and a form for a new one in the current
+    /// folder with the current agent.
+    pub(super) fn schedules_section(&self, cx: &mut Context<Self>) -> AnyElement {
+        use crate::schedule::{Days, Schedule, parse_time};
+        let ws = self.workspace.read(cx);
+        let theme = cx.theme();
+        let colors = theme.colors.clone();
+        let mut list = div().flex().flex_col().gap_1();
+        for s in &ws.settings.schedules {
+            let (run, toggle, remove) = (self.workspace.clone(), self.workspace.clone(), self.workspace.clone());
+            let id = s.id.clone();
+            let (id1, id2, id3) = (id.clone(), id.clone(), id);
+            let folder = std::path::Path::new(&s.folder)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| s.folder.clone());
+            list = list.child(
+                row_box(cx)
+                    .when(s.off, |el| el.opacity(0.55))
+                    .child(Icon::new(IconName::AlarmClock).size(IconSize::Xs).color(colors.fg_muted))
+                    .child(div().flex_none().font_weight(gpui::FontWeight::MEDIUM).child(s.name.clone()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(theme.text_size(TextSize::Xs))
+                            .text_color(colors.fg_subtle)
+                            .child(format!(
+                                "{} {} · {} · {}",
+                                t(s.days.label()),
+                                s.time,
+                                folder,
+                                crate::agents::backend_label(&s.backend)
+                            )),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("schedule-run-{id1}")), t("Run now"))
+                            .variant(ButtonVariant::Ghost)
+                            .size(ControlSize::Sm)
+                            .on_click(move |_, _, cx| run.update(cx, |ws, cx| ws.run_schedule(&id1, cx))),
+                    )
+                    .child(
+                        Button::new(
+                            SharedString::from(format!("schedule-toggle-{id2}")),
+                            if s.off { t("Off") } else { t("On") },
+                        )
+                        .variant(ButtonVariant::Ghost)
+                        .size(ControlSize::Sm)
+                        .on_click(move |_, _, cx| toggle.update(cx, |ws, cx| ws.toggle_schedule(&id2, cx))),
+                    )
+                    .child(
+                        IconButton::new(SharedString::from(format!("schedule-remove-{id3}")), IconName::X)
+                            .variant(ButtonVariant::Ghost)
+                            .size(ControlSize::Sm)
+                            .tooltip(t("Remove"))
+                            .on_click(move |_, _, cx| remove.update(cx, |ws, cx| ws.remove_schedule(&id3, cx))),
+                    ),
+            );
+        }
+        let backend = ws.view_backend().to_string();
+        let folder = ws.settings.working_dir();
+        let mut days = div().flex().items_center().gap_1();
+        for d in Days::ALL {
+            let on = self.extras.schedule_days == d;
+            let root = cx.entity();
+            days = days.child(
+                Button::new(SharedString::from(format!("schedule-days-{d:?}")), t(d.label()))
+                    .variant(if on { ButtonVariant::Primary } else { ButtonVariant::Ghost })
+                    .size(ControlSize::Sm)
+                    .on_click(move |_, _, cx| {
+                        root.update(cx, |r, cx| {
+                            r.extras.schedule_days = d;
+                            cx.notify();
+                        })
+                    }),
+            );
+        }
+        let add = (
+            cx.entity(),
+            self.workspace.clone(),
+            backend.clone(),
+            folder.display().to_string(),
+        );
+        list.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(div().flex_1().child(Input::new(&self.extras.schedule_name)))
+                        .child(div().w(gpui::px(80.)).child(Input::new(&self.extras.schedule_time)))
+                        .child(days),
+                )
+                .child(Input::new(&self.extras.schedule_prompt))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(theme.text_size(TextSize::Xs))
+                                .text_color(colors.fg_subtle)
+                                .child(tf(
+                                    "Runs in {folder} with {agent}",
+                                    &[
+                                        ("folder", &crate::ui::composer::short_path(&folder)),
+                                        ("agent", &crate::agents::backend_label(&backend)),
+                                    ],
+                                )),
+                        )
+                        .child(
+                            Button::new("schedule-add", t("Add"))
+                                .size(ControlSize::Sm)
+                                .on_click(move |_, _, cx| {
+                                    let (root, ws, backend, folder) = add.clone();
+                                    let read = |e: &Entity<TextInput>, cx: &gpui::App| e.read(cx).text().trim().to_string();
+                                    let (name, time, prompt, days) = {
+                                        let r = root.read(cx);
+                                        (
+                                            read(&r.extras.schedule_name, cx),
+                                            read(&r.extras.schedule_time, cx),
+                                            read(&r.extras.schedule_prompt, cx),
+                                            r.extras.schedule_days,
+                                        )
+                                    };
+                                    let Some(at) = parse_time(&time) else {
+                                        root.update(cx, |r, cx| {
+                                            r.toast(&crate::workspace::Notice::Info(t("Write the time as HH:MM, such as 09:00.").into()), cx)
+                                        });
+                                        return;
+                                    };
+                                    if prompt.is_empty() {
+                                        root.update(cx, |r, cx| {
+                                            r.toast(&crate::workspace::Notice::Info(t("Write what to ask.").into()), cx)
+                                        });
+                                        return;
+                                    }
+                                    let name = if name.is_empty() { prompt.chars().take(24).collect() } else { name };
+                                    ws.update(cx, |ws, cx| {
+                                        ws.add_schedule(
+                                            Schedule {
+                                                id: uuid::Uuid::new_v4().simple().to_string(),
+                                                name,
+                                                prompt,
+                                                folder,
+                                                backend,
+                                                time: at.strftime("%H:%M").to_string(),
+                                                days,
+                                                off: false,
+                                                last_run: None,
+                                            },
+                                            cx,
+                                        )
+                                    });
+                                    root.update(cx, |r, cx| {
+                                        for e in [&r.extras.schedule_name, &r.extras.schedule_time, &r.extras.schedule_prompt] {
+                                            e.update(cx, |i, cx| i.set_text("", cx));
+                                        }
+                                    });
+                                }),
+                        ),
+                ),
+        )
+        .into_any_element()
+    }
+
     /// Following projects from a phone: the server switch and the push topic.
     pub(super) fn phone_section(&self, cx: &mut Context<Self>) -> AnyElement {
         let ws = self.workspace.read(cx);

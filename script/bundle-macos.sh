@@ -36,6 +36,13 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>${MIN_MACOS}</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key><string>dev.atrium.link</string>
+      <key>CFBundleURLSchemes</key><array><string>atrium</string></array>
+    </dict>
+  </array>
 </dict>
 </plist>
 PLIST

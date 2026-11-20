@@ -8,6 +8,7 @@ mod composer;
 mod context;
 mod devices;
 mod extras;
+mod run;
 mod tools;
 mod motion;
 mod project;
@@ -906,6 +907,8 @@ impl RootView {
         let agents = self.agents_list(cx);
         let devices = devices::section(&self.workspace, node_address, cx);
         let phone = self.phone_section(cx);
+        let schedules = self.schedules_section(cx);
+        let editor = self.editor_section(cx);
         let mcp = self.mcp_section(cx);
         let environments = self.environments_section(cx);
         let skills = self.skills_section(cx);
@@ -1068,6 +1071,16 @@ impl RootView {
                         .into_any_element(),
                 ))
                 .child(section(
+                    t("Scheduled chats"),
+                    t("A prompt Atrium sends by itself at a set time, such as a morning check of CI. They run while Atrium is open; one missed while it was closed runs when it opens, the same day."),
+                    schedules,
+                ))
+                .child(section(
+                    t("Editor"),
+                    t("Where files and folders open from the changes view and the chat menu."),
+                    editor,
+                ))
+                .child(section(
                     t("Phone"),
                     t("Follow projects, answer approvals and post notices from your phone, over Tailscale only. Pushes go through ntfy and carry only project and workstream names."),
                     phone,
@@ -1096,6 +1109,41 @@ impl RootView {
                     t("Devices"),
                     t("Agents on your other computers, through atrium-node over Tailscale. Their chats show the device's name."),
                     devices,
+                ))
+                .child(section(
+                    t("Updates"),
+                    t("Atrium looks for a newer release on GitHub once a day and shows it at the bottom of the sidebar."),
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(tf("Version {version}", &[("version", &env!("CARGO_PKG_VERSION"))]))
+                        .child(
+                            Switch::new("update-check", !ws.settings.no_update_check)
+                                .label(t("Check for updates"))
+                                .on_change({
+                                    let workspace = self.workspace.clone();
+                                    move |on, _, cx| {
+                                        workspace.update(cx, |ws, cx| {
+                                            ws.settings.no_update_check = !on;
+                                            ws.settings.save();
+                                            cx.notify();
+                                        })
+                                    }
+                                }),
+                        )
+                        .child(
+                            Button::new("update-now", t("Check now"))
+                                .variant(ButtonVariant::Ghost)
+                                .size(ControlSize::Sm)
+                                .on_click({
+                                    let workspace = self.workspace.clone();
+                                    move |_, _, cx| {
+                                        workspace.update(cx, |ws, cx| ws.check_for_update(true, cx))
+                                    }
+                                }),
+                        )
+                        .into_any_element(),
                 ))
                 .child(section(
                     "Codex CLI",
@@ -1164,6 +1212,7 @@ impl Render for RootView {
                 cx.entity(),
                 collapsed,
                 self.review.open,
+                self.editor(cx).map(|e| e.name),
                 window,
                 cx,
             );

@@ -32,6 +32,10 @@ mod acp;
 mod checkpoints;
 #[path = "workspace_chat_trees.rs"]
 mod chat_trees;
+#[path = "workspace_schedules.rs"]
+mod schedules;
+#[path = "workspace_updates.rs"]
+mod updates;
 #[path = "workspace_devices.rs"]
 mod devices;
 #[path = "workspace_preview.rs"]
@@ -165,6 +169,8 @@ pub struct Workspace {
     checkpoints: HashMap<String, Vec<usize>>,
     /// The checkpoint that undoes each conversation's last restore.
     restores: HashMap<String, usize>,
+    /// A newer Atrium, when one is out.
+    pub update: Option<crate::updates::Update>,
     pub goals: HashMap<String, Goal>,
     /// Threads with memory switched off.
     pub memory_off: HashSet<String>,
@@ -227,6 +233,8 @@ impl Workspace {
         workspace.init_projects(cx);
         workspace.init_devices(cx);
         workspace.sync_phone(cx);
+        workspace.start_schedules(cx);
+        workspace.start_update_checks(cx);
         cx.observe_self(|ws, cx| ws.sync_phone(cx)).detach();
         if let Some(agent) = workspace.settings.default_agent.clone()
             && (agent == CODEX
@@ -265,6 +273,7 @@ impl Workspace {
             prediction_forks: HashMap::new(),
             checkpoints: HashMap::new(),
             restores: HashMap::new(),
+            update: None,
             goals: HashMap::new(),
             memory_off: HashSet::new(),
             account: None,

@@ -45,6 +45,13 @@ pub struct Tools {
     pub busy: Option<String>,
     pub commit_input: Entity<TextInput>,
     terminals: HashMap<PathBuf, Entity<Terminal>>,
+    /// The Run view: its command box, the folder it was filled for, and
+    /// what runs, by folder.
+    pub run_input: Entity<TextInput>,
+    pub run_dir: Option<PathBuf>,
+    pub runs: HashMap<PathBuf, Entity<Terminal>>,
+    /// Editors found when Atrium started.
+    pub editors: Vec<opener::Editor>,
 }
 
 impl Tools {
@@ -60,6 +67,12 @@ impl Tools {
                     .placeholder(t("Commit message"))
             }),
             terminals: HashMap::new(),
+            run_input: cx.new(|cx| {
+                TextInput::new(window, cx).placeholder(t("Command, such as npm run dev"))
+            }),
+            run_dir: None,
+            runs: HashMap::new(),
+            editors: opener::installed(),
         }
     }
 }
@@ -167,6 +180,7 @@ impl RootView {
                     }
                 }
             }
+            SideTab::Run => self.prepare_run(&dir, cx),
             _ => {}
         }
     }
@@ -269,10 +283,69 @@ impl RootView {
         );
     }
 
+    /// The editor files open in: the chosen one, else the first installed.
+    pub(super) fn editor(&self, cx: &gpui::App) -> Option<opener::Editor> {
+        let chosen = self.workspace.read(cx).settings.editor.clone();
+        chosen
+            .and_then(|c| self.tools.editors.iter().find(|e| e.command == c).cloned())
+            .or_else(|| self.tools.editors.first().cloned())
+    }
+
+    /// Shows the conversation's folder in the file manager.
+    pub(super) fn reveal_chat_dir(&mut self, cx: &mut Context<Self>) {
+        if let Some(dir) = self.chat_dir(cx)
+            && let Err(e) = opener::reveal(&dir)
+        {
+            self.toast(&Notice::Error(format!("{e:#}")), cx);
+        }
+    }
+
+    /// The open conversation as Markdown, with its title.
+    fn markdown(&self, cx: &gpui::App) -> Option<(String, String)> {
+        let ws = self.workspace.read(cx);
+        let thread = ws.active_thread()?;
+        let title = thread.title();
+        let text = crate::export::to_markdown(&title, &thread.cwd, ws.transcript()?);
+        Some((title, text))
+    }
+
+    pub(super) fn copy_markdown(&mut self, cx: &mut Context<Self>) {
+        if let Some((_, text)) = self.markdown(cx) {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+            self.toast(&Notice::Success(t("Copied as Markdown").into()), cx);
+        }
+    }
+
+    /// Asks where to save the conversation as a Markdown file.
+    pub(super) fn export_markdown(&mut self, cx: &mut Context<Self>) {
+        let Some((title, text)) = self.markdown(cx) else {
+            return;
+        };
+        let dir = self
+            .chat_dir(cx)
+            .or_else(dirs::download_dir)
+            .or_else(dirs::home_dir)
+            .unwrap_or_default();
+        let picked = cx.prompt_for_new_path(&dir, Some(&crate::export::file_name(&title)));
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(path))) = picked.await else {
+                return;
+            };
+            let result = std::fs::write(&path, text);
+            let _ = this.update(cx, |root, cx| match result {
+                Ok(()) => root.toast(
+                    &Notice::Success(tf("Saved to {path}", &[("path", &path.display())])),
+                    cx,
+                ),
+                Err(e) => root.toast(&Notice::Error(e.to_string()), cx),
+            });
+        })
+        .detach();
+    }
+
     /// Opens a file of the conversation, at `line`, in the preferred editor.
     pub(super) fn open_in_editor(&mut self, path: &Path, line: Option<u32>, cx: &mut Context<Self>) {
-        let chosen = self.workspace.read(cx).settings.editor.clone();
-        let Some(editor) = opener::preferred(chosen.as_deref()) else {
+        let Some(editor) = self.editor(cx) else {
             if let Err(e) = opener::reveal(path) {
                 self.toast(&Notice::Error(format!("{e:#}")), cx);
             }
@@ -498,5 +571,42 @@ impl RootView {
                 .into_any_element(),
             None => div().into_any_element(),
         }
+    }
+}
+
+impl RootView {
+    /// Follows an `atrium://` link.
+    pub fn open_link(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::links::{Link, parse};
+        let Some(link) = parse(url) else {
+            self.toast(&Notice::Error(tf("Atrium cannot open {url}", &[("url", &url)])), cx);
+            return;
+        };
+        match link {
+            Link::New { prompt, folder, send } => {
+                self.workspace.update(cx, |ws, cx| {
+                    if let Some(dir) = folder.filter(|d| d.is_dir()) {
+                        ws.set_working_dir(dir, cx);
+                    }
+                    ws.enter_chats(cx);
+                    if send && !prompt.trim().is_empty() {
+                        ws.send(crate::workspace::Composed::text(prompt), cx);
+                    } else if !prompt.is_empty() {
+                        cx.emit(crate::workspace::Fill(crate::workspace::Composed::text(prompt)));
+                    }
+                });
+                super::composer::Composer::focus_entity(&self.composer, window, cx);
+            }
+            Link::Stream { project, stream } => self.workspace.update(cx, |ws, cx| {
+                let Some(root) = ws.projects.get(project).map(|p| p.root.clone()) else {
+                    cx.emit(Notice::Error(t("That project is no longer open.").into()));
+                    return;
+                };
+                ws.enter_project(root, cx);
+                ws.show_stream(&stream, cx);
+            }),
+            Link::Chat(id) => self.workspace.update(cx, |ws, cx| ws.open_thread(id, cx)),
+        }
+        cx.notify();
     }
 }

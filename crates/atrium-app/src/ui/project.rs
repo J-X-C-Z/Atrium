@@ -478,7 +478,7 @@ pub fn render_overview(
                             ws.update(cx, |ws, cx| ws.remove_project(root, cx));
                         }),
                 );
-            ely_gpui_component::menus::OverflowMenu::new("project-menu", menu)
+            ely_gpui_component::menus::OverflowMenu::new("project-menu", menu).tooltip(t("More"))
         });
 
     // Who is waiting on the user, across workstreams.

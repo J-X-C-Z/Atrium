@@ -7,11 +7,15 @@ mod agents;
 mod alerts;
 mod i18n;
 use atrium_project as project;
+mod export;
+mod schedule;
+mod links;
 mod opener;
 mod settings;
 mod skills;
 mod sleep_inhibitor;
 mod ui;
+mod updates;
 mod workspace;
 
 use ely_gpui_component::{Assets, i18n::I18n};
@@ -64,9 +68,18 @@ fn main() {
     )
     .init();
 
-    gpui_kit::application()
-        .with_assets(Assets::before(gpui_kit::assets::Assets))
-        .run(|cx: &mut App| {
+    // `atrium://` links: from the system while running, and from the command line.
+    let (links, mut incoming) = futures::channel::mpsc::unbounded::<String>();
+    for arg in args.iter().filter(|a| a.starts_with("atrium://")) {
+        let _ = links.unbounded_send(arg.clone());
+    }
+    let app = gpui_kit::application().with_assets(Assets::before(gpui_kit::assets::Assets));
+    app.on_open_urls(move |urls| {
+        for url in urls {
+            let _ = links.unbounded_send(url);
+        }
+    });
+    app.run(move |cx: &mut App| {
             gpui_kit::init(cx);
             ely_gpui_component::init(cx).expect("Ely failed to start");
             apply_language(settings::Settings::load().language, cx);
@@ -109,11 +122,21 @@ fn main() {
                 app_id: Some("dev.atrium".into()),
                 ..Default::default()
             };
-            gpui_kit::open_window(options, cx, |window, cx| {
+            let (window, root) = gpui_kit::open_window(options, cx, |window, cx| {
                 cx.new(|cx| RootView::new(window, cx))
             })
             .expect("open the main window");
             cx.activate(true);
+            cx.spawn(async move |cx| {
+                use futures::StreamExt;
+                while let Some(url) = incoming.next().await {
+                    let _ = window.update(cx, |_, window, cx| {
+                        root.update(cx, |root, cx| root.open_link(&url, window, cx));
+                        window.activate_window();
+                    });
+                }
+            })
+            .detach();
         });
 }
 

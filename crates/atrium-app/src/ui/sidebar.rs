@@ -388,6 +388,31 @@ pub fn render(
                     cx,
                 ))
         })
+        .children(ws.update.clone().map(|update| {
+            let url = update.url.clone();
+            div()
+                .id("update-row")
+                .flex_none()
+                .mx_2()
+                .mb_1()
+                .px_2()
+                .py_1p5()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded_md()
+                .cursor_pointer()
+                .bg(colors.accent.opacity(0.12))
+                .text_color(colors.accent)
+                .text_size(theme.text_size(TextSize::Sm))
+                .on_click(move |_, _, cx| cx.open_url(&url))
+                .child(Icon::new(IconName::Download).size(IconSize::Xs))
+                .child(div().flex_1().truncate().child(tf(
+                    "Atrium {version} is out",
+                    &[("version", &update.version)],
+                )))
+                .child(div().text_size(theme.text_size(TextSize::Xs)).child(t("Download")))
+        }))
         .child({
             let open = account_root.clone();
             let row = div()

@@ -71,15 +71,6 @@ pub fn installed() -> Vec<Editor> {
         .collect()
 }
 
-/// The editor to use: the one chosen in settings when installed, else the
-/// first installed one.
-pub fn preferred(chosen: Option<&str>) -> Option<Editor> {
-    let all = installed();
-    chosen
-        .and_then(|c| all.iter().find(|e| e.command == c).cloned())
-        .or_else(|| all.into_iter().next())
-}
-
 /// The arguments that open `path` at `line` with an editor's launcher.
 pub fn editor_args(editor: &Editor, path: &Path, line: Option<u32>) -> Vec<String> {
     let target = match line {
