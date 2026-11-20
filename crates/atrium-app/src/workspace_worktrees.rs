@@ -21,7 +21,7 @@ impl Workspace {
     pub(super) fn prepare_stream_checkout(
         &mut self,
         root: PathBuf,
-        stream: Workstream,
+        mut stream: Workstream,
         title: String,
         kickoff: String,
         cx: &mut Context<Self>,
@@ -48,7 +48,12 @@ impl Workspace {
                 let Some(project) = ws.project_mut(&root) else {
                     return;
                 };
-                if project.stream(&stream.id) != Some(&stream) {
+                let Some(current) = project.stream(&stream.id) else {
+                    return;
+                };
+                // A PR poll can complete while Git is preparing this same lead.
+                stream.pr.clone_from(&current.pr);
+                if current != &stream {
                     return;
                 }
                 let cwd = result.and_then(|dir| match dir {

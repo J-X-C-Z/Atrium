@@ -3,6 +3,8 @@
 
 #[path = "workspace_project_pool.rs"]
 mod pool;
+#[path = "workspace_pr_status.rs"]
+mod pr_status;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -183,6 +185,7 @@ pub struct StreamView {
 #[derive(Default)]
 pub(super) struct ScheduleState {
     task_pool: pool::TaskPoolSchedule,
+    pr_poll: pr_status::Poll,
     pilot: autopilot::Pilot,
     inhibitor: crate::sleep_inhibitor::SleepInhibitor,
     inhibitor_failed: bool,
@@ -331,6 +334,7 @@ impl Workspace {
     /// Every couple of seconds in a project: read the atrium again if it
     /// changed, and open workstream chats whose agent has come up.
     fn tick_project(&mut self, cx: &mut Context<Self>) {
+        self.tick_pr_badges(cx);
         let roots: Vec<_> = self.projects.iter().map(|p| p.root.clone()).collect();
         for root in roots {
             let changed = self.project_mut(&root).is_some_and(Project::reload);
