@@ -5,7 +5,7 @@ use crate::{
     workspace::Status,
 };
 use atrium_core::{AgentEvent, ApprovalKind, ApprovalRequest, Question, UserInputRequest};
-use gpui::TestAppContext;
+use gpui::{AppContext, TestAppContext};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -126,7 +126,10 @@ fn phone_api_answers_live_requests_and_posts_to_the_desktop(cx: &mut TestAppCont
             assert!(Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(10));
         }
-        let post = |path, body| http.post(&format!("{base}{path}")).send_json(body);
+        let post = |path, body| match http.post(&format!("{base}{path}")).send_json(body) {
+            Ok(response) | Err(ureq::Error::Status(_, response)) => response.status(),
+            Err(error) => panic!("POST {path} failed: {error}"),
+        };
         assert_eq!(
             get("/api/projects/0")["streams"][0]["needs_you"]
                 .as_array()
@@ -135,34 +138,20 @@ fn phone_api_answers_live_requests_and_posts_to_the_desktop(cx: &mut TestAppCont
             2
         );
         let approve = json!({"thread":"t","request_id":7,"decision":"accept_for_session"});
-        assert_eq!(
-            post("/api/approvals", approve.clone()).unwrap().status(),
-            204
-        );
-        assert!(matches!(
-            post("/api/approvals", approve),
-            Err(ureq::Error::Status(409, _))
-        ));
+        assert_eq!(post("/api/approvals", approve.clone()), 204);
+        assert_eq!(post("/api/approvals", approve), 409);
         let question = |choice| json!({"thread":"t","request_id":"q","answers":{"color":[choice]}});
-        assert!(matches!(
-            post("/api/questions", question("Red")),
-            Err(ureq::Error::Status(400, _))
-        ));
+        assert_eq!(post("/api/questions", question("Red")), 400);
+        assert_eq!(post("/api/questions", question("Blue")), 204);
         assert_eq!(
-            post("/api/questions", question("Blue")).unwrap().status(),
-            204
-        );
-        assert!(matches!(
             post("/api/threads/private/messages", json!({"text":"hi"})),
-            Err(ureq::Error::Status(404, _))
-        ));
+            404
+        );
         assert_eq!(
             post(
                 "/api/projects/0/notices",
                 json!({"text":"phone receipt","to":["lead"]})
-            )
-            .unwrap()
-            .status(),
+            ),
             204
         );
         loop {
@@ -177,9 +166,7 @@ fn phone_api_answers_live_requests_and_posts_to_the_desktop(cx: &mut TestAppCont
             post(
                 "/api/threads/t/messages",
                 json!({"text":"continue from phone"})
-            )
-            .unwrap()
-            .status(),
+            ),
             202
         );
     });

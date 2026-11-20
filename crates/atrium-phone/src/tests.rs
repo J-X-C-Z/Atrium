@@ -166,6 +166,7 @@ fn project_fixture_matches_overview_and_pool() {
     use atrium_project::{Project, Role, Workstream};
     use std::fs;
     let root = std::env::temp_dir().join(format!("atrium-snapshot-{}", std::process::id()));
+    fs::create_dir(&root).unwrap();
     let mut p = Project::open(&root).unwrap();
     p.file.streams = vec![
         Workstream {

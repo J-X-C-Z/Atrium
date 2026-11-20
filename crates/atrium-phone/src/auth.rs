@@ -188,7 +188,7 @@ mod tests {
     async fn phone_auth_asks_whois_for_the_socket_and_checks_magicdns() {
         use std::fs;
         let dir = std::env::temp_dir().join(format!("atrium-phone-whois-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir(&dir).unwrap();
         let path = dir.join(if cfg!(windows) {
             "tailscale.cmd"
         } else {

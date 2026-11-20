@@ -5,7 +5,7 @@ use atrium_phone::{
     snapshot::{Chat, project_snapshot},
 };
 use atrium_project::{Project, YOU};
-use gpui::{AppContext, Context, Task};
+use gpui::{Context, Task};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 pub(super) struct Phone {
