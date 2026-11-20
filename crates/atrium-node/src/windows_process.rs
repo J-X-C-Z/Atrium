@@ -36,6 +36,8 @@ mod tests {
                     .spawn()
                     .unwrap();
                 grandchild.wait().unwrap();
+                // Killing just the grandchild must not let the direct child finish the test.
+                std::thread::sleep(Duration::from_secs(25));
             }
             Ok("grandchild") => {
                 use std::io::Write;
@@ -83,7 +85,15 @@ mod tests {
             }
             false
         })
-        .await;
+        .await
+        .expect("grandchild readiness deadline");
+        assert!(
+            ready,
+            "fixture closed stdout before the grandchild was ready"
+        );
+        assert_ne!(queried, 0);
+        assert_ne!(member, 0);
+        assert!(child.try_wait().unwrap().is_none());
         // EOF requires both the direct child and its grandchild to close stdout.
         drop(job);
         let (ended, eof) = tokio::time::timeout(Duration::from_secs(10), async {
@@ -91,11 +101,9 @@ mod tests {
             tokio::join!(child.wait(), stdout.read_to_end(&mut trailing))
         })
         .await
-        .unwrap();
-        assert!(ready.unwrap());
-        assert_ne!(queried, 0);
-        assert_ne!(member, 0);
-        assert!(!ended.unwrap().success());
+        .expect("child still running or descendant stdout still open after job close");
+        // Windows can report exit code zero when closing a kill-on-close job.
+        ended.unwrap();
         eof.unwrap();
     }
 }

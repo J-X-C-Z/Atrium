@@ -42,7 +42,7 @@ PLIST
 plutil -lint "$APP/Contents/Info.plist"
 codesign --force --sign - --timestamp=none "$APP"
 ZIP="Atrium-macos-$(uname -m).zip"
-ditto -c -k --keepParent "$APP" "$STAGE/$ZIP"
+ditto -c -k --norsrc --noextattr --keepParent "$APP" "$STAGE/$ZIP"
 ditto -x -k "$STAGE/$ZIP" "$STAGE/verify"
 EXTRACTED="$STAGE/verify/Atrium.app"
 codesign --verify --strict "$EXTRACTED"

@@ -80,7 +80,13 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let mut c: Self = match std::fs::read_to_string(path) {
             Ok(text) => toml::from_str(&text).context("invalid node config")?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            // Windows can return NotFound when opening an existing directory ending in '\'.
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && !path.try_exists().context("cannot inspect node config")? =>
+            {
+                Self::default()
+            }
             Err(error) => return Err(error).context("cannot read node config"),
         };
         if c.keep_output_lines == 0 || c.keep_output_bytes < 64 * 1024 * 1024 {
@@ -299,7 +305,14 @@ mod tests {
     }
     #[test]
     fn unreadable_config_is_not_defaulted() {
-        // A directory exists but cannot be read as a configuration file.
-        assert!(Config::load(&std::env::temp_dir()).is_err());
+        let dir = std::env::temp_dir().join(format!("atrium-config-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let directory = Config::load(&dir);
+        let with_separator = Config::load(&dir.join(""));
+        let missing = Config::load(&dir.join("missing.toml"));
+        std::fs::remove_dir(dir).unwrap();
+        assert!(directory.is_err());
+        assert!(with_separator.is_err());
+        assert!(missing.unwrap().roots.is_empty());
     }
 }

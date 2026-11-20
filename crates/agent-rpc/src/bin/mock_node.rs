@@ -576,11 +576,13 @@ impl Write for Replay {
 fn attach(proc: Arc<Proc>, stream: TcpStream, head: Head, after: i64) -> std::io::Result<()> {
     let replay = Replay {
         head: std::io::Cursor::new(head.raw),
-        stream: stream.try_clone()?,
+        stream,
     };
     let mut socket =
         tungstenite::accept(replay).map_err(|e| std::io::Error::other(e.to_string()))?;
-    stream.set_read_timeout(Some(Duration::from_millis(50)))?;
+    // Winsock can keep SO_RCVTIMEO on the handle on which it was set.
+    let transport = &socket.get_ref().stream;
+    transport.set_read_timeout(Some(Duration::from_millis(50)))?;
     let (generation, drops) = {
         let mut output = proc.output.lock().unwrap();
         output.generation += 1;
@@ -641,7 +643,7 @@ fn attach(proc: Arc<Proc>, stream: TcpStream, head: Head, after: i64) -> std::io
             )
         };
         if dropped {
-            let _ = stream.shutdown(std::net::Shutdown::Both);
+            let _ = socket.get_ref().stream.shutdown(std::net::Shutdown::Both);
             return Ok(());
         }
         if replaced {
