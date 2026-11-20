@@ -36,7 +36,12 @@ impl TaskLock {
         for _ in 0..250 {
             match OpenOptions::new().write(true).create_new(true).open(&path) {
                 Ok(_) => return Ok(Self { path }),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::AlreadyExists
+                        || (cfg!(windows)
+                            && error.raw_os_error() == Some(5)
+                            && fs::metadata(&path).is_ok_and(|metadata| metadata.is_file())) =>
+                {
                     let stale = fs::metadata(&path)
                         .and_then(|m| m.modified())
                         .ok()
@@ -47,6 +52,15 @@ impl TaskLock {
                     } else {
                         thread::sleep(Duration::from_millis(20));
                     }
+                }
+                // Windows can briefly deny CREATE_NEW while another contender
+                // removes the lock. Give the deletion time to settle.
+                Err(error)
+                    if cfg!(windows)
+                        && error.raw_os_error() == Some(5)
+                        && !fs::metadata(&path).is_ok_and(|metadata| metadata.is_dir()) =>
+                {
+                    thread::sleep(Duration::from_millis(20));
                 }
                 Err(error) => {
                     return Err(error).with_context(|| format!("locking {}", path.display()));
