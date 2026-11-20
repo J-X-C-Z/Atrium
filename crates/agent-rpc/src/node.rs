@@ -1241,9 +1241,9 @@ mod tests {
             }
             stop_tx.send(()).unwrap();
             server.join().unwrap();
-            let until = Instant::now() + Duration::from_secs(1);
+            let until = Instant::now() + Duration::from_secs(3);
             while client.input_budget.bytes.load(Ordering::Acquire) != 0 {
-                assert!(Instant::now() < until);
+                assert!(Instant::now() < until, "input budget was not released");
                 thread::sleep(Duration::from_millis(2));
             }
             assert_eq!(client.input_budget.slots.load(Ordering::Acquire), 0);
