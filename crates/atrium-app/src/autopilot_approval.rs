@@ -71,6 +71,30 @@ fn literal_inspection(dir: &Path, cwd: &str, command: &str) -> bool {
     contained(dir, &path) && path.is_file()
 }
 
+pub(super) fn acp_decision(dir: &Path, wire: &Value) -> ApprovalDecision {
+    let call = &wire["toolCall"];
+    let input = &call["rawInput"];
+    let once = wire["options"].as_array().is_some_and(|options| {
+        options.iter().any(|o| {
+            o["kind"] == "allow_once" && o["optionId"].as_str().is_some_and(|id| !id.is_empty())
+        })
+    });
+    if once
+        && call["kind"] == "execute"
+        && input.as_object().is_some_and(|fields| {
+            fields
+                .keys()
+                .all(|k| matches!(k.as_str(), "command" | "cwd"))
+        })
+        && let (Some(cwd), Some(command)) = (input["cwd"].as_str(), input["command"].as_str())
+        && literal_inspection(dir, cwd, command)
+    {
+        ApprovalDecision::Accept
+    } else {
+        ApprovalDecision::Decline
+    }
+}
+
 pub(super) fn decision(
     dir: &Path,
     request: &ApprovalRequest,
@@ -185,6 +209,17 @@ mod tests {
         {
             std::os::unix::fs::symlink(&parent, dir.join("escape")).unwrap();
             assert!(!change_in(&dir, "escape/new"));
+        }
+        #[cfg(unix)]
+        {
+            let mut acp = serde_json::json!({"toolCall":{"kind":"execute","rawInput":{"cwd":cwd,"command":"/bin/pwd"}},
+                "options":[{"optionId":"once","kind":"allow_once"}]});
+            assert_eq!(acp_decision(&dir, &acp), ApprovalDecision::Accept);
+            acp["toolCall"]["rawInput"]["command"] = "pwd; exit".into();
+            assert_eq!(acp_decision(&dir, &acp), ApprovalDecision::Decline);
+            acp["toolCall"]["rawInput"]["command"] = "/bin/pwd".into();
+            acp["options"][0]["kind"] = "allow_always".into();
+            assert_eq!(acp_decision(&dir, &acp), ApprovalDecision::Decline);
         }
         let req = ApprovalRequest {
             thread_id: "s".into(),

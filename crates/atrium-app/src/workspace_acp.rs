@@ -247,9 +247,28 @@ impl Workspace {
                 });
             }
             while let Some(incoming) = events.next().await {
+                let permission = match &incoming {
+                    agent_rpc::Incoming::Request { method, params, .. }
+                        if method == "session/request_permission" =>
+                    {
+                        Some(params.clone())
+                    }
+                    _ => None,
+                };
                 let events = client.translate(incoming);
                 if this
-                    .update(cx, |ws, cx| ws.apply_acp(&backend, events, cx))
+                    .update(cx, |ws, cx| {
+                        let request = match events.as_slice() {
+                            [AgentEvent::ApprovalRequested(req)] => {
+                                permission.map(|wire| (req.clone(), wire))
+                            }
+                            _ => None,
+                        };
+                        ws.apply_acp(&backend, events, cx);
+                        if let Some((req, wire)) = request {
+                            ws.local_pilot_approval(&backend, &req, &wire, cx);
+                        }
+                    })
                     .is_err()
                 {
                     break;

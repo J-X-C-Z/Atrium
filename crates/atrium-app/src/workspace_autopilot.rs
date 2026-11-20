@@ -450,6 +450,7 @@ mod approval;
 impl Workspace {
     pub(in crate::workspace) fn local_pilot_approval(
         &mut self,
+        backend: &str,
         request: &atrium_core::ApprovalRequest,
         wire: &serde_json::Value,
         cx: &mut Context<Self>,
@@ -457,7 +458,11 @@ impl Workspace {
         let Some((p, s)) = self.stream_of(&request.thread_id) else {
             return;
         };
-        if !p.file.autopilot.on || s.backend != CODEX || s.retired {
+        if !p.file.autopilot.on
+            || s.backend != backend
+            || agents::split_backend(backend).1.is_some()
+            || s.retired
+        {
             return;
         }
         let dir = p.work_dir(&s.id);
@@ -479,7 +484,11 @@ impl Workspace {
             .get(&request.thread_id)
             .filter(|_| permitted)
             .map_or(atrium_core::ApprovalDecision::Decline, |t| {
-                approval::decision(&dir, request, wire, t)
+                if backend == CODEX {
+                    approval::decision(&dir, request, wire, t)
+                } else {
+                    approval::acp_decision(&dir, wire)
+                }
             });
         let root = p.root.clone();
         let stream = s.clone();
@@ -538,8 +547,8 @@ impl Workspace {
         let approvals: Vec<_> = t.pending_approvals().cloned().collect();
         let questions: Vec<_> = t.pending_questions().cloned().collect();
         for req in approvals {
-            // Local Codex checks the original wire request on receipt. Remote
-            // paths and ACP's display-only descriptions cannot prove local scope.
+            // Only the original local wire request can prove scope. Replayed
+            // descriptions and paths on a different host cannot.
             self.pilot_answer(root, s, &req, atrium_core::ApprovalDecision::Decline, cx);
         }
         if !agents::is_codex(&s.backend) {

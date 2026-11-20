@@ -385,7 +385,7 @@ impl Workspace {
                 let event = translate::request(&id, &method, &params);
                 if let Some(AgentEvent::ApprovalRequested(req)) = &event {
                     self.apply(AgentEvent::ApprovalRequested(req.clone()), cx);
-                    self.local_pilot_approval(req, &params, cx);
+                    self.local_pilot_approval(CODEX, req, &params, cx);
                     cx.notify();
                     return;
                 }
