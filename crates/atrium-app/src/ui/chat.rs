@@ -220,6 +220,29 @@ fn header(
                     move |_, cx| workspace.update(cx, |ws, cx| ws.toggle_memory(cx))
                 }));
         }
+        if ws.chat_tree().is_some() {
+            let (merge, remove) = (workspace.clone(), workspace.clone());
+            menu = menu
+                .separator()
+                .item(
+                    MenuItem::new(t("Merge this worktree into the main branch"))
+                        .icon(IconName::GitMerge)
+                        .on_click(move |_, cx| merge.update(cx, |ws, cx| ws.merge_chat_tree(cx))),
+                )
+                .item(
+                    MenuItem::new(t("Remove this worktree"))
+                        .icon(IconName::Trash2)
+                        .on_click(move |_, cx| remove.update(cx, |ws, cx| ws.remove_chat_tree(cx))),
+                );
+        }
+        if ws.can_undo_restore() {
+            let undo = workspace.clone();
+            menu = menu.separator().item(
+                MenuItem::new(t("Undo the last file restore"))
+                    .icon(IconName::Redo2)
+                    .on_click(move |_, cx| undo.update(cx, |ws, cx| ws.undo_restore(cx))),
+            );
+        }
         let archive = (workspace.clone(), id.clone());
         let details = root.clone();
         menu = menu
@@ -394,7 +417,25 @@ fn header(
                 .justify_center()
                 .text_size(theme.text_size(TextSize::Sm))
                 .text_color(colors.fg_muted)
-                .children(title.map(|title| div().truncate().child(title))),
+                .gap_2()
+                .items_center()
+                .children(title.map(|title| div().truncate().child(title)))
+                .children(ws.chat_tree().and_then(|dir| {
+                    let name = dir.file_name()?.to_string_lossy().to_string();
+                    Some(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .px_1p5()
+                            .rounded_md()
+                            .bg(colors.sunken)
+                            .text_size(theme.text_size(TextSize::Xs))
+                            .child(Icon::new(IconName::GitBranch).size(IconSize::Xs))
+                            .child(format!("atrium/{name}")),
+                    )
+                })),
         )
         .children(running.map(|took| {
             div()

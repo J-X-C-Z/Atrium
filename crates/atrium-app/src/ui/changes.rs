@@ -78,6 +78,7 @@ pub enum SideTab {
     Changes,
     Activity,
     Watch,
+    Terminal,
 }
 
 /// Reads a unified diff leniently: hunk headers with or without numbers, and
@@ -138,7 +139,9 @@ pub fn parse_diff(diff: &str, kind: &ChangeKind) -> Vec<DiffLine> {
             Some('-') => (LineKind::Removed, &line[1..]),
             Some(' ') => (LineKind::Context, &line[1..]),
             Some('\\') => continue,
-            _ => (LineKind::Context, line),
+            // Header lines git adds (`new file mode`, `similarity index`…).
+            Some(_) => continue,
+            None => (LineKind::Context, line),
         };
         let (o, n) = match kind {
             LineKind::Added => (None, Some(new)),
@@ -272,7 +275,15 @@ impl RootView {
             return None;
         }
         let ws = self.workspace.read(cx);
-        let files = ws.transcript().map(changed_files).unwrap_or_default();
+        // In a repository the view is git's: everything uncommitted, which
+        // can be committed or undone. Elsewhere, the files the agent changed.
+        let git_files = self
+            .git_view(cx)
+            .filter(|g| g.status.is_some())
+            .map(|g| g.files.iter().map(|(f, _)| f.clone()).collect::<Vec<_>>());
+        let in_git = git_files.is_some();
+        let files = git_files
+            .unwrap_or_else(|| ws.transcript().map(changed_files).unwrap_or_default());
         let cwd = ws
             .active_thread()
             .map(|t| t.cwd.clone())
@@ -305,6 +316,22 @@ impl RootView {
             ),
             cx,
         );
+        if self.review.tab == SideTab::Terminal {
+            return Some(
+                div()
+                    .flex_none()
+                    .w(px(480.))
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .border_l_1()
+                    .border_color(colors.border)
+                    .bg(colors.bg)
+                    .child(header)
+                    .child(div().flex_1().min_h_0().p_1().child(self.terminal_body(cx)))
+                    .into_any_element(),
+            );
+        }
         if self.review.tab != SideTab::Changes {
             let body = match self.review.tab {
                 SideTab::Activity => self.activity_body(cx),
@@ -319,7 +346,11 @@ impl RootView {
                 div()
                     .text_size(small)
                     .text_color(colors.fg_muted)
-                    .child(t("No file changes in this conversation yet.")),
+                    .child(if in_git {
+                        t("Nothing uncommitted.")
+                    } else {
+                        t("No file changes in this conversation yet.")
+                    }),
             );
         }
         for (file_ix, file) in files.iter().enumerate() {
@@ -371,9 +402,22 @@ impl RootView {
                                 .text_size(tiny)
                                 .text_color(colors.danger)
                                 .child(format!("−{}", file.removed)),
-                        ),
+                        )
+                        .children(self.file_buttons(file_ix, file, cx)),
                 );
+            let mut hunk = 0usize;
             for (row, line) in file.lines.iter().enumerate().take(MAX_LINES) {
+                let hunk_undo = if line.kind == LineKind::Hunk {
+                    hunk += 1;
+                    self.hunk_button(
+                        file,
+                        hunk - 1,
+                        SharedString::from(format!("hunk-undo-{file_ix}-{row}")),
+                        cx,
+                    )
+                } else {
+                    None
+                };
                 let (bg, sign) = match line.kind {
                     LineKind::Added => (Some(colors.success.opacity(0.10)), "+"),
                     LineKind::Removed => (Some(colors.danger.opacity(0.10)), "−"),
@@ -438,7 +482,8 @@ impl RootView {
                                 } else {
                                     line.text.clone()
                                 }),
-                        ),
+                        )
+                        .children(hunk_undo),
                 );
                 for (ix, comment) in self
                     .review
@@ -581,6 +626,11 @@ impl RootView {
                 )
         });
 
+        let body = div()
+            .flex()
+            .flex_col()
+            .children(self.git_bar(cx))
+            .child(body);
         Some(Self::side_frame(
             header,
             body.into_any_element(),
@@ -663,6 +713,7 @@ impl RootView {
             .child(tab("side-changes", t("Changes"), SideTab::Changes))
             .child(tab("side-activity", t("Activity"), SideTab::Activity))
             .child(tab("side-watch", t("Side by side"), SideTab::Watch))
+            .child(tab("side-terminal", t("Terminal"), SideTab::Terminal))
             .child(div().flex_1())
             .children(extra.filter(|_| self.review.tab == SideTab::Changes))
             .child(
@@ -684,6 +735,14 @@ impl RootView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_header_lines_stay_out() {
+        let diff = "diff --git a/n b/n\nnew file mode 100644\nindex 0000000..1\n--- /dev/null\n+++ b/n\n@@ -0,0 +1 @@\n+hi\n";
+        let lines = parse_diff(diff, &ChangeKind::Add);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1].text, "hi");
+    }
 
     #[test]
     fn unified_diffs_number_their_lines() {

@@ -8,6 +8,7 @@ mod composer;
 mod context;
 mod devices;
 mod extras;
+mod tools;
 mod motion;
 mod project;
 mod rows;
@@ -189,6 +190,8 @@ pub struct RootView {
     /// The changes pane: open or not, and the comments being written.
     pub(super) review: changes::Review,
     comment_input: Entity<TextInput>,
+    /// Git and the terminal for the open conversation's folder.
+    pub(super) tools: tools::Tools,
     /// Inputs of the shared MCP and environment settings.
     extras: extras::ExtrasInputs,
     /// The theme last applied, so a change of preference or system appearance re-applies.
@@ -256,6 +259,7 @@ impl RootView {
             notice_to: "all".into(),
             review: changes::Review::default(),
             comment_input,
+            tools: tools::Tools::new(window, cx),
             extras,
             applied: None,
             placeholders_chinese: crate::i18n::chinese(),
@@ -1122,6 +1126,10 @@ impl RootView {
 
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.prepare_side(window, cx);
+        self.workspace.update(cx, |ws, cx| {
+            ws.checkpoint_turns(cx);
+        });
         // Shortcuts need a focused element to start from: a click on empty
         // space must not leave the window deaf to them.
         if window.focused(cx).is_none() && self.overlay.is_none() {

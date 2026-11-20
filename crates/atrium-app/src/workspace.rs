@@ -28,6 +28,10 @@ use notice_dispatch::{NoticeSendResult, NoticeTarget, codex_notice_outcome};
 
 #[path = "workspace_acp.rs"]
 mod acp;
+#[path = "workspace_checkpoints.rs"]
+mod checkpoints;
+#[path = "workspace_chat_trees.rs"]
+mod chat_trees;
 #[path = "workspace_devices.rs"]
 mod devices;
 #[path = "workspace_preview.rs"]
@@ -157,6 +161,10 @@ pub struct Workspace {
     predictions: HashMap<String, String>,
     /// Prediction forks in flight: fork id to (source thread, text so far).
     prediction_forks: HashMap<String, (String, String)>,
+    /// The turns with a checkpoint, by conversation (or a new chat's key).
+    checkpoints: HashMap<String, Vec<usize>>,
+    /// The checkpoint that undoes each conversation's last restore.
+    restores: HashMap<String, usize>,
     pub goals: HashMap<String, Goal>,
     /// Threads with memory switched off.
     pub memory_off: HashSet<String>,
@@ -255,6 +263,8 @@ impl Workspace {
             turn_started: HashMap::new(),
             predictions: HashMap::new(),
             prediction_forks: HashMap::new(),
+            checkpoints: HashMap::new(),
+            restores: HashMap::new(),
             goals: HashMap::new(),
             memory_off: HashSet::new(),
             account: None,
@@ -1473,6 +1483,7 @@ impl Workspace {
         let request = self.turn_request(&composed);
         match self.view.clone() {
             View::Thread(thread_id) => {
+                let checkpoint = self.checkpoint_next_turn(&thread_id, cx);
                 let transcript = self.transcripts.entry(thread_id.clone()).or_default();
                 let before = transcript.len();
                 transcript.push_local_user(composed.text.clone(), composed.attachments());
@@ -1481,6 +1492,7 @@ impl Workspace {
                 self.turn_started.insert(thread_id.clone(), Instant::now());
                 cx.notify();
                 cx.spawn(async move |this, cx| {
+                    checkpoint.await;
                     if reactivate
                         && let Err(e) = client
                             .goal_set(&thread_id, None, Some(GoalStatus::Active), None)
@@ -1534,7 +1546,22 @@ impl Workspace {
                     env: self.session_env(),
                 };
                 let title = composed.text.clone();
+                let (checkpoint, adopt) = self.checkpoint_new_chat(&backend, cx);
+                let folder = self.new_chat_folder(&backend, &title, cx);
+                let mut options = options;
                 cx.spawn(async move |this, cx| {
+                    match folder.await {
+                        Ok(dir) => options.cwd = Some(dir.display().to_string()),
+                        Err(error) => {
+                            let _ = this.update(cx, |ws, cx| {
+                                ws.draft.fail_pending_turn(error);
+                                ws.turn_started.remove(DRAFT);
+                                cx.notify();
+                            });
+                            return;
+                        }
+                    }
+                    checkpoint.await;
                     let started = client.thread_start(options).await;
                     let thread_id = match started {
                         Ok(mut meta) => {
@@ -1545,6 +1572,9 @@ impl Workspace {
                             }
                             let id = meta.id.clone();
                             let ok = this.update(cx, |ws, cx| {
+                                if let Some((dir, key)) = adopt {
+                                    ws.adopt_checkpoints(dir, key, id.clone(), cx);
+                                }
                                 ws.upsert_thread(meta);
                                 // The draft becomes the thread's transcript.
                                 let draft = std::mem::take(&mut ws.draft);

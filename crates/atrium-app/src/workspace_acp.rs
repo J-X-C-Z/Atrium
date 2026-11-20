@@ -526,6 +526,7 @@ impl Workspace {
                         Err(outcome) => return outcome,
                     };
 
+                let checkpoint = self.checkpoint_next_turn(&session, cx);
                 let transcript = self.transcripts.entry(session.clone()).or_default();
                 let before = transcript.len();
                 transcript.push_local_user(composed.text.clone(), composed.attachments());
@@ -533,7 +534,13 @@ impl Workspace {
                 self.note_births(&session, before);
                 self.turn_started.insert(session.clone(), Instant::now());
                 cx.notify();
-                Self::run_prompt(client, backend, session, composed, notice_dispatch, cx);
+                cx.spawn(async move |this, cx| {
+                    checkpoint.await;
+                    let _ = this.update(cx, |_, cx| {
+                        Self::run_prompt(client, backend, session, composed, notice_dispatch, cx)
+                    });
+                })
+                .detach();
             }
             View::Draft => {
                 self.draft = Transcript::new();
@@ -559,7 +566,26 @@ impl Workspace {
                     .as_ref()
                     .and_then(|id| self.session_options.get(id).cloned());
                 let mcp = self.user_mcp(&backend);
+                let (checkpoint, adopt) = self.checkpoint_new_chat(&backend, cx);
+                let folder = self.new_chat_folder(&backend, &composed.text, cx);
+                let mut warm = warm;
                 cx.spawn(async move |this, cx| {
+                    let cwd = match folder.await {
+                        Ok(dir) => dir,
+                        Err(error) => {
+                            let _ = this.update(cx, |ws, cx| {
+                                ws.draft.fail_pending_turn(error);
+                                ws.turn_started.remove(DRAFT);
+                                cx.notify();
+                            });
+                            return;
+                        }
+                    };
+                    // A session warmed in the main folder does not fit a worktree.
+                    if super::chat_trees::is_chat_tree(&cwd) {
+                        warm = None;
+                    }
+                    checkpoint.await;
                     let started = match (warm, warm_options) {
                         (Some(session_id), Some(options)) => Ok(acp_client::SessionStart {
                             session_id,
@@ -600,6 +626,9 @@ impl Workspace {
                         }
                     }
                     let ok = this.update(cx, |ws, cx| {
+                        if let Some((dir, key)) = adopt {
+                            ws.adopt_checkpoints(dir, key, session.clone(), cx);
+                        }
                         let now = jiff::Timestamp::now().as_second();
                         ws.upsert_thread(ThreadMeta {
                             id: session.clone(),

@@ -600,9 +600,25 @@ impl Composer {
                     .icon(IconName::FolderOpen)
                     .on_click(move |_, cx| choose_folder(workspace.clone(), cx)),
             );
+            let isolated = ws.settings.chat_worktrees;
+            let toggle = self.workspace.clone();
+            menu = menu.separator().item(
+                MenuItem::check(t("Start in its own worktree"), isolated).on_click(move |_, cx| {
+                    toggle.update(cx, |ws, cx| {
+                        ws.settings.chat_worktrees = !ws.settings.chat_worktrees;
+                        ws.settings.save();
+                        cx.notify();
+                    })
+                }),
+            );
+            let label = if isolated {
+                tf("{folder} · own worktree", &[("folder", &folder_name(&folder))])
+            } else {
+                folder_name(&folder)
+            };
             tools.push(
-                DropdownMenu::new("folder", folder_name(&folder), menu)
-                    .icon(IconName::Folder)
+                DropdownMenu::new("folder", label, menu)
+                    .icon(if isolated { IconName::GitBranch } else { IconName::Folder })
                     .variant(ButtonVariant::Ghost)
                     .into_any_element(),
             );

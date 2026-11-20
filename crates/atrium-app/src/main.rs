@@ -7,6 +7,7 @@ mod agents;
 mod alerts;
 mod i18n;
 use atrium_project as project;
+mod opener;
 mod settings;
 mod skills;
 mod sleep_inhibitor;

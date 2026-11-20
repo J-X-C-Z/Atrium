@@ -22,6 +22,7 @@
 //! do one self-contained task for their lead. Atrium starts the agent a task
 //! file asks for and tells the asker when it is done, so nobody polls.
 
+pub mod repo;
 pub mod agent;
 pub mod autopilot;
 mod git;

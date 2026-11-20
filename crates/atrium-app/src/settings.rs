@@ -78,6 +78,11 @@ pub struct Settings {
     pub remote_view: bool,
     /// Optional ntfy topic name or self-hosted topic URL.
     pub push_topic: Option<String>,
+    /// The editor files open in, by its launcher (`code`, `cursor`, `zed`…);
+    /// the first installed one when unset.
+    pub editor: Option<String>,
+    /// New chats in a git repository start in a worktree of their own.
+    pub chat_worktrees: bool,
     /// The interface's language.
     pub language: crate::i18n::Language,
     /// Where new chats run on each device, by device id.

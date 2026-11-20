@@ -168,9 +168,25 @@ fn footer(
     let codex = workspace.read(cx).is_codex_view();
     let branch = workspace.clone();
     let from = turn.clone();
+    // Your messages count the turns; turn `n` has checkpoint `n`.
+    let number = transcript.entries()[..=ix]
+        .iter()
+        .filter(|e| matches!(e.kind, EntryKind::Item(Item::User { .. })))
+        .count()
+        .checked_sub(1);
+    let undo = number.filter(|n| workspace.read(cx).has_checkpoint(*n)).map(|n| {
+        let restore = workspace.clone();
+        IconButton::new(key("undo-files", &turn), IconName::History)
+            .variant(ButtonVariant::Ghost)
+            .size(ControlSize::Sm)
+            .disabled(transcript.is_running())
+            .tooltip(t("Undo this turn's file changes"))
+            .on_click(move |_, _, cx| restore.update(cx, |ws, cx| ws.restore_turn(n, cx)))
+    });
     Some(
         footer
             .child(actions)
+            .children(undo)
             .when(codex, |footer| {
                 footer.child(
                     IconButton::new(key("branch", &turn), IconName::GitBranch)
