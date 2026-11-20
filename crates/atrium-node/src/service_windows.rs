@@ -42,9 +42,9 @@ fn render_windows(exe: &Path, config: &Path) -> Result<String> {
     };
     let e = xml(&action_path(exe)?);
     let c = xml(&windows_arg(&action_path(config)?));
+    // RegisterTask receives a UTF-16 BSTR, so leave byte encoding unspecified.
     Ok(format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<Task version="1.3" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+        r#"<Task version="1.3" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
 <RegistrationInfo><Description>Atrium per-user agent node (managed v2)</Description></RegistrationInfo>
 <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>ATRIUM_USER_SID</UserId></LogonTrigger></Triggers>
 <Principals><Principal id="Author"><UserId>ATRIUM_USER_SID</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
