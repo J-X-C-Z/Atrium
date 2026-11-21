@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    dto::{AnswerInput, ApprovalAnswer, ThreadAnnouncement, ThreadSnapshot, TurnInput},
+    dto::{
+        AnswerInput, ApprovalAnswer, MovePackage, ThreadAnnouncement, ThreadSnapshot, TurnInput,
+    },
     model::{Op, Vector},
     store::{Store, StoreError},
 };
@@ -190,6 +192,26 @@ impl PeerClient {
             .as_str()
             .map(str::to_string)
             .ok_or_else(|| PeerError::Transport("the owner did not return a path".into()))
+    }
+
+    pub fn move_package(&self, backend: &str, id: &str) -> Result<MovePackage, PeerError> {
+        let answer = self.get(&format!(
+            "/v1/sync/threads/{}/{}/move-package",
+            encode(backend),
+            encode(id)
+        ))?;
+        Ok(serde_json::from_value(answer)?)
+    }
+
+    pub fn move_release(&self, backend: &str, id: &str) -> Result<(), PeerError> {
+        self.send_empty(
+            &format!(
+                "/v1/sync/threads/{}/{}/move-release",
+                encode(backend),
+                encode(id)
+            ),
+            &serde_json::json!({}),
+        )
     }
 
     /// One full pull/push round with a peer.

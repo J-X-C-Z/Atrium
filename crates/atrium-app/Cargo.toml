@@ -21,6 +21,7 @@ codex-client.workspace = true
 acp-client.workspace = true
 agent-rpc.workspace = true
 anyhow.workspace = true
+base64.workspace = true
 futures.workspace = true
 log.workspace = true
 env_logger.workspace = true

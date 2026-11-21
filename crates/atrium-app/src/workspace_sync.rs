@@ -4,18 +4,20 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
 
 use atrium_core::{AgentEvent, ApprovalDecision, Item, ThreadMeta, Transcript};
 use atrium_node::{EmbeddedNode, HostError, HostFuture, SyncHost, SyncState};
+use atrium_project::repo;
 use atrium_sync::{
-    AnswerInput, ApprovalAnswer, DeviceDirectory, Lease, LeaseDecision, PeerClient, SettingsView,
-    ThreadAnnouncement, ThreadCache, ThreadSnapshot, TurnInput, lease_can_be_taken,
+    AnswerInput, ApprovalAnswer, DeviceDirectory, Lease, LeaseDecision, MovePackage, PeerClient,
+    SettingsView, ThreadAnnouncement, ThreadCache, ThreadSnapshot, TurnInput, lease_can_be_taken,
     migrate_settings, thread_key,
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use gpui::Context;
 use tokio::sync::{mpsc, oneshot};
 
@@ -36,6 +38,16 @@ pub struct SyncRuntime {
     pub polling: bool,
     pub project_ids: HashMap<PathBuf, String>,
     pub lease_renewed: HashMap<String, i64>,
+}
+
+struct AppliedMove {
+    package: MovePackage,
+    folder: PathBuf,
+    old_owner: String,
+    device: String,
+    install_id: String,
+    backend: String,
+    resumed: bool,
 }
 
 enum Command {
@@ -77,6 +89,16 @@ enum Command {
         id: String,
         request: serde_json::Value,
         input: AnswerInput,
+        reply: oneshot::Sender<Result<(), HostError>>,
+    },
+    MovePackage {
+        backend: String,
+        id: String,
+        reply: oneshot::Sender<Result<MovePackage, HostError>>,
+    },
+    MoveRelease {
+        backend: String,
+        id: String,
         reply: oneshot::Sender<Result<(), HostError>>,
     },
 }
@@ -198,6 +220,24 @@ impl SyncHost for SyncHostClient {
                 reply,
             })
             .await
+        })
+    }
+
+    fn move_package<'a>(&'a self, backend: &'a str, id: &'a str) -> HostFuture<'a, MovePackage> {
+        let backend = backend.to_string();
+        let id = id.to_string();
+        Box::pin(async move {
+            self.ask(|reply| Command::MovePackage { backend, id, reply })
+                .await
+        })
+    }
+
+    fn move_release<'a>(&'a self, backend: &'a str, id: &'a str) -> HostFuture<'a, ()> {
+        let backend = backend.to_string();
+        let id = id.to_string();
+        Box::pin(async move {
+            self.ask(|reply| Command::MoveRelease { backend, id, reply })
+                .await
         })
     }
 }
@@ -426,6 +466,38 @@ impl Workspace {
                     let _ = reply.send(Err(HostError::NotFound));
                 }
             }
+            Command::MovePackage { backend, id, reply } => {
+                if self.transcripts.contains_key(&id) {
+                    let _ = reply.send(self.sync_owner_move_package(&backend, &id));
+                } else if crate::agents::is_codex(&backend)
+                    && let Some(client) = self.thread_codex(&id)
+                {
+                    let backend_for_read = backend.clone();
+                    cx.spawn(async move |this, cx| {
+                        let read = client.thread_read(&id).await;
+                        let answer = match read {
+                            Ok((_meta, turns)) => this
+                                .update(cx, |workspace, _| {
+                                    workspace
+                                        .transcripts
+                                        .insert(id.clone(), Transcript::from_history(turns));
+                                    workspace.sync_owner_move_package(&backend_for_read, &id)
+                                })
+                                .unwrap_or_else(|_| {
+                                    Err(HostError::Unavailable("the desktop stopped".into()))
+                                }),
+                            Err(error) => Err(HostError::Unavailable(format!("{error:#}"))),
+                        };
+                        let _ = reply.send(answer);
+                    })
+                    .detach();
+                } else {
+                    let _ = reply.send(Err(HostError::NotFound));
+                }
+            }
+            Command::MoveRelease { backend, id, reply } => {
+                let _ = reply.send(self.sync_owner_move_release(&backend, &id, cx));
+            }
         }
     }
 
@@ -651,8 +723,9 @@ impl Workspace {
         let mut pinned = HashSet::new();
         let mut hidden = HashSet::new();
         let mut titles = HashMap::new();
+        let mut moved = HashMap::new();
         for (key, register) in sync.state.store().registers() {
-            let Some((_device, backend, thread, field)) = atrium_sync::parse_thread_key(key) else {
+            let Some((device, backend, thread, field)) = atrium_sync::parse_thread_key(key) else {
                 continue;
             };
             let visible = register.value.as_ref().and_then(|value| value.as_bool());
@@ -670,9 +743,27 @@ impl Workspace {
                 "hidden" if visible == Some(true) => {
                     hidden.insert(thread.to_string());
                 }
+                "moved_to" => {
+                    if let Some(target) = register.value.as_ref().and_then(|value| value.as_str()) {
+                        moved.insert(thread.to_string(), (device.to_string(), target.to_string()));
+                    }
+                }
                 _ => {
                     let _ = backend;
                 }
+            }
+        }
+        for thread in &self.threads {
+            let owner = sync
+                .owners
+                .get(&thread.id)
+                .cloned()
+                .unwrap_or_else(|| self.settings.install_id.clone());
+            if moved
+                .get(&thread.id)
+                .is_some_and(|(old, _target)| *old == owner)
+            {
+                hidden.insert(thread.id.clone());
             }
         }
         let mut changed = false;
@@ -936,7 +1027,7 @@ impl Workspace {
             .and_then(|sync| sync.owners.get(thread_id).cloned())
     }
 
-    pub(super) fn sync_is_remote(&self, thread_id: &str) -> bool {
+    pub fn sync_is_remote(&self, thread_id: &str) -> bool {
         self.sync_owner(thread_id)
             .is_some_and(|owner| owner != self.settings.install_id)
     }
@@ -1342,6 +1433,266 @@ impl Workspace {
         .detach();
     }
 
+    /// Packages and releases a local conversation for transfer.
+    fn sync_owner_move_package(
+        &mut self,
+        backend: &str,
+        id: &str,
+    ) -> Result<MovePackage, HostError> {
+        let thread = self
+            .threads
+            .iter()
+            .find(|thread| thread.id == id && thread.backend == backend)
+            .cloned()
+            .ok_or(HostError::NotFound)?;
+        let transcript = self
+            .transcripts
+            .get(id)
+            .ok_or_else(|| HostError::Unavailable("the conversation is not open".into()))?;
+        if transcript.is_running() {
+            return Err(HostError::Conflict(
+                "stop the running turn before moving the conversation".into(),
+            ));
+        }
+        if !crate::agents::is_codex(backend) {
+            return Err(HostError::Unavailable(
+                "moving an ACP conversation is not implemented yet".into(),
+            ));
+        }
+        let codex_home = self
+            .client
+            .as_ref()
+            .map(|client| PathBuf::from(&client.codex_home))
+            .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
+            .ok_or_else(|| HostError::Unavailable("no Codex home".into()))?;
+        let (session_relative, session) = find_session_file(&codex_home, id).ok_or_else(|| {
+            HostError::Unavailable("Codex has no session file for this conversation".into())
+        })?;
+        let git = repo::root(Path::new(&thread.cwd))
+            .map(|_| repo::move_bundle(Path::new(&thread.cwd), id))
+            .transpose()
+            .map_err(|error| HostError::Unavailable(format!("{error:#}")))?;
+        if session.len() > 32 * 1024 * 1024
+            || git
+                .as_ref()
+                .is_some_and(|(bundle, ..)| bundle.len() > 32 * 1024 * 1024)
+        {
+            return Err(HostError::Unavailable(
+                "the session or working tree is too large to move (32 MB limit)".into(),
+            ));
+        }
+        let (bundle, git_ref, git_commit, identity) = match git {
+            Some((bundle, reference, commit, identity)) => (
+                Some(BASE64.encode(bundle)),
+                Some(reference),
+                Some(commit),
+                Some(identity),
+            ),
+            None => (None, None, None, None),
+        };
+        Ok(MovePackage {
+            thread: ThreadAnnouncement::from_meta(thread, self.settings.install_id.clone(), "idle"),
+            items: transcript_items(transcript),
+            approvals: transcript.pending_approvals().cloned().collect(),
+            questions: transcript.pending_questions().cloned().collect(),
+            session_relative: Some(session_relative),
+            session_base64: Some(BASE64.encode(session)),
+            git_identity: identity,
+            git_bundle_base64: bundle,
+            git_ref,
+            git_commit,
+        })
+    }
+
+    fn sync_owner_move_release(
+        &mut self,
+        _backend: &str,
+        id: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), HostError> {
+        self.threads.retain(|thread| thread.id != id);
+        self.transcripts.remove(id);
+        self.turn_started.remove(id);
+        self.loading.remove(id);
+        if let Some(sync) = &mut self.sync {
+            sync.owners.remove(id);
+            sync.cursors.remove(id);
+        }
+        if self.view == View::Thread(id.to_string()) {
+            self.view = View::Draft;
+        }
+        // Codex keeps its writer lock per app-server. Releasing the whole
+        // process is blunt, but it is the reliable way to let the target
+        // resume the same thread; the other chats reconnect immediately.
+        self.client = None;
+        self.connect(cx);
+        cx.notify();
+        Ok(())
+    }
+
+    /// Moves a remote conversation and its working tree onto this computer.
+    pub fn move_to_this_computer(&mut self, thread_id: String, cx: &mut Context<Self>) {
+        let Some((peer, device, backend)) = self.sync_peer_for(&thread_id) else {
+            return;
+        };
+        let Some(owner) = self.sync_owner(&thread_id) else {
+            return;
+        };
+        let Some(local_client) = self.client.clone() else {
+            cx.emit(Notice::Error("Codex is not running.".into()));
+            return;
+        };
+        let candidates: Vec<PathBuf> = self
+            .settings
+            .recent_folders
+            .iter()
+            .chain(self.settings.projects.iter())
+            .cloned()
+            .collect();
+        let install_id = self.settings.install_id.clone();
+        let codex_home = PathBuf::from(&local_client.codex_home);
+        let mcp = self.mcp_for_thread(&thread_id, &backend);
+        let id = thread_id.clone();
+        cx.emit(Notice::Info(crate::i18n::tf(
+            "Moving the conversation from {device}…",
+            &[("device", &device)],
+        )));
+        cx.spawn(async move |this, cx| {
+            let backend_for_move = backend.clone();
+            let job = cx.background_executor().spawn(async move {
+                let package = peer
+                    .move_package(&backend_for_move, &id)
+                    .map_err(|error| format!("{error}"))?;
+                let identity = package
+                    .git_identity
+                    .clone()
+                    .ok_or_else(|| "the conversation's folder is not a git project".to_string())?;
+                let repo = candidates
+                    .iter()
+                    .find(|candidate| repo::identity(candidate).as_deref() == Some(&identity))
+                    .cloned()
+                    .ok_or_else(|| {
+                        "no checkout of this project on this computer; clone it first".to_string()
+                    })?;
+                let session = BASE64
+                    .decode(
+                        package
+                            .session_base64
+                            .as_deref()
+                            .ok_or_else(|| "the package has no session".to_string())?,
+                    )
+                    .map_err(|error| error.to_string())?;
+                let relative = package
+                    .session_relative
+                    .as_deref()
+                    .ok_or_else(|| "the package has no session path".to_string())?;
+                write_session_file(&codex_home, relative, &session)?;
+                let bundle = BASE64
+                    .decode(
+                        package
+                            .git_bundle_base64
+                            .as_deref()
+                            .ok_or_else(|| "the package has no code".to_string())?,
+                    )
+                    .map_err(|error| error.to_string())?;
+                let reference = package
+                    .git_ref
+                    .as_deref()
+                    .ok_or_else(|| "the package has no code ref".to_string())?;
+                let folder = repo::apply_move_bundle(
+                    &repo,
+                    &bundle,
+                    reference,
+                    &id,
+                    &super::chat_trees::worktrees_base(),
+                )
+                .map_err(|error| format!("{error:#}"))?;
+                // The owner must drop its writer before the target resumes.
+                peer.move_release(&backend_for_move, &id)
+                    .map_err(|error| format!("{error}"))?;
+                let resumed = local_client
+                    .thread_resume_in_folder(&id, &mcp, &folder)
+                    .await;
+                Ok::<_, String>((package, folder, resumed.is_ok()))
+            });
+            let result = job.await;
+            let _ = this.update(cx, |workspace, cx| match result {
+                Ok((package, folder, resumed)) => {
+                    workspace.finish_move(
+                        AppliedMove {
+                            package,
+                            folder,
+                            old_owner: owner,
+                            device,
+                            install_id,
+                            backend,
+                            resumed,
+                        },
+                        cx,
+                    );
+                }
+                Err(error) => {
+                    cx.emit(Notice::Error(crate::i18n::tf(
+                        "Could not move the conversation: {error}",
+                        &[("error", &error)],
+                    )));
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn finish_move(&mut self, applied: AppliedMove, cx: &mut Context<Self>) {
+        let AppliedMove {
+            package,
+            folder,
+            old_owner,
+            device,
+            install_id,
+            backend,
+            resumed,
+        } = applied;
+        let id = package.thread.id.clone();
+        let mut meta = package.thread.into_meta();
+        meta.cwd = folder.display().to_string();
+        meta.backend = backend.clone();
+        if let Some(thread) = self.threads.iter_mut().find(|thread| thread.id == id) {
+            *thread = meta;
+        } else {
+            self.threads.push(meta);
+        }
+        let mut transcript = Transcript::from_items(package.items);
+        for request in package.approvals {
+            transcript.apply(&AgentEvent::ApprovalRequested(request));
+        }
+        for request in package.questions {
+            transcript.apply(&AgentEvent::UserInputRequested(request));
+        }
+        self.transcripts.insert(id.clone(), transcript);
+        if let Some(sync) = &mut self.sync {
+            sync.owners.insert(id.clone(), install_id.clone());
+            sync.cursors.insert(id.clone(), 0);
+            let key = thread_key(&old_owner, &backend, &id, "moved_to");
+            if let Err(error) = sync.state.set(key, serde_json::json!(install_id)) {
+                log::warn!("move overlay: {error}");
+            }
+        }
+        self.view = View::Thread(id.clone());
+        self.nav += 1;
+        self.sync_refresh_overlay();
+        cx.emit(Notice::Success(crate::i18n::tf(
+            "Moved the conversation from {device}.",
+            &[("device", &device)],
+        )));
+        if !resumed {
+            cx.emit(Notice::Error(
+                "The files moved, but Codex could not reopen the session; its history is shown read-only."
+                    .into(),
+            ));
+        }
+        cx.notify();
+    }
+
     fn sync_peer_for(&self, thread_id: &str) -> Option<(PeerClient, String, String)> {
         let owner = self.sync_owner(thread_id)?;
         if owner == self.settings.install_id {
@@ -1380,4 +1731,55 @@ fn remote_thread_meta(announcement: ThreadAnnouncement, device: &str) -> ThreadM
     let base = crate::agents::split_backend(&meta.backend).0;
     meta.backend = format!("{base}@{device}");
     meta
+}
+
+fn find_session_file(home: &Path, id: &str) -> Option<(String, Vec<u8>)> {
+    let sessions = home.join("sessions");
+    let mut found = Vec::new();
+    let mut stack = vec![sessions.clone()];
+    while let Some(dir) = stack.pop() {
+        let entries = std::fs::read_dir(&dir).ok()?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let name = path.file_name()?.to_string_lossy();
+            if name.contains(id) && (name.ends_with(".jsonl") || name.ends_with(".jsonl.zst")) {
+                let modified = entry
+                    .metadata()
+                    .ok()
+                    .and_then(|meta| meta.modified().ok())
+                    .unwrap_or(std::time::UNIX_EPOCH);
+                found.push((modified, path));
+            }
+        }
+    }
+    found.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    let (_, path) = found.into_iter().next()?;
+    let relative = path
+        .strip_prefix(&sessions)
+        .ok()?
+        .to_string_lossy()
+        .replace('\\', "/");
+    Some((relative, std::fs::read(path).ok()?))
+}
+
+fn write_session_file(home: &Path, relative: &str, bytes: &[u8]) -> Result<(), String> {
+    let relative = Path::new(relative);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err("the session path is outside Codex's sessions folder".into());
+    }
+    let target = home.join("sessions").join(relative);
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let temp = target.with_extension("part");
+    std::fs::write(&temp, bytes).map_err(|error| error.to_string())?;
+    std::fs::rename(temp, target).map_err(|error| error.to_string())
 }

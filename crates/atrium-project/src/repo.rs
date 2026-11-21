@@ -401,6 +401,76 @@ pub fn checkpoint(dir: &Path, thread: &str, turn: usize) -> Result<()> {
     Ok(())
 }
 
+fn move_ref(thread: &str) -> String {
+    let safe: String = thread
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("refs/atrium/move/{safe}")
+}
+
+/// Packs the current working tree and its history as a git bundle that can
+/// be fetched on another computer. Returns `(bytes, ref, commit, identity)`.
+pub fn move_bundle(dir: &Path, thread: &str) -> Result<(Vec<u8>, String, String, String)> {
+    let root = root(dir).context("not a git repository")?;
+    ensure!(has_head(&root), "the repository has no commits yet");
+    let tree = snapshot_tree(&root)?;
+    let message = format!("Atrium move: {thread}");
+    let head = git(&root, &["rev-parse", "HEAD"])?;
+    let commit = command("git", &root)
+        .args(["commit-tree", &tree, "-m", &message, "-p", head.trim()])
+        .env("GIT_AUTHOR_NAME", "Atrium")
+        .env("GIT_AUTHOR_EMAIL", "atrium@localhost")
+        .env("GIT_COMMITTER_NAME", "Atrium")
+        .env("GIT_COMMITTER_EMAIL", "atrium@localhost")
+        .output()
+        .context("running git")?;
+    let commit = checked(commit, "git commit-tree")?.trim().to_string();
+    let reference = move_ref(thread);
+    git(&root, &["update-ref", &reference, &commit])?;
+    let temp = tempdir()?;
+    let bundle = temp.join("move.bundle");
+    git(
+        &root,
+        &["bundle", "create", "-q", &bundle.to_string_lossy(), &reference],
+    )?;
+    let bytes = fs::read(&bundle)?;
+    let project = identity(&root).context("could not identify the project")?;
+    Ok((bytes, reference, commit, project))
+}
+
+/// Fetches a move bundle and creates a chat worktree at its commit.
+pub fn apply_move_bundle(
+    repo_dir: &Path,
+    bundle: &[u8],
+    reference: &str,
+    thread: &str,
+    base: &Path,
+) -> Result<PathBuf> {
+    let root = root(repo_dir).context("not a git repository")?;
+    let temp = tempdir()?;
+    let path = temp.join("move.bundle");
+    fs::write(&path, bundle)?;
+    let local = move_ref(thread);
+    git(
+        &root,
+        &[
+            "fetch",
+            "-q",
+            &path.to_string_lossy(),
+            &format!("+{reference}:{local}"),
+        ],
+    )?;
+    let commit = git(&root, &["rev-parse", &local])?;
+    add_worktree_from(&root, base, thread, commit.trim())
+}
+
 /// The turns of `thread` that have a checkpoint.
 pub fn checkpoints(dir: &Path, thread: &str) -> Vec<usize> {
     let Some(root) = root(dir) else {
@@ -476,6 +546,16 @@ pub fn restore(dir: &Path, thread: &str, turn: usize, undo_turn: usize) -> Resul
 /// A new worktree of the repository `dir` is in, on a new branch
 /// `atrium/<name>` from the current `HEAD`, under `base`. Returns its folder.
 pub fn add_worktree(dir: &Path, base: &Path, name: &str) -> Result<PathBuf> {
+    add_worktree_from(dir, base, name, "HEAD")
+}
+
+/// A worktree at `start` instead of the current `HEAD`.
+pub fn add_worktree_from(
+    dir: &Path,
+    base: &Path,
+    name: &str,
+    start: &str,
+) -> Result<PathBuf> {
     let root = root(dir).context("not a git repository")?;
     ensure!(has_head(&root), "the repository has no commits yet");
     let slug: String = name
@@ -510,7 +590,15 @@ pub fn add_worktree(dir: &Path, base: &Path, name: &str) -> Result<PathBuf> {
     fs::create_dir_all(folder.parent().unwrap_or(base))?;
     git(
         &root,
-        &["worktree", "add", "-q", "-b", &branch, &folder.to_string_lossy(), "HEAD"],
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            &branch,
+            &folder.to_string_lossy(),
+            start,
+        ],
     )?;
     Ok(folder)
 }
@@ -605,6 +693,20 @@ mod tests {
             normalize_origin("https://github.com/owner/repo/"),
             "github.com/owner/repo"
         );
+    }
+
+    #[test]
+    fn a_move_bundle_carries_uncommitted_files_into_a_worktree() {
+        let dir = repo();
+        fs::write(dir.join("a.txt"), "moved\n").unwrap();
+        fs::write(dir.join("new.txt"), "new\n").unwrap();
+        let (bundle, reference, _commit, _identity) = move_bundle(&dir, "t-move").unwrap();
+        assert!(!bundle.is_empty());
+        let base = tempdir().unwrap();
+        let tree =
+            apply_move_bundle(&dir, &bundle, &reference, "t-move", &base).unwrap();
+        assert_eq!(fs::read_to_string(tree.join("a.txt")).unwrap(), "moved\n");
+        assert_eq!(fs::read_to_string(tree.join("new.txt")).unwrap(), "new\n");
     }
 
     #[test]

@@ -845,6 +845,23 @@ const ZH: &[(&str, &str)] = &[
         "Could not stop the turn on {device}: {error}",
         "无法在 {device} 上停止本轮：{error}",
     ),
+    ("Move to this computer", "移到此电脑"),
+    (
+        "Moving the conversation from {device}…",
+        "正在从 {device} 移来对话…",
+    ),
+    (
+        "Could not move the conversation: {error}",
+        "无法移动对话：{error}",
+    ),
+    (
+        "Moved the conversation from {device}.",
+        "已从 {device} 移来对话。",
+    ),
+    (
+        "The files moved, but Codex could not reopen the session; its history is shown read-only.",
+        "文件已迁来，但 Codex 无法重新打开会话；历史将以只读方式显示。",
+    ),
 ];
 
 #[cfg(test)]

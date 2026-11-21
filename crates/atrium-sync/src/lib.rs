@@ -21,8 +21,8 @@ mod store;
 pub use cache::{CacheEntry, ThreadCache};
 pub use clock::{Hlc, HybridClock};
 pub use dto::{
-    AnswerInput, ApprovalAnswer, DeviceDirectory, ThreadAnnouncement, ThreadEvent, ThreadSnapshot,
-    TurnInput,
+    AnswerInput, ApprovalAnswer, DeviceDirectory, MovePackage, ThreadAnnouncement, ThreadEvent,
+    ThreadSnapshot, TurnInput,
 };
 pub use lease::{
     LEASE_RENEW_MS, LEASE_TAKEOVER_GRACE_MS, Lease, LeaseDecision, lease_can_be_taken,

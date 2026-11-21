@@ -147,6 +147,14 @@ pub fn router(s: Arc<State>) -> Router {
             "/v1/sync/threads/{backend}/{id}/answers/{request}",
             post(sync_answer),
         )
+        .route(
+            "/v1/sync/threads/{backend}/{id}/move-package",
+            get(sync_move_package),
+        )
+        .route(
+            "/v1/sync/threads/{backend}/{id}/move-release",
+            post(sync_move_release),
+        )
         .route("/v1/procs", get(list).post(spawn))
         .route("/v1/procs/{id}", delete(stop))
         .route("/v1/procs/{id}/attach", get(attach))
@@ -482,6 +490,37 @@ async fn sync_answer(
     let sync = sync_or_error(&s)?;
     let host = sync.host().ok_or_else(no_sync)?;
     host.answer(&backend, &id, request_id(&request), input)
+        .await
+        .map_err(ApiError::from)?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+async fn sync_move_package(
+    AxState(s): AxState<Arc<State>>,
+    Path((backend, id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let sync = sync_or_error(&s)?;
+    let host = sync.host().ok_or_else(no_sync)?;
+    let package = host
+        .move_package(&backend, &id)
+        .await
+        .map_err(ApiError::from)?;
+    Ok(Json(serde_json::to_value(package).map_err(|error| {
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "bad_request",
+            error.to_string(),
+        )
+    })?))
+}
+
+async fn sync_move_release(
+    AxState(s): AxState<Arc<State>>,
+    Path((backend, id)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let sync = sync_or_error(&s)?;
+    let host = sync.host().ok_or_else(no_sync)?;
+    host.move_release(&backend, &id)
         .await
         .map_err(ApiError::from)?;
     Ok(StatusCode::ACCEPTED)

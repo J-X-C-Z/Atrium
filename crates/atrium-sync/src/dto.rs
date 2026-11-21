@@ -78,6 +78,36 @@ pub struct ThreadSnapshot {
     pub cursor: u64,
 }
 
+/// Everything needed to continue one conversation on another computer.
+///
+/// The session and git bundle are base64 so the package can cross the node
+/// as one JSON answer. The owner keeps the originals until the target
+/// confirms it applied them.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MovePackage {
+    pub thread: ThreadAnnouncement,
+    pub items: Vec<Item>,
+    #[serde(default)]
+    pub approvals: Vec<ApprovalRequest>,
+    #[serde(default)]
+    pub questions: Vec<UserInputRequest>,
+    /// Relative to the agent's session directory, such as
+    /// `2026/11/21/rollout-….jsonl.zst`.
+    #[serde(default)]
+    pub session_relative: Option<String>,
+    #[serde(default)]
+    pub session_base64: Option<String>,
+    /// The clone-stable project identity, when the folder is a git repo.
+    #[serde(default)]
+    pub git_identity: Option<String>,
+    #[serde(default)]
+    pub git_bundle_base64: Option<String>,
+    #[serde(default)]
+    pub git_ref: Option<String>,
+    #[serde(default)]
+    pub git_commit: Option<String>,
+}
+
 /// One change after a cursor. `rebuild` means the follower must take a new
 /// snapshot: its cursor is older than what the owner still keeps.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

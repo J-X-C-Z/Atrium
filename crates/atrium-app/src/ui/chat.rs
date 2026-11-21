@@ -188,6 +188,17 @@ fn header(
                     ws.update(cx, |ws, cx| ws.toggle_pin(&id, cx));
                 }),
         );
+        if ws.sync_is_remote(id) {
+            let (workspace, id) = (workspace.clone(), id.clone());
+            menu = menu.item(
+                MenuItem::new(t("Move to this computer"))
+                    .icon(IconName::Monitor)
+                    .on_click(move |_, cx| {
+                        workspace
+                            .update(cx, |ws, cx| ws.move_to_this_computer(id.clone(), cx));
+                    }),
+            );
+        }
         if codex {
             let (review, compact) = (workspace.clone(), workspace.clone());
             menu = menu

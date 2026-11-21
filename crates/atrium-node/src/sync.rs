@@ -16,8 +16,8 @@ use std::{
 };
 
 use atrium_sync::{
-    AnswerInput, ApprovalAnswer, DeviceDirectory, Op, Store, StoreError, ThreadAnnouncement,
-    ThreadSnapshot, TurnInput, Vector,
+    AnswerInput, ApprovalAnswer, DeviceDirectory, MovePackage, Op, Store, StoreError,
+    ThreadAnnouncement, ThreadSnapshot, TurnInput, Vector,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -66,6 +66,21 @@ pub trait SyncHost: Send + Sync {
         request: Value,
         input: AnswerInput,
     ) -> HostFuture<'a, ()>;
+
+    /// Builds a move package. The default keeps older hosts working: they
+    /// simply cannot move a conversation to another computer yet.
+    fn move_package<'a>(&'a self, _backend: &'a str, _id: &'a str) -> HostFuture<'a, MovePackage> {
+        Box::pin(async {
+            Err(HostError::Unavailable(
+                "this Atrium cannot move conversations yet".into(),
+            ))
+        })
+    }
+
+    /// Closes the owner's writer after the target applied the package.
+    fn move_release<'a>(&'a self, _backend: &'a str, _id: &'a str) -> HostFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 pub struct SyncState {

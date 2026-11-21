@@ -1,6 +1,6 @@
 use std::{
     io::{BufRead, BufReader},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
     thread,
@@ -351,6 +351,31 @@ impl CodexClient {
     ) -> Result<(ThreadMeta, Vec<(String, TurnStatus, Vec<Item>)>)> {
         self.thread_resume_in_mode(thread_id, mcp_servers, None)
             .await
+    }
+
+    /// Resumes a moved thread with a new working folder.
+    pub async fn thread_resume_in_folder(
+        &self,
+        thread_id: &str,
+        mcp_servers: &[McpServer],
+        cwd: &Path,
+    ) -> Result<(ThreadMeta, Vec<(String, TurnStatus, Vec<Item>)>)> {
+        let mut params = json!({
+            "threadId": thread_id,
+            "cwd": cwd.display().to_string(),
+        });
+        if let Some(config) = mcp_config(mcp_servers) {
+            params["config"] = config;
+        }
+        let result = self.connection.request("thread/resume", params).await?;
+        let thread = &result["thread"];
+        let meta = translate::thread_meta(thread)
+            .ok_or_else(|| anyhow!("thread/resume returned no thread"))?;
+        let turns = thread["turns"]
+            .as_array()
+            .map(|turns| turns.iter().filter_map(translate::turn).collect())
+            .unwrap_or_default();
+        Ok((meta, turns))
     }
 
     /// Restore a project session with its unattended sandbox before any goal can resume.
