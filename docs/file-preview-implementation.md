@@ -67,6 +67,11 @@ them in v1. If you switch, say why in the PR, with the fixtures that showed it.
     `DocPage { source, width, height }`: an image file and its size in
     points. It has thumbnails, zoom and search highlights (`PageHit`).
   - **Table**: sheet tabs, then a grid of cells.
+- Word and PowerPoint also get a reflowing **reading view** that the UI
+  draws itself; it fits the narrow panel, selects text and follows dark
+  mode. Its data comes from `atrium-office` (item 9, step 1,
+  `docs/office-editing-implementation.md`), which later makes it editable.
+  This item provides the **page view**, the original layout, as images.
 - Images, Markdown, code and plain text are drawn by the UI directly. They
   never reach this crate.
 - When the file changes on disk, the UI calls `preview` again; the cache

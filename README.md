@@ -284,5 +284,6 @@ cargo test --workspace
 - 手机 App 外壳（Tauri 2），后台推送和锁屏审批
 - 无人值守的运行状态（今天跑了几轮、离上限多远、下次唤醒时间）
 - 应用内直接安装更新（现在是提示后跳转下载页）
+- 侧栏预览和编辑 Word、Excel、PPT：纯 Rust 实现，只改动你改过的地方，保存后把改动说明交给 AI（需求见 `docs/file-preview-implementation.md` 和 `docs/office-editing-implementation.md`）
 - 应用内预览窗口（GPUI 还没有内嵌网页视图，现在在浏览器里打开）
 

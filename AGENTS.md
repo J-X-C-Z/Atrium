@@ -25,6 +25,7 @@ existing functions to call, the tests to write and when it is done.
 | 7 | **PR/CI status, previews, agent environments**: poll `gh` for lead branches (auto-fix on failing CI under the autopilot), screenshot UI work from `.atrium/launch.json`, start ACP agents with the chosen environment | [`docs/pr-preview-implementation.md`](docs/pr-preview-implementation.md) | 5 for PRs |
 | 6 | **Phone view API**: a tailnet-only HTTP API and event stream to follow projects, answer approvals and post notices from a phone (the web page is built on the UI side) | [`docs/remote-view-implementation.md`](docs/remote-view-implementation.md) | 1 |
 | 8 | **File previews**: Word, PowerPoint, Excel, CSV and PDF in the side panel, read-only, in pure Rust (office2pdf → PDF, hayro → PNG, calamine for grids), Chinese fonts first, with a page cache and hard limits | [`docs/file-preview-implementation.md`](docs/file-preview-implementation.md) | — |
+| 9 | **Office core** (`atrium-office`): lossless OOXML package and XML, Word/Excel/PowerPoint models, simple edit ops with undo, safe save, and change reports handed to the agent. Five PRs, in the order the brief lists | [`docs/office-editing-implementation.md`](docs/office-editing-implementation.md) | 8 for the page view |
 
 Do one item per pull request. In each PR, tick its row here (add "✓ done in
 #N") and list which of the brief's tests and end-to-end checks you ran.
