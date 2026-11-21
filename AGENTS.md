@@ -26,6 +26,7 @@ existing functions to call, the tests to write and when it is done.
 | 6 | **Phone view API**: a tailnet-only HTTP API and event stream to follow projects, answer approvals and post notices from a phone (the web page is built on the UI side) | [`docs/remote-view-implementation.md`](docs/remote-view-implementation.md) | 1 |
 | 8 | **File previews**: Word, PowerPoint, Excel, CSV and PDF in the side panel, read-only, in pure Rust (office2pdf → PDF, hayro → PNG, calamine for grids), Chinese fonts first, with a page cache and hard limits | [`docs/file-preview-implementation.md`](docs/file-preview-implementation.md) | — |
 | 9 | **Office core** (`atrium-office`): lossless OOXML package and XML, Word/Excel/PowerPoint models, simple edit ops with undo, safe save, and change reports handed to the agent. Five PRs, in the order the brief lists | [`docs/office-editing-implementation.md`](docs/office-editing-implementation.md) | 8 for the page view |
+| 10 | **Multi-device sync**: every Atrium is a node; all devices' conversations in every sidebar; continue one remotely through its owner (one writer, followers); replicated overlay (HLC last-writer-wins, no secrets); offline cache; move a conversation with its code and session; one scheduler per project by lease. Six PRs, in the order the brief lists | [`docs/multi-device-sync-implementation.md`](docs/multi-device-sync-implementation.md) | 4 |
 
 Do one item per pull request. In each PR, tick its row here (add "✓ done in
 #N") and list which of the brief's tests and end-to-end checks you ran.
