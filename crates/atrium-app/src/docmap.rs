@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 
+use crate::i18n::t;
 use atrium_office::{Atom, AtomKind, Block, Inline, Marks, NodeId, Para, ParaStyle, Place, WordOp};
 use ely_gpui_component::documents::{BlockData, BlockKind};
 
@@ -239,6 +240,37 @@ fn simple_cell(cell: &[Block]) -> Option<&Para> {
     }
 }
 
+/// What a part of the body the editor keeps as it is reads as, by its XML
+/// name; `None` for page setup and markers, which have nothing to read.
+pub fn opaque_text(name: &str) -> Option<String> {
+    let what = match name {
+        "sectPr"
+        | "bookmarkStart"
+        | "bookmarkEnd"
+        | "proofErr"
+        | "permStart"
+        | "permEnd"
+        | "commentRangeStart"
+        | "commentRangeEnd"
+        | "moveFromRangeStart"
+        | "moveFromRangeEnd"
+        | "moveToRangeStart"
+        | "moveToRangeEnd"
+        | "customXmlInsRangeStart"
+        | "customXmlInsRangeEnd"
+        | "customXmlDelRangeStart"
+        | "customXmlDelRangeEnd" => {
+            return None;
+        }
+        "sdt" => t("A content control"),
+        "altChunk" => t("An embedded document"),
+        "customXml" => t("Custom XML content"),
+        "ins" | "del" | "moveFrom" | "moveTo" => t("A tracked change"),
+        _ => t("Content this editor keeps as it is"),
+    };
+    Some(format!("{what}{}", t(" — edit it in Word")))
+}
+
 /// The blocks to show for a Word document, each with what it stands for.
 pub fn word_blocks(blocks: &[Block]) -> Vec<(BlockData, Target)> {
     let mut out = Vec::new();
@@ -315,10 +347,9 @@ pub fn word_blocks(blocks: &[Block]) -> Vec<(BlockData, Target)> {
                 }
             }
             Block::Opaque { label, .. } => {
-                out.push((
-                    BlockData::new(BlockKind::Callout, [format!("⟦{label}⟧")]),
-                    Target::Fixed,
-                ));
+                if let Some(text) = opaque_text(label) {
+                    out.push((BlockData::new(BlockKind::Callout, [text]), Target::Fixed));
+                }
             }
         }
     }

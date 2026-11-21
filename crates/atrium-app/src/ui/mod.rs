@@ -10,11 +10,13 @@ mod devices;
 mod document;
 mod extras;
 mod motion;
+mod overview;
 mod preview;
 mod project;
 mod rows;
 mod run;
 mod sidebar;
+mod steps;
 mod tools;
 
 use atrium_core::{Account, plan_label};

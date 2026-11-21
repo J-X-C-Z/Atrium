@@ -69,6 +69,26 @@ pub fn column(body: impl IntoElement, t: f32, window: &mut Window) -> AnyElement
         .into_any_element()
 }
 
+/// Like [`column`], with less room above and below, for the lines of a
+/// folded run of steps.
+fn column_tight(body: impl IntoElement, t: f32, window: &mut Window) -> AnyElement {
+    let inner = div().w_full().max_w(px(COLUMN)).child(body);
+    let inner = if t < 1. {
+        window.request_animation_frame();
+        inner.opacity(ease_out_cubic(t))
+    } else {
+        inner
+    };
+    div()
+        .w_full()
+        .flex()
+        .justify_center()
+        .px_6()
+        .py_0p5()
+        .child(inner)
+        .into_any_element()
+}
+
 /// Draws row `ix` of the shown transcript. One row past the end is the
 /// "thinking" placeholder while the agent has not answered yet.
 pub fn row(
@@ -88,6 +108,45 @@ pub fn row(
     };
     let footer = footer(workspace, transcript, ix, &entry, cx);
     let t = ws.entrance(ix);
+    // Steps in a row fold into one line; their rows show only when it is open.
+    let folded = (ws.settings.transcript_mode == TranscriptMode::Normal)
+        .then(|| super::steps::run_at(transcript.entries(), ix))
+        .flatten();
+    if let Some(run) = folded {
+        let entries = transcript.entries().to_vec();
+        let open = super::steps::is_open(ws, &entries, run);
+        let header = (ix == run.start).then(|| super::steps::header(workspace, &entries, run, cx));
+        let step = open.then(|| match &entry.kind {
+            EntryKind::Item(item) => super::steps::line(
+                workspace,
+                item,
+                || self::item(workspace, item, entry.live, cx),
+                cx,
+            ),
+            _ => div()
+                .pl_6()
+                .child(entry_body(
+                    workspace,
+                    thread.as_deref(),
+                    ix,
+                    &entry,
+                    window,
+                    cx,
+                ))
+                .into_any_element(),
+        });
+        if header.is_none() && step.is_none() && footer.is_none() {
+            return div().into_any_element();
+        }
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .children(header)
+            .children(step)
+            .children(footer);
+        return column_tight(body, t, window);
+    }
     let body = entry_body(workspace, thread.as_deref(), ix, &entry, window, cx);
     let body = div().flex().flex_col().gap_1().child(body).children(footer);
     column(body, t, window)

@@ -76,6 +76,7 @@ pub struct Review {
 pub enum SideTab {
     #[default]
     Changes,
+    Overview,
     Activity,
     Watch,
     Terminal,
@@ -374,6 +375,7 @@ impl RootView {
         if self.review.tab != SideTab::Changes {
             let body = match self.review.tab {
                 SideTab::Activity => self.activity_body(cx),
+                SideTab::Overview => self.overview_body(cx),
                 _ => self.watch_body(cx),
             };
             return Some(Self::side_frame(header, body, None, cx));
@@ -747,6 +749,7 @@ impl RootView {
             .py_1p5()
             .border_b_1()
             .border_color(colors.border)
+            .child(tab("side-overview", t("Overview"), SideTab::Overview))
             .child(tab("side-changes", t("Changes"), SideTab::Changes))
             .child(tab("side-activity", t("Activity"), SideTab::Activity))
             .child(tab("side-watch", t("Side by side"), SideTab::Watch))

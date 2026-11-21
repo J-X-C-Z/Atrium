@@ -174,6 +174,12 @@ pub struct Workspace {
     /// Your saved document edits, to go to the agent with your next message,
     /// by conversation ("" for a new one).
     pub doc_reports: HashMap<String, Vec<(std::path::PathBuf, String)>>,
+    /// Folded runs of steps the user opened or closed, by their first item.
+    pub step_folds: HashMap<String, bool>,
+    /// Turns that ended in chats not open, by chat: the list shows the count.
+    pub unread: HashMap<String, usize>,
+    /// Steps in an open run whose full card is shown.
+    pub open_steps: std::collections::HashSet<String>,
     /// A file a transcript row asked the side panel to show.
     pub preview_request: Option<std::path::PathBuf>,
     /// A newer Atrium, when one is out.
@@ -281,6 +287,9 @@ impl Workspace {
             checkpoints: HashMap::new(),
             restores: HashMap::new(),
             doc_reports: HashMap::new(),
+            step_folds: HashMap::new(),
+            unread: HashMap::new(),
+            open_steps: Default::default(),
             preview_request: None,
             update: None,
             goals: HashMap::new(),
@@ -529,6 +538,9 @@ impl Workspace {
                 ..
             } => {
                 self.turn_started.remove(thread_id);
+                if !self.loading.contains(thread_id) && self.active_thread_id() != Some(thread_id) {
+                    *self.unread.entry(thread_id.clone()).or_default() += 1;
+                }
                 if *status == TurnStatus::Completed
                     && crate::agents::is_codex(self.backend_of(thread_id))
                 {
@@ -786,6 +798,26 @@ impl Workspace {
     }
 
     /// The transcript the main column shows.
+    /// What a chat in the list shows it is doing.
+    pub fn chat_status(&self, thread_id: &str) -> ely_gpui_component::chat::ConversationStatus {
+        use ely_gpui_component::chat::ConversationStatus;
+        let transcript = self.transcripts.get(thread_id);
+        if transcript.is_some_and(|t| t.pending_approvals().next().is_some()) {
+            return ConversationStatus::Waiting;
+        }
+        if transcript.is_some_and(Transcript::is_running)
+            || self.turn_started.contains_key(thread_id)
+        {
+            return ConversationStatus::Working;
+        }
+        match self.unread.get(thread_id) {
+            Some(n) if *n > 0 && self.active_thread_id() != Some(thread_id) => {
+                ConversationStatus::Unread(*n)
+            }
+            _ => ConversationStatus::Idle,
+        }
+    }
+
     pub fn transcript(&self) -> Option<&Transcript> {
         match &self.view {
             View::Draft => (!self.draft.is_empty()).then_some(&self.draft),
@@ -847,6 +879,7 @@ impl Workspace {
     pub fn open_thread(&mut self, thread_id: String, cx: &mut Context<Self>) {
         self.nav += 1;
         self.view = View::Thread(thread_id.clone());
+        self.unread.remove(&thread_id);
         cx.notify();
         self.load_thread(thread_id, cx);
     }

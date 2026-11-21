@@ -137,6 +137,7 @@ pub fn render(
             },
             at: Timestamp::from_second(thread.updated_at).unwrap_or(now),
             pinned: ws.settings.is_pinned(&thread.id),
+            status: ws.chat_status(&thread.id),
         })
         .collect();
     let active: Option<SharedString> = match &ws.view {

@@ -26,3 +26,6 @@ Examples and the web gallery are left out of this copy.
 - `documents/blocks`: `BlockEditor::keyed_blocks` gives each block with its
   key, so an owner can map edits onto its own model; `set_locked` makes a
   block read-only (Atrium shows Word paragraphs it cannot edit this way).
+- `chat/conversations.rs`: `Conversation::status` (`ConversationStatus`:
+  idle, working, waiting on the user, or a count of unread replies) shows a
+  spinner, a dot or a count at the end of the row.

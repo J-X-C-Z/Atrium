@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use gpui::{
     App, ElementId, FontWeight, InteractiveElement, IntoElement, MouseButton, ParentElement,
-    RenderOnce, SharedString, StatefulInteractiveElement, Styled, Window, div, prelude::*,
+    RenderOnce, SharedString, StatefulInteractiveElement, Styled, Window, div, prelude::*, px,
     transparent_black,
 };
 use jiff::{Timestamp, civil::Date, tz::TimeZone};
@@ -11,18 +11,33 @@ use crate::{
     buttons::{Button, ButtonVariant},
     forms::OnValue,
     menus::{Menu, MenuItem, OverflowMenu},
+    motion::{Spinner, SpinnerStyle},
     primitives::{FocusRing, Icon, IconName, tab_stop},
     theme::{ActiveTheme, ControlSize, IconSize, Radius, TextSize},
     typography::{Ellipsis, format::system_zone},
 };
 
-/// A conversation in a list: its key, its title, when it last moved, and whether it is pinned.
+/// A conversation in a list: its key, its title, when it last moved, whether it is pinned, and what it is doing.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Conversation {
     pub key: SharedString,
     pub title: SharedString,
     pub at: Timestamp,
     pub pinned: bool,
+    pub status: ConversationStatus,
+}
+
+/// What a conversation in the list is doing: shown at the row's end.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ConversationStatus {
+    #[default]
+    Idle,
+    /// The agent is working in it: a spinner.
+    Working,
+    /// The agent waits on the user (an approval, a question): a dot.
+    Waiting,
+    /// Replies that came while it was not open: their count.
+    Unread(usize),
 }
 
 /// The heading a conversation files under by the day it last moved, seen from `today`.
@@ -33,8 +48,12 @@ pub(crate) fn group_name(day: Date, today: Date) -> String {
         1 => crate::i18n::word("chat.group.yesterday").to_string(),
         2..=7 => crate::i18n::word("chat.group.week").to_string(),
         8..=30 => crate::i18n::word("chat.group.month").to_string(),
-        _ if day.year() == today.year() => day.strftime(crate::i18n::word("chat.group.month_name")).to_string(),
-        _ => day.strftime(crate::i18n::word("chat.group.month_year")).to_string(),
+        _ if day.year() == today.year() => day
+            .strftime(crate::i18n::word("chat.group.month_name"))
+            .to_string(),
+        _ => day
+            .strftime(crate::i18n::word("chat.group.month_year"))
+            .to_string(),
     }
 }
 
@@ -154,8 +173,11 @@ impl RenderOnce for ConversationItem {
                         )
                         .item(
                             match self.conversation.pinned {
-                                true => MenuItem::new(crate::i18n::word("chat.unpin")).icon(IconName::PinOff),
-                                false => MenuItem::new(crate::i18n::word("chat.pin")).icon(IconName::Pin),
+                                true => MenuItem::new(crate::i18n::word("chat.unpin"))
+                                    .icon(IconName::PinOff),
+                                false => {
+                                    MenuItem::new(crate::i18n::word("chat.pin")).icon(IconName::Pin)
+                                }
                             }
                             .on_click(move |window, cx| pin(&b, window, cx)),
                         )
@@ -219,6 +241,45 @@ impl RenderOnce for ConversationItem {
                     .min_w_0()
                     .child(Ellipsis::new(self.conversation.title.clone())),
             )
+            .child(match self.conversation.status {
+                ConversationStatus::Idle => div().into_any_element(),
+                ConversationStatus::Working => div()
+                    .flex_none()
+                    .px_1()
+                    .child(
+                        Spinner::new((self.id.clone(), "working"))
+                            .style(SpinnerStyle::Ring)
+                            .size(IconSize::Xs)
+                            .color(colors.fg_muted),
+                    )
+                    .into_any_element(),
+                ConversationStatus::Waiting => div()
+                    .flex_none()
+                    .mx_1()
+                    .size(px(7.))
+                    .rounded_full()
+                    .bg(colors.warning)
+                    .into_any_element(),
+                ConversationStatus::Unread(n) => div()
+                    .flex_none()
+                    .min_w(px(18.))
+                    .h(px(18.))
+                    .px_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(colors.info.opacity(0.16))
+                    .text_color(colors.info)
+                    .text_size(theme.text_size(TextSize::Xs))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(if n > 99 {
+                        "99+".to_string()
+                    } else {
+                        n.to_string()
+                    })
+                    .into_any_element(),
+            })
             .children(menu.map(|menu| {
                 div()
                     .flex_none()
@@ -382,6 +443,7 @@ mod tests {
             title: format!("About {key}").into(),
             at: (noon - days_ago.days()).timestamp(),
             pinned,
+            status: ConversationStatus::Idle,
         }
     }
 

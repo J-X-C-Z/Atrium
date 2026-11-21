@@ -25,6 +25,7 @@ impl Render for Row {
             title: "What a lift does".into(),
             at: Timestamp::UNIX_EPOCH,
             pinned: false,
+            status: Default::default(),
         };
         div().w(px(300.0)).child(
             ConversationItem::new("row", conversation)
