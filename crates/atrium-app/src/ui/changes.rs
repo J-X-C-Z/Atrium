@@ -82,6 +82,8 @@ pub enum SideTab {
     Terminal,
     Run,
     Preview,
+    /// The template an authoring chat is writing.
+    Draft,
 }
 
 /// Reads a unified diff leniently: hunk headers with or without numbers, and
@@ -376,6 +378,7 @@ impl RootView {
             let body = match self.review.tab {
                 SideTab::Activity => self.activity_body(cx),
                 SideTab::Overview => self.overview_body(cx),
+                SideTab::Draft => self.draft_body(cx),
                 _ => self.watch_body(cx),
             };
             return Some(Self::side_frame(header, body, None, cx));
@@ -740,6 +743,7 @@ impl RootView {
                 .child(label.to_string())
         };
         let close = root.clone();
+        let draft = super::workflow_author::shown_draft(self.workspace.read(cx)).is_some();
         div()
             .flex_none()
             .flex()
@@ -749,6 +753,9 @@ impl RootView {
             .py_1p5()
             .border_b_1()
             .border_color(colors.border)
+            .when(draft, |d| {
+                d.child(tab("side-draft", t("Workflow draft"), SideTab::Draft))
+            })
             .child(tab("side-overview", t("Overview"), SideTab::Overview))
             .child(tab("side-changes", t("Changes"), SideTab::Changes))
             .child(tab("side-activity", t("Activity"), SideTab::Activity))

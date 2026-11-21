@@ -19,6 +19,7 @@ mod sidebar;
 mod steps;
 mod tools;
 mod workflow;
+mod workflow_author;
 
 use atrium_core::{Account, plan_label};
 use codex_client::AccessMode;
@@ -203,6 +204,7 @@ pub struct RootView {
     /// Inputs of the shared MCP and environment settings.
     extras: extras::ExtrasInputs,
     workflow: workflow::WorkflowForm,
+    author: workflow_author::AuthorForm,
     /// The theme last applied, so a change of preference or system appearance re-applies.
     applied: Option<(ThemePref, bool)>,
     /// Whether the long-lived inputs show Chinese placeholders.
@@ -228,6 +230,7 @@ impl RootView {
         });
         let extras = extras::ExtrasInputs::new(window, cx);
         let workflow = workflow::WorkflowForm::new(window, cx);
+        let author = workflow_author::AuthorForm::new(window, cx);
         let subscriptions = vec![
             cx.observe_in(&workspace, window, |this, workspace, window, cx| {
                 this.apply_theme(window, cx);
@@ -276,6 +279,7 @@ impl RootView {
             preview: preview::PreviewPane::new(),
             extras,
             workflow,
+            author,
             applied: None,
             placeholders_chinese: crate::i18n::chinese(),
             _subscriptions: subscriptions,
@@ -1225,7 +1229,13 @@ impl Render for RootView {
         );
         let main = if in_workflows {
             let view = self.workflow_view(window, cx);
-            match self.changes_pane(cx) {
+            // The draft panel belongs beside its chat.
+            let pane = if self.review.tab == changes::SideTab::Draft {
+                None
+            } else {
+                self.changes_pane(cx)
+            };
+            match pane {
                 Some(pane) => div()
                     .flex_1()
                     .min_w_0()
@@ -1245,6 +1255,7 @@ impl Render for RootView {
             };
             project::render_overview(&self.workspace, cx.entity(), panel, collapsed, window, cx)
         } else {
+            self.follow_draft(cx);
             let chat = chat::render(
                 &self.workspace,
                 &self.composer,

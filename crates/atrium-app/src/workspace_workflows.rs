@@ -9,7 +9,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use atrium_workflow::{InputKind, Template, builtin, run::Run};
+use atrium_workflow::{
+    InputKind, Template,
+    author::{self, Report},
+    builtin,
+    render::Lang,
+    run::Run,
+};
 use gpui::Context;
 
 use super::{Notice, Room, Workspace};
@@ -26,6 +32,13 @@ pub enum TemplateSource {
 pub struct TemplateEntry {
     pub template: Template,
     pub source: TemplateSource,
+}
+
+/// The form for writing a template with an agent: a new one, or a
+/// change to `base`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Authoring {
+    pub base: Option<String>,
 }
 
 /// A run as the list shows it.
@@ -51,6 +64,97 @@ fn now_ms() -> i64 {
 
 fn user_dir() -> Option<PathBuf> {
     Some(dirs::config_dir()?.join("Atrium").join("workflows"))
+}
+
+fn lang() -> Lang {
+    if crate::i18n::chinese() {
+        Lang::Zh
+    } else {
+        Lang::En
+    }
+}
+
+/// Where templates being written with an agent live, one folder each.
+pub fn drafts_dir() -> Option<PathBuf> {
+    Some(user_dir()?.join("drafts"))
+}
+
+/// The draft folder a chat works in, when it is one.
+pub fn draft_of(cwd: &str) -> Option<PathBuf> {
+    let drafts = drafts_dir()?;
+    let cwd = Path::new(cwd);
+    (cwd.parent() == Some(drafts.as_path())).then(|| cwd.to_path_buf())
+}
+
+/// What Atrium makes of a draft folder's template; `None` before the
+/// agent has written one.
+pub fn draft_report(dir: &Path) -> Option<Report> {
+    let text = std::fs::read_to_string(dir.join(author::DRAFT_FILE)).ok()?;
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some(author::inspect(&text, AGENT_IDS, lang()))
+}
+
+/// The agents a template may name.
+pub const AGENT_IDS: &[&str] = &["codex", "claude", "deepseek", "antigravity"];
+
+/// A new draft folder under `parent`: the format guide, a full example,
+/// the template being changed (when one is), and the user's references.
+fn make_draft(
+    parent: &Path,
+    name: &str,
+    base: Option<&str>,
+    references: &[PathBuf],
+) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(parent)?;
+    let dir = free_dir(parent, name);
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join(author::GUIDE_FILE), author::GUIDE)?;
+    let example = builtin::SOURCES
+        .first()
+        .map(|(_, t)| *t)
+        .unwrap_or_default();
+    std::fs::write(dir.join(author::EXAMPLE_FILE), example)?;
+    std::fs::write(dir.join(author::DRAFT_FILE), base.unwrap_or_default())?;
+    if !references.is_empty() {
+        let into = dir.join(author::REFERENCES_DIR);
+        std::fs::create_dir_all(&into)?;
+        for file in references {
+            let Some(file_name) = file.file_name() else {
+                continue;
+            };
+            if file.is_dir() {
+                copy_dir(file, &into.join(file_name))?;
+            } else {
+                std::fs::copy(file, into.join(file_name))?;
+            }
+        }
+    }
+    Ok(dir)
+}
+
+/// A draft's name from the request: its first words, safe for a folder.
+fn draft_name(request: &str, now: i64) -> String {
+    let words: String = request
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(16)
+        .collect::<String>()
+        .trim()
+        .to_string();
+    let stamp = jiff::Timestamp::from_millisecond(now)
+        .map(|t| {
+            t.to_zoned(jiff::tz::TimeZone::system())
+                .strftime("%m%d-%H%M")
+                .to_string()
+        })
+        .unwrap_or_default();
+    if words.is_empty() {
+        stamp
+    } else {
+        format!("{stamp} {words}")
+    }
 }
 
 /// Lessons kept from earlier runs of template `id`, given to new runs.
@@ -279,7 +383,14 @@ impl Workspace {
         self.nav += 1;
         self.refresh_workflows();
         self.room = Room::Workflows { run };
+        self.authoring = None;
         cx.notify();
+    }
+
+    /// Shows the form for writing a template with an agent.
+    pub fn open_authoring(&mut self, base: Option<String>, cx: &mut Context<Self>) {
+        self.enter_workflows(None, cx);
+        self.authoring = Some(Authoring { base });
     }
 
     pub fn workflow_run(&self, dir: &Path) -> Option<&RunEntry> {
@@ -493,6 +604,109 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Starts writing a template with `backend`'s agent: a draft folder,
+    /// then a chat in it with the request, shown at once. `base` is the
+    /// template to change, when one is.
+    pub fn start_authoring(
+        &mut self,
+        request: String,
+        base: Option<String>,
+        backend: String,
+        references: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        if request.trim().is_empty() {
+            cx.emit(Notice::Error(
+                t("Say what the workflow should do first.").into(),
+            ));
+            return;
+        }
+        let Some(parent) = drafts_dir() else { return };
+        let base = base.and_then(|id| {
+            self.workflow_templates()
+                .into_iter()
+                .find(|e| e.template.id == id)
+        });
+        let base_text = base.as_ref().map(|e| match &e.source {
+            TemplateSource::User(path) => {
+                std::fs::read_to_string(path).unwrap_or_else(|_| e.template.to_toml())
+            }
+            TemplateSource::Builtin => builtin::SOURCES
+                .iter()
+                .find(|(i, _)| *i == e.template.id)
+                .map(|(_, t)| t.to_string())
+                .unwrap_or_else(|| e.template.to_toml()),
+        });
+        let name = draft_name(&request, now_ms());
+        let dir = match make_draft(&parent, &name, base_text.as_deref(), &references) {
+            Ok(dir) => dir,
+            Err(error) => {
+                cx.emit(Notice::Error(error.to_string()));
+                return;
+            }
+        };
+        let text = author::brief(
+            &request,
+            base.as_ref().map(|e| &e.template),
+            !references.is_empty(),
+            lang(),
+        );
+        self.authoring = None;
+        self.start_chat_in(text, backend, dir, true, cx);
+    }
+
+    /// Saves a draft as one of the user's templates: over the user's own
+    /// template with its id when there is one, else as `<id>.toml`.
+    pub fn save_draft(&mut self, dir: &Path, cx: &mut Context<Self>) {
+        let Ok(text) = std::fs::read_to_string(dir.join(author::DRAFT_FILE)) else {
+            return;
+        };
+        let report = author::inspect(&text, AGENT_IDS, lang());
+        let Some(template) = report.template else {
+            cx.emit(Notice::Error(
+                report
+                    .error
+                    .unwrap_or_else(|| t("The draft does not read yet.").into()),
+            ));
+            return;
+        };
+        let existing = self
+            .workflow_templates()
+            .into_iter()
+            .find(|e| e.template.id == template.id);
+        let replaces_builtin = matches!(
+            existing.as_ref().map(|e| &e.source),
+            Some(TemplateSource::Builtin)
+        );
+        let path = match existing.map(|e| e.source) {
+            Some(TemplateSource::User(path)) => path,
+            _ => match user_dir() {
+                Some(d) => d.join(format!("{}.toml", template.id)),
+                None => return,
+            },
+        };
+        let written = path
+            .parent()
+            .map(std::fs::create_dir_all)
+            .transpose()
+            .and_then(|_| write_atomic(&path, &text));
+        match written {
+            Ok(()) => {
+                cx.emit(Notice::Success(if replaces_builtin {
+                    tf(
+                        "Saved as {name}; it takes the built-in one's place.",
+                        &[("name", &template.name)],
+                    )
+                } else {
+                    tf("Saved as {name}.", &[("name", &template.name)])
+                }));
+                self.pick_template = Some(template.id);
+                self.enter_workflows(None, cx);
+            }
+            Err(error) => cx.emit(Notice::Error(error.to_string())),
+        }
+    }
+
     /// Drops a run from the list; its folder stays.
     pub fn forget_run(&mut self, dir: &Path, cx: &mut Context<Self>) {
         self.settings.workflow_runs.retain(|d| d != dir);
@@ -536,5 +750,45 @@ mod tests {
             run.path().join("a-b"),
             "names are made safe for a folder"
         );
+    }
+
+    #[test]
+    fn a_draft_folder_has_the_guide_the_example_and_the_references() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reference = tmp.path().join("notes.md");
+        std::fs::write(&reference, "参考").unwrap();
+        let parent = tmp.path().join("drafts");
+        let dir = make_draft(&parent, "1121-0930 周报", Some("id = \"x\""), &[reference]).unwrap();
+        assert_eq!(dir.parent(), Some(parent.as_path()));
+        assert!(
+            std::fs::read_to_string(dir.join("FORMAT.md"))
+                .unwrap()
+                .contains("[[steps]]")
+        );
+        assert!(dir.join("example.toml").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("template.toml")).unwrap(),
+            "id = \"x\""
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("references/notes.md")).unwrap(),
+            "参考"
+        );
+        let again = make_draft(&parent, "1121-0930 周报", None, &[]).unwrap();
+        assert_ne!(again, dir);
+        assert_eq!(
+            std::fs::read_to_string(again.join("template.toml")).unwrap(),
+            ""
+        );
+    }
+
+    #[test]
+    fn drafts_are_named_after_the_request() {
+        let now = jiff::Timestamp::from_second(1_700_000_000)
+            .unwrap()
+            .as_millisecond();
+        let name = draft_name("每周读 arXiv 新论文写一份简报，挑出和我课题相关的", now);
+        assert!(name.ends_with(" 每周读 arXiv 新论文写一份"), "{name}");
+        assert_eq!(draft_name("  ", now).len(), "1114-2213".len());
     }
 }

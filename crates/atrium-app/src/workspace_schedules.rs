@@ -55,7 +55,7 @@ impl Workspace {
             )));
             return;
         }
-        self.start_chat_in(s.prompt.clone(), s.backend.clone(), folder, cx);
+        self.start_chat_in(s.prompt.clone(), s.backend.clone(), folder, false, cx);
         cx.emit(Notice::Info(tf(
             "Scheduled chat “{name}” started.",
             &[("name", &s.name)],

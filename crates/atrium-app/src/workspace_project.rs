@@ -845,15 +845,17 @@ impl Workspace {
                 .map(|t| t.cwd.clone())
                 .unwrap_or_else(|| self.settings.working_dir().display().to_string()),
         );
-        self.start_chat_in(text, backend, cwd, cx);
+        self.start_chat_in(text, backend, cwd, false, cx);
     }
 
-    /// Starts a chat with `backend` in `cwd` in the background and sends `text`.
+    /// Starts a chat with `backend` in `cwd` in the background and sends
+    /// `text`; with `open`, shows it once it starts.
     pub fn start_chat_in(
         &mut self,
         text: String,
         backend: String,
         cwd: PathBuf,
+        open: bool,
         cx: &mut Context<Self>,
     ) {
         let title: String = text.chars().take(60).collect();
@@ -886,7 +888,10 @@ impl Workspace {
                         ..meta
                     });
                     ws.transcripts.insert(thread.clone(), Transcript::new());
-                    ws.send_to_thread(thread, Composed::text(text), cx);
+                    ws.send_to_thread(thread.clone(), Composed::text(text), cx);
+                    if open {
+                        ws.show_started(thread, cx);
+                    }
                 });
             })
             .detach();
@@ -924,10 +929,23 @@ impl Workspace {
                     ws.commands.insert(thread.clone(), commands);
                 }
                 ws.transcripts.insert(thread.clone(), Transcript::new());
-                ws.send_to_thread(thread, Composed::text(text), cx);
+                ws.send_to_thread(thread.clone(), Composed::text(text), cx);
+                if open {
+                    ws.show_started(thread, cx);
+                }
             });
         })
         .detach();
+    }
+
+    /// Shows a chat started in the background, in the chats room.
+    fn show_started(&mut self, thread: String, cx: &mut Context<Self>) {
+        if self.room != Room::Chats || self.settings.active_project.is_some() {
+            self.room = Room::Chats;
+            self.settings.active_project = None;
+            self.settings.save();
+        }
+        self.open_thread(thread, cx);
     }
 
     pub fn create_stream(

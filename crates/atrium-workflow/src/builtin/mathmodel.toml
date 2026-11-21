@@ -85,7 +85,7 @@ prompt = """
 文件夹里有几道候选题。逐题提炼：核心任务（一句话）、子问题和各自难点、附件数据（规模、格式、清洗工作量）、大致属于哪类问题、可能用到的模型。
 然后按「数据可用性、模型把握、可展示的亮点、主要风险、工作量」五个维度做对比表，写进 `reports/PROBLEM_SELECTION.md`，并给出你的推荐和理由。
 """
-outputs = ["reports/PROBLEM_SELECTION.md"]
+outputs = ["reports/PROBLEM_SELECTION.md", "reports/problem_options.json"]
 decide = { options = "reports/problem_options.json", question = "做哪一道题？" }
 
 [[steps]]
@@ -128,7 +128,7 @@ prompt = """
 
 写成 `reports/MODEL_SELECTION.md`，然后组合出 2–4 条完整的建模路线供用户选择。
 """
-outputs = ["reports/MODEL_SELECTION.md"]
+outputs = ["reports/MODEL_SELECTION.md", "reports/route_options.json"]
 decide = { options = "reports/route_options.json", question = "采用哪条建模路线？" }
 
 [[steps]]

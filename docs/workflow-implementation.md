@@ -93,6 +93,16 @@ rule holds: take ideas, not text. What it added:
   step with inputs filled in (never private ones), the files to leave, the
   checks in words, the reasons from the last try, and the skill hint.
 - `builtin::all()`: the math modeling template (`builtin/mathmodel.toml`).
+- `author`: writing templates with an agent. `GUIDE` is the format guide
+  the agent works from (a test keeps it naming every field); `brief` is the
+  authoring chat's first message; `inspect` parses a draft and `lint`s it
+  for what reads but will not work as meant (unknown agents or inputs,
+  `{{item.…}}` without `each`, an `each` list no earlier step writes, a
+  `decide` file not in `outputs`, steps with nothing to check, a run that
+  never stops). The app makes a draft folder (`FORMAT.md`, `example.toml`,
+  `template.toml`, `references/`) under `<config>/Atrium/workflows/drafts/`
+  and starts an ordinary chat in it; nothing here is yours to build. The
+  runner should refuse to start a template whose `inspect` has an error.
 
 **Built in the app (UI side):**
 

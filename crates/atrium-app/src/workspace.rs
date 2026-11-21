@@ -51,7 +51,9 @@ mod workflows;
 pub use acp::{AcpAgent, AgentStatus, CODEX};
 pub use devices::{Device, DeviceStatus};
 pub use projects::{Activity, ActivityKind, Room, StreamState, StreamView, activities};
-pub use workflows::{RunEntry, TemplateSource, experience, experience_file};
+pub use workflows::{
+    Authoring, RunEntry, TemplateSource, draft_of, draft_report, experience, experience_file,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
@@ -183,6 +185,8 @@ pub struct Workspace {
     pub workflow_runs: Vec<RunEntry>,
     /// A template picked in the sidebar, for the start form to take up.
     pub pick_template: Option<String>,
+    /// The "write a template with an agent" form, while it shows.
+    pub authoring: Option<Authoring>,
     /// Turns that ended in chats not open, by chat: the list shows the count.
     pub unread: HashMap<String, usize>,
     /// Steps in an open run whose full card is shown.
@@ -298,6 +302,7 @@ impl Workspace {
             unread: HashMap::new(),
             workflow_runs: Vec::new(),
             pick_template: None,
+            authoring: None,
             open_steps: Default::default(),
             preview_request: None,
             update: None,

@@ -237,6 +237,31 @@ pub fn sidebar_list(workspace: &Entity<Workspace>, cx: &App) -> AnyElement {
         );
     }
     column = column.child(heading("Templates"));
+    let author = workspace.clone();
+    let authoring = ws.authoring.as_ref().is_some_and(|a| a.base.is_none());
+    column = column.child(
+        div()
+            .id("wf-tpl-ai")
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1p5()
+            .rounded(theme.radius(Radius::Md))
+            .cursor_pointer()
+            .text_size(small)
+            .when(authoring, |d| d.bg(colors.active).text_color(colors.fg))
+            .when(!authoring, |d| {
+                d.text_color(colors.accent).hover(|d| d.bg(colors.hover))
+            })
+            .child(
+                Icon::new(IconName::Sparkles)
+                    .size(IconSize::Sm)
+                    .color(colors.accent),
+            )
+            .child(div().flex_1().min_w_0().truncate().child(t("New with AI…")))
+            .on_click(move |_, _, cx| author.update(cx, |ws, cx| ws.open_authoring(None, cx))),
+    );
     for (ix, entry) in ws.workflow_templates().into_iter().enumerate() {
         let open = workspace.clone();
         let id = entry.template.id.clone();
@@ -284,14 +309,17 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (run, picked) = {
+        let (run, picked, authoring) = {
             let ws = self.workspace.read(cx);
             let run = match &ws.room {
                 Room::Workflows { run } => run.clone(),
                 _ => None,
             };
-            (run, ws.pick_template.clone())
+            (run, ws.pick_template.clone(), ws.authoring.clone())
         };
+        if let Some(authoring) = authoring {
+            return self.author_view(authoring, cx);
+        }
         if let Some(id) = picked {
             self.workspace.update(cx, |ws, _| ws.pick_template = None);
             if self.workflow.template.as_deref() != Some(id.as_str()) {
@@ -444,6 +472,8 @@ impl RootView {
         let home = self.workspace.read(cx).workflow_home();
         let copy = self.workspace.clone();
         let copy_id = template.id.clone();
+        let change = self.workspace.clone();
+        let change_id = template.id.clone();
         let source = match &entry.source {
             TemplateSource::Builtin => t("Built in").to_string(),
             TemplateSource::User(path) => path.display().to_string(),
@@ -513,6 +543,16 @@ impl RootView {
                                                 if let Some(path) = path {
                                                     let _ = crate::opener::open_default(&path);
                                                 }
+                                            }),
+                                    )
+                                    .child(
+                                        Button::new("wf-change-template", t("Change with AI"))
+                                            .variant(ButtonVariant::Ghost)
+                                            .size(ControlSize::Sm)
+                                            .icon(IconName::Sparkles)
+                                            .on_click(move |_, _, cx| {
+                                                let id = change_id.clone();
+                                                change.update(cx, |ws, cx| ws.open_authoring(Some(id), cx))
                                             }),
                                     ),
                             ),
