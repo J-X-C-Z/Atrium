@@ -1,0 +1,18 @@
+[package]
+name = "atrium-workflow"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Atrium workflows: a preset path of steps that agents follow from a brief to a finished result, with checks, retries and stops for the user."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml = "0.8"
+regex = "1"
+glob = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
