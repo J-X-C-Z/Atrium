@@ -379,6 +379,28 @@ impl CodexClient {
         Ok((meta, turns))
     }
 
+    /// Reads a stored thread without taking Codex's writer lock.
+    ///
+    /// Followers use this to show another device's conversation; only the
+    /// owner ever resumes it to write.
+    pub async fn thread_read(
+        &self,
+        thread_id: &str,
+    ) -> Result<(ThreadMeta, Vec<(String, TurnStatus, Vec<Item>)>)> {
+        let result = self
+            .connection
+            .request("thread/read", json!({ "threadId": thread_id }))
+            .await?;
+        let thread = &result["thread"];
+        let meta = translate::thread_meta(thread)
+            .ok_or_else(|| anyhow!("thread/read returned no thread"))?;
+        let turns = thread["turns"]
+            .as_array()
+            .map(|turns| turns.iter().filter_map(translate::turn).collect())
+            .unwrap_or_default();
+        Ok((meta, turns))
+    }
+
     /// Stored threads, newest first.
     pub async fn thread_list(&self, limit: u32) -> Result<Vec<ThreadMeta>> {
         let result = self

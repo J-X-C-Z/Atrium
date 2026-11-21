@@ -829,6 +829,22 @@ const ZH: &[(&str, &str)] = &[
     ("high", "高"),
     ("xhigh", "超高"),
     ("none", "无"),
+    (
+        "Multi-device sync is off: {error}",
+        "多设备同步未启动：{error}",
+    ),
+    (
+        "Could not read this conversation from {device}: {error}",
+        "无法从 {device} 读取此对话：{error}",
+    ),
+    (
+        "Could not answer on {device}: {error}",
+        "无法在 {device} 上回答：{error}",
+    ),
+    (
+        "Could not stop the turn on {device}: {error}",
+        "无法在 {device} 上停止本轮：{error}",
+    ),
 ];
 
 #[cfg(test)]

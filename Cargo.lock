@@ -570,9 +570,11 @@ dependencies = [
  "anyhow",
  "atrium-core",
  "atrium-office",
+ "atrium-node",
  "atrium-phone",
  "atrium-preview",
  "atrium-project",
+ "atrium-sync",
  "codex-client",
  "dirs 6.0.0",
  "ely-gpui-component",
@@ -584,6 +586,7 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
+ "tokio",
  "ureq",
  "uuid",
 ]
@@ -606,16 +609,22 @@ dependencies = [
  "atrium-core",
  "atrium-process",
  "atrium-project",
+ "atrium-sync",
  "axum",
  "cap-std",
  "codex-client",
  "dirs 6.0.0",
  "futures",
+ "http-body-util",
  "libc",
+ "log",
  "serde",
  "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
  "tokio",
  "toml 0.8.23",
+ "tower",
  "tungstenite 0.24.0",
  "ureq",
  "uuid",
@@ -668,6 +677,22 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "uuid",
+]
+
+[[package]]
+name = "atrium-sync"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "atrium-core",
+ "log",
+ "proptest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.21",
+ "ureq",
 ]
 
 [[package]]

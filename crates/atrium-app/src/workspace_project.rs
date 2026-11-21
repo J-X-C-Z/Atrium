@@ -337,6 +337,15 @@ impl Workspace {
         self.tick_pr_badges(cx);
         let roots: Vec<_> = self.projects.iter().map(|p| p.root.clone()).collect();
         for root in roots {
+            let wants_scheduler = self
+                .projects
+                .iter()
+                .find(|project| project.root == root)
+                .is_some_and(|project| {
+                    project.file.autopilot.on
+                        || project.file.streams.iter().any(|stream| project.has_work(stream))
+                });
+            let scheduler_allowed = !wants_scheduler || self.sync_scheduler_allowed(&root);
             let changed = self.project_mut(&root).is_some_and(Project::reload);
             self.load_streams(&root, cx);
             self.tick_worktrees(&root, cx);
@@ -382,6 +391,11 @@ impl Workspace {
                 {
                     log::warn!("ignoring orphan task {} in {}", task.key(), root.display());
                 }
+            }
+            // Only one device runs a project's scheduler. The lease is
+            // renewed here, before any task can start.
+            if !scheduler_allowed {
+                continue;
             }
             let tasks: Vec<_> = project
                 .startable_with(|task| {

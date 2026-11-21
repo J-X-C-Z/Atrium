@@ -2,9 +2,11 @@ use crate::model::{
     AgentCommand, ConfigOption, Goal, Item, PlanStep, Question, RateLimits, RequestId, ThreadMeta,
     TokenUsage, TurnStatus,
 };
+use serde::{Deserialize, Serialize};
 
 /// What the backend wants approved before it goes on.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ApprovalKind {
     Command {
         command: String,
@@ -22,7 +24,7 @@ pub enum ApprovalKind {
     },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ApprovalRequest {
     /// Echoed back with the decision.
     pub request_id: RequestId,
@@ -46,7 +48,7 @@ pub enum ApprovalDecision {
 }
 
 /// The agent stopped to ask the user something.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UserInputRequest {
     pub request_id: RequestId,
     pub thread_id: String,

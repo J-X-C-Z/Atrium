@@ -46,9 +46,12 @@ mod projects;
 mod schedules;
 #[path = "workspace_updates.rs"]
 mod updates;
+#[path = "workspace_sync.rs"]
+mod sync;
 pub use acp::{AcpAgent, AgentStatus, CODEX};
 pub use devices::{Device, DeviceStatus};
 pub use projects::{Activity, ActivityKind, Room, StreamState, StreamView, activities};
+pub use sync::SyncRuntime;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
@@ -228,6 +231,11 @@ pub struct Workspace {
     pub tailnet: Option<Result<usize, String>>,
     _discovery: Option<Task<()>>,
     _pump: Option<Task<()>>,
+    /// Multi-device overlay, the embedded node and remote conversations.
+    pub sync: Option<SyncRuntime>,
+    _sync_poll: Option<Task<()>>,
+    _sync_commands: Option<Task<()>>,
+    _sync_init: Option<Task<()>>,
 }
 
 impl EventEmitter<Notice> for Workspace {}
@@ -245,6 +253,7 @@ impl Workspace {
         workspace.init_agents(cx);
         workspace.init_projects(cx);
         workspace.init_devices(cx);
+        workspace.init_sync(cx);
         workspace.sync_phone(cx);
         workspace.start_schedules(cx);
         workspace.start_update_checks(cx);
@@ -320,6 +329,10 @@ impl Workspace {
             tailnet: None,
             _discovery: None,
             _pump: None,
+            sync: None,
+            _sync_poll: None,
+            _sync_commands: None,
+            _sync_init: None,
         }
     }
 
@@ -889,6 +902,9 @@ impl Workspace {
         if self.transcripts.contains_key(&thread_id) || self.loading.contains(&thread_id) {
             return;
         }
+        if self.sync_open_thread(&thread_id, cx) {
+            return;
+        }
         if !crate::agents::is_codex(self.backend_of(&thread_id)) {
             self.acp_open(thread_id, cx);
             return;
@@ -1356,6 +1372,10 @@ impl Workspace {
         answers: Answers,
         cx: &mut Context<Self>,
     ) {
+        if self.sync_is_remote(thread_id) {
+            self.sync_remote_answers(thread_id, request_id, answers, cx);
+            return;
+        }
         if let Ok(task) =
             self.submit_answer(thread_id, request_id, phone::Answer::Questions(answers), cx)
         {
@@ -1499,6 +1519,11 @@ impl Workspace {
         } else {
             composed
         };
+        if let View::Thread(thread_id) = self.view.clone()
+            && self.sync_send_remote(&thread_id, &composed, cx)
+        {
+            return NoticeSendResult::NoDispatch;
+        }
         if !self.is_codex_view() {
             return self.acp_send(composed, target, cx);
         }
@@ -1697,6 +1722,10 @@ impl Workspace {
         let View::Thread(thread_id) = self.view.clone() else {
             return;
         };
+        if self.sync_is_remote(&thread_id) {
+            self.sync_remote_interrupt(&thread_id, cx);
+            return;
+        }
         if !crate::agents::is_codex(self.backend_of(&thread_id)) {
             self.acp_stop(&thread_id);
             return;
@@ -1728,6 +1757,10 @@ impl Workspace {
         decision: ApprovalDecision,
         cx: &mut Context<Self>,
     ) {
+        if self.sync_is_remote(thread_id) {
+            self.sync_remote_approval(thread_id, request_id, decision, cx);
+            return;
+        }
         if let Ok(task) =
             self.submit_answer(thread_id, request_id, phone::Answer::Approval(decision), cx)
         {
@@ -1778,15 +1811,25 @@ impl Workspace {
 
     pub fn rename(&mut self, thread_id: String, name: String, cx: &mut Context<Self>) {
         let name = name.trim().to_string();
-        let Some(client) = self.thread_codex(&thread_id) else {
-            return;
-        };
         if name.is_empty() {
             return;
         }
+        if self.sync_is_remote(&thread_id) {
+            if let Some(thread) = self.threads.iter_mut().find(|t| t.id == thread_id) {
+                thread.name = Some(name.clone());
+            }
+            self.sync_set_thread_field(&thread_id, "title", serde_json::json!(name));
+            self.settings.save();
+            cx.notify();
+            return;
+        }
+        let Some(client) = self.thread_codex(&thread_id) else {
+            return;
+        };
         if let Some(thread) = self.threads.iter_mut().find(|t| t.id == thread_id) {
             thread.name = Some(name.clone());
         }
+        self.sync_set_thread_field(&thread_id, "title", serde_json::json!(name));
         cx.notify();
         cx.spawn(async move |this, cx| {
             if let Err(error) = client.thread_set_name(&thread_id, &name).await {
@@ -1804,6 +1847,8 @@ impl Workspace {
     pub fn toggle_pin(&mut self, thread_id: &str, cx: &mut Context<Self>) {
         self.settings.toggle_pin(thread_id);
         self.settings.save();
+        let pinned = self.settings.is_pinned(thread_id);
+        self.sync_set_thread_field(thread_id, "pinned", serde_json::json!(pinned));
         cx.notify();
     }
 

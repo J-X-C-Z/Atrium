@@ -93,6 +93,11 @@ pub struct Settings {
     pub language: crate::i18n::Language,
     /// Where new chats run on each device, by device id.
     pub device_folders: std::collections::HashMap<String, String>,
+    /// Whether this install shares its overlay and conversations with the
+    /// other devices of the same Tailscale owner.
+    pub sync_enabled: Option<bool>,
+    /// What other devices call this one.
+    pub device_name: String,
 }
 
 impl Settings {
@@ -162,6 +167,10 @@ impl Settings {
         } else {
             self.pinned.insert(0, thread_id.to_string());
         }
+    }
+
+    pub fn sync_enabled(&self) -> bool {
+        self.sync_enabled.unwrap_or(true)
     }
 }
 

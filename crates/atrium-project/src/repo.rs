@@ -59,6 +59,75 @@ pub fn root(dir: &Path) -> Option<PathBuf> {
     (!line.is_empty()).then(|| PathBuf::from(line))
 }
 
+/// A project identity that survives clones on different machines.
+///
+/// It is the normalized `origin` URL plus the path inside the repository;
+/// when there is no remote, the root commit is used instead. The id is a
+/// short hash so it can be an overlay key.
+pub fn identity(dir: &Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+
+    let root = root(dir)?;
+    let relative = dir
+        .canonicalize()
+        .ok()
+        .and_then(|dir| {
+            root.canonicalize()
+                .ok()
+                .and_then(|root| dir.strip_prefix(root).ok().map(Path::to_path_buf))
+        })
+        .unwrap_or_default();
+    let relative = relative
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    let origin = git(&root, &["remote", "get-url", "origin"])
+        .ok()
+        .map(|url| normalize_origin(url.trim()));
+    let base = match origin {
+        Some(origin) if !origin.is_empty() => origin,
+        _ => git(&root, &["rev-list", "--max-parents=0", "HEAD"])
+            .ok()?
+            .lines()
+            .next()?
+            .trim()
+            .to_string(),
+    };
+    let digest = Sha256::digest(format!("{base}|{relative}").as_bytes());
+    Some(
+        digest
+            .iter()
+            .take(8)
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+    )
+}
+
+fn normalize_origin(url: &str) -> String {
+    let mut url = url.trim().trim_end_matches('/').to_string();
+    if let Some(rest) = url.strip_suffix(".git") {
+        url = rest.to_string();
+    }
+    if let Some(rest) = url.strip_prefix("git@")
+        && let Some((host, path)) = rest.split_once(':')
+    {
+        url = format!("{host}/{path}");
+    }
+    for prefix in ["https://", "http://", "ssh://", "git://"] {
+        if let Some(rest) = url.strip_prefix(prefix) {
+            url = rest.to_string();
+            break;
+        }
+    }
+    if let Some((user, rest)) = url.split_once('@')
+        && !user.contains('/')
+    {
+        url = rest.to_string();
+    }
+    url.to_ascii_lowercase()
+}
+
 fn has_head(root: &Path) -> bool {
     git(root, &["rev-parse", "--verify", "-q", "HEAD"]).is_ok()
 }
@@ -513,6 +582,29 @@ mod tests {
 
     fn change<'a>(s: &'a Status, path: &str) -> &'a Change {
         s.changes.iter().find(|c| c.path == path).unwrap()
+    }
+
+    #[test]
+    fn identity_is_stable_and_ignores_the_checkout_path() {
+        let dir = repo();
+        let first = identity(&dir).unwrap();
+        assert_eq!(identity(&dir).unwrap(), first);
+        assert_eq!(first.len(), 16);
+        let nested = dir.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        assert_ne!(identity(&nested).unwrap(), first);
+    }
+
+    #[test]
+    fn remote_urls_normalize_the_same_way() {
+        assert_eq!(
+            normalize_origin("git@GitHub.com:owner/repo.git"),
+            "github.com/owner/repo"
+        );
+        assert_eq!(
+            normalize_origin("https://github.com/owner/repo/"),
+            "github.com/owner/repo"
+        );
     }
 
     #[test]
