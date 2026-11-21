@@ -1,242 +1,251 @@
 # Building file previews (Word, Excel, PowerPoint, PDF)
 
-A brief for the backend of the side panel's **Preview** tab: show a file an
-agent made or changed (a report, a spreadsheet, slides, a PDF) without
-leaving Atrium. Read `AGENTS.md` first.
+A brief for the backend of the side panel's **Preview** tab. It shows a
+file an agent made or changed without leaving Atrium: a report, a
+spreadsheet, slides, a PDF. Read `AGENTS.md` first.
 
-The rendering comes from [ElyOffice](https://github.com/ELY-Open-Source/ElyOffice)
-(MIT), pinned at tag **v0.1.16** (commit `7bdc36e`). Take only what a
-read-only preview needs. Leave out editing, saving, macros, mail, the
-gpui views and the engine build scripts.
+**Scope: read-only preview.** No editing, no saving, no recalculating
+formulas, no running macros. Build only what is needed to draw a file
+faithfully enough to check an agent's work.
 
-## What the UI does (built on the UI side)
+## The approach: pure Rust by default
 
-- A new side tab, **Preview** (`SideTab::Preview`). You open a file from:
+Everything runs in-process, in Rust, with no external program. It works the
+same on macOS, Windows and Linux.
+
+```
+docx / pptx / xlsx ──office2pdf──▶ PDF bytes ──hayro──▶ PNG per page ──▶ UI
+pdf ─────────────────────────────▶ PDF bytes ──hayro──▶ PNG per page ──▶ UI
+xlsx / xls / ods / csv ──calamine / csv──▶ cell grid ──────────────────▶ UI
+```
+
+| Crate | What for | License | Checked |
+| --- | --- | --- | --- |
+| [`office2pdf`](https://github.com/developer0hye/office2pdf) 0.11 | DOCX, PPTX and XLSX to PDF; lays out through Typst (pure Rust) | Apache-2.0 | yes, see below |
+| [`hayro`](https://github.com/LaurenzV/hayro) 0.9 | PDF page to bitmap, pure Rust, no `unsafe` | MIT or Apache-2.0 | yes, see below |
+| [`calamine`](https://github.com/tafia/calamine) | xlsx, xls, xlsb and ods cells | MIT | widely used |
+| `csv` + `encoding_rs` | csv and tsv, with non-UTF-8 encodings | MIT / Apache | — |
+
+**A spike was run on Linux, in release mode, on office2pdf's own fixtures.**
+It converted each file to PDF, then rendered the first 3 pages at 1.5×:
+
+| File | Pages | To PDF | Render |
+| --- | --- | --- | --- |
+| technical manual (docx) | 2 | 217 ms | 20 ms |
+| Korean contract (docx) | 1 | 139 ms | 16 ms |
+| startup pitch (pptx) | 3 | 405 ms | 62 ms |
+| sales dashboard (xlsx) | 1 | 101 ms | 13 ms |
+
+- The rendered pages looked right: headings, lists, code blocks, page
+  headers and footers.
+- The spike binary was 72 MB after stripping. Most of that is Typst's
+  bundled fonts. Use `office2pdf` with `default-features = false`, then
+  supply fonts as in §4, and report the size the app grows by in the PR.
+
+Not used:
+
+- **LibreOffice / ElyOffice's LOK engine**: hundreds of MB, and an exact
+  version pinned to one build. It may come later as an optional
+  "original layout" mode; it is not in this item.
+- **MuPDF** (including ElyOffice's `ely-pdf-*` crates): AGPL-3.0, while
+  Atrium is MIT.
+- **pdf-render / PDFluent**: a commercial fork of hayro.
+
+Other pure-Rust renderers exist and can be tried if `office2pdf` falls
+short: `rdocx` (DOCX layout to PDF and PNG, MIT/Apache), `dxpdf` (DOCX, but
+uses Skia, which is C++), `ppt-rs` and `zavora-slide` (PPTX). Do not mix
+them in v1. If you switch, say why in the PR, with the fixtures that showed it.
+
+## What the UI does (built on the UI side, not in this item)
+
+- A new side tab, **Preview**. You open a file from:
   - the Changes list;
   - a file path in a conversation;
   - "Preview" in a file's menu.
-- It shows one of three things:
-  - **Pages**: in Ely's `DocumentViewer` (`documents::viewer`). It takes
-    `DocPage { source, width, height }`, where `source` is an image file
-    and the size is in points. It has thumbnails, zoom and search hits
-    (`PageHit`).
+- It shows one of two things:
+  - **Pages**: in Ely's `DocumentViewer` (`documents::viewer`), which takes
+    `DocPage { source, width, height }`: an image file and its size in
+    points. It has thumbnails, zoom and search highlights (`PageHit`).
   - **Table**: sheet tabs, then a grid of cells.
-  - **Outline**: headings, paragraphs, tables and images, as a reading view.
 - Images, Markdown, code and plain text are drawn by the UI directly. They
   never reach this crate.
-- The preview reloads when the file changes on disk. The UI watches the
-  file and calls `preview` again; the cache key below makes that cheap.
-- A banner offers to install ElyOffice when a better view would need it,
-  and links to its download page.
+- When the file changes on disk, the UI calls `preview` again; the cache
+  makes an unchanged file free.
 
 ## What to build
 
-A new crate, **`crates/atrium-preview`**, without GPUI, so it can be tested
+A new crate, **`crates/atrium-preview`**, without GPUI, so it is tested
 headless. The UI calls it from a background task.
 
-### 1. Vendored ElyOffice code
-
-Copy into `third_party/ely-office/`, with its `LICENSE` and a `README.md`.
-The README names the tag and commit, and lists every file changed and why.
-
-| Take | From | Why |
-| --- | --- | --- |
-| `ely-ipc` (whole) | `crates/ely-ipc` | the framing the worker speaks; depends only on `log` |
-| `ely-lok` client, **without** the `view` feature | `crates/ely-lok/src/{client*, ipc.rs, handshake.rs, lib.rs, ffi.rs}` and only the modules those need | spawn the worker, `load`, `pages`, `paint_tile`, `paint_part`, `sheets`, `export_pdf`, `close_doc`, `shutdown` |
-
-Leave out:
-
-- `ely-pdf-engine` and `ely-pdf-worker`: they are MuPDF, which is
-  **AGPL-3.0**. Atrium is MIT. Do not link to or ship MuPDF.
-- `ely-office`, `ely-ui`, `ely-files` and every app.
-
-The worker binary (`ely-lok-worker`) and the LibreOffice kernel are **not
-built or shipped by Atrium**. They come from the user's ElyOffice install
-(§2).
-
-Change the vendored client only where it must:
-
-1. **Explicit paths.** Add `Worker::spawn_at(worker_bin, install, profile)`.
-   Today `worker_bin()` and `install_dir()` look beside the current exe,
-   which is Atrium's.
-2. **Version check.** Keep the `BUILD_ID` check. A different ElyOffice
-   version is refused with `Refused::EngineVersion`, never loaded half-working.
-
-Vendoring the whole `ely-lok` crate as is, with the `view` feature off, is
-also fine if it builds cleanly against our gpui version. Choose whichever
-gives the smaller diff, and say which in the PR.
-
-### 2. Finding the engine
+### 1. API
 
 ```rust
-pub struct Engine {
-    pub worker: PathBuf,        // ely-lok-worker
-    pub install: PathBuf,       // the LibreOffice program dir LOK loads
-    pub version: String,        // ElyOffice's version, for the settings line
-}
-pub fn find_engine() -> Option<Engine>;
-```
+pub enum Kind { Word, Slides, Sheet, Csv, Pdf, Other }
 
-Look, in order, and take the first that has both the worker and the kernel
-library (`ffi::KERNEL`):
+/// By extension, then checked against the content: a zip for OOXML and
+/// ODF, `%PDF-` for PDF. A mismatch is `Other`.
+pub fn kind(path: &Path) -> Kind;
 
-1. **Overrides**: `ATRIUM_LOK_WORKER` plus `ATRIUM_LOK_DIR`, for tests and
-   dev builds.
-2. **macOS**: `/Applications` and `~/Applications`, the apps `ElyDoc.app`,
-   `ElyTable.app` and `ElyShow.app`.
-   - worker: `Contents/MacOS/ely-lok-worker`
-   - install: `Contents/Frameworks`
-3. **Linux**:
-   - `/opt/ely-office/<slug>/bin/ely-lok-worker`, with install
-     `/opt/ely-office/<slug>/bin/libreoffice/program`, for the slugs
-     `ely-doc`, `ely-table` and `ely-show`. This is the deb/rpm layout in
-     `packaging/linux/bundle.sh`.
-   - The AppImage is not supported. Say so in the README.
-4. **Windows**: read registry `HKCU\Software\Ely Office\<App>\InstallDir`,
-   falling back to `%LOCALAPPDATA%\Programs\Ely Office\<App>`.
-   - worker: `ely-lok-worker.exe`
-   - install: `libreoffice\program`
-
-The version comes from the app's `Info.plist`, the deb's version file or the
-registry. When it cannot be read, use `"unknown"`; the `BUILD_ID` handshake
-is the real check.
-
-### 3. The preview API
-
-```rust
-pub enum Kind { Word, Sheet, Slides, Pdf, Csv, Other }
-pub fn kind(path: &Path) -> Kind;   // by extension, then the zip/PDF magic
-
-pub struct Previewer { /* one worker, started lazily, on one thread */ }
+pub struct Previewer { /* cache dir, font set, the converted-PDF memo */ }
 
 impl Previewer {
-    pub fn new(cache_dir: PathBuf, engine: Option<Engine>) -> Self;
+    pub fn new(cache_dir: PathBuf, fonts: Fonts) -> Self;
+
     /// Blocking; the UI runs it on the background executor.
     pub fn preview(&self, path: &Path, ask: &Ask) -> Result<Preview, Refused>;
-    pub fn shutdown(&self);
+
+    /// Text search over the same PDF, for highlights.
+    pub fn find(&self, path: &Path, needle: &str) -> Result<Vec<Hit>, Refused>;
 }
 
 pub struct Ask {
-    pub width_px: u32,          // the panel's width × scale factor; pages are drawn this wide
+    pub width_px: u32,          // panel width × scale factor; pages are drawn this wide
     pub pages: Range<usize>,    // pages wanted now; the UI asks for more as it scrolls
-    pub sheet: Option<usize>,   // for Sheet
+    pub sheet: Option<usize>,   // Sheet only: which sheet as a table
+    pub layout: Layout,         // Sheet only
 }
+
+pub enum Layout { Grid, Pages }  // a sheet as cells, or as printed pages
 
 pub enum Preview {
-    Pages { pages: Vec<Page>, total: usize },
-    Table { sheets: Vec<String>, current: usize, rows: Vec<Vec<String>>, more_rows: bool },
-    Outline(Vec<Block>),
+    Pages { pages: Vec<Page>, total: usize, warnings: Vec<String> },
+    Table { sheets: Vec<String>, current: usize, rows: Vec<Vec<Cell>>, more_rows: bool },
 }
-pub struct Page { pub png: PathBuf, pub width_pt: f32, pub height_pt: f32 }
-pub enum Block {
-    Heading(u8, String),
-    Para(String),
-    Table(Vec<Vec<String>>),
-    Image(PathBuf),
-    Slide(usize),               // starts slide n
-}
-pub enum Refused {
-    NoEngine,
-    EngineVersion { found: String },
-    Password,
-    Damaged,
-    TooBig,
-    Timeout,
-    Failed(String),
-}
+
+pub struct Page { pub index: usize, pub png: PathBuf, pub width_pt: f32, pub height_pt: f32 }
+pub struct Cell { pub text: String, pub bold: bool, pub align: Align, pub span: (u16, u16) }
+pub struct Hit  { pub page: usize, pub rect_pt: [f32; 4] }
+
+pub enum Refused { Unsupported, Password, Damaged, TooBig, Timeout, Failed(String) }
 ```
 
-Search goes through a separate call, so typing does not re-render pages:
-`pub fn find(&self, path: &Path, needle: &str) -> Result<Vec<Hit>, Refused>`
-where `Hit { page, rect_pt: [f32; 4] }`. It may use LOK's search, or the
-text of an exported PDF; pick the simpler one.
+### 2. What each kind gives
 
-What each kind gives:
+| Kind | Extensions | Default view | Notes |
+| --- | --- | --- | --- |
+| Word | `docx` | `Pages` via office2pdf → hayro | `.doc`, `.odt` and `.rtf` give `Unsupported` in v1 |
+| Slides | `pptx` | `Pages`, one per slide | hidden slides left out, as office2pdf does by default; `.ppt` and `.odp` give `Unsupported` |
+| Sheet | `xlsx`, `xls`, `xlsb`, `ods` | `Table` (`Layout::Grid`) via calamine | `Layout::Pages` renders `xlsx` with office2pdf, for print layout and charts |
+| Csv | `csv`, `tsv` | `Table` | sniff the separator; detect UTF-8 / UTF-16 BOM / GBK / Shift-JIS with `encoding_rs` (try UTF-8, then GBK when the UI language is Chinese) |
+| Pdf | `pdf` | `Pages` via hayro | password-protected files give `Password` (hayro has no decryption) |
 
-| Kind | With the engine | Without it |
-| --- | --- | --- |
-| Word (`docx`, `doc`, `odt`, `rtf`) | `Pages`: `load`, `pages()` for the page rects, `paint_tile` per page into a PNG | `Outline`, read from `word/document.xml` with `quick-xml` (headings from `pStyle` Heading1–6 or `Title`, tables, images from `word/media`) |
-| Slides (`pptx`, `ppt`, `odp`) | `Pages`, one per slide, with `paint_part` | `Outline`: each slide's title and text, plus images, from `ppt/slides/slideN.xml` |
-| Sheet (`xlsx`, `xls`, `ods`) | `Table`, the same as without the engine; the grid is the useful view | `Table`, read with [`calamine`](https://crates.io/crates/calamine), showing formatted values |
-| Csv (`csv`, `tsv`) | `Table`, read with the `csv` crate; separator sniffed; encoding by `encoding_rs` when not UTF-8 | (same) |
-| Pdf | `Pages`. First try the **system renderer**: PDFKit on macOS (`objc2-pdf-kit`, as in ElyOffice's `ely-platform/src/print/mac.rs`), `Windows.Data.Pdf` on Windows (as in `print/win.rs`). On Linux, use `pdftoppm` when it is on `PATH`. Last, the engine (LOK opens PDF in Draw; render with `paint_part`) | The system renderer as above. On Linux without `pdftoppm`: `Refused::NoEngine` |
+`Cell` details for the grid:
 
-**Hard limits**, so a preview can never hang the app:
+- Show the **formatted** value: dates as dates, and numbers with the cell's
+  number format when calamine exposes it, otherwise as they are.
+- Show merged cells as `span`, and bold.
+- No other styling in v1.
 
-- Files over 200 MB: `TooBig`.
-- More than 10 000 rows, or 200 columns, per sheet: return the first ones
-  and set `more_rows`.
-- An `Outline` stops after 2 000 blocks.
-- At most 20 pages per call.
-- Each worker request gets a 20 s timeout: return `Timeout`, kill the
-  worker, and start a new one on the next call.
-- A password-protected file gives `Password`. Do not prompt for it in v1.
-- Macros never run. `load` already ensures that (LOK-11), and the
-  fallbacks do not execute anything.
+### 3. Rendering, caching and limits
 
-### 4. Cache
+**Rendering**
 
-- Rendered pages go under `cache_dir/<key>/<page>-<width>.png`.
+1. Convert to PDF once per file version, then keep the PDF bytes in the
+   cache (`doc.pdf`) so scrolling does not convert again.
+2. Render only the pages in `ask.pages`. Scale each page so it comes out
+   `width_px` wide: `scale = width_px / page_width_pt`.
+3. Give `office2pdf`'s warnings back in `Preview::Pages::warnings`. They are
+   shown in a "Some parts may look different" line.
+
+**Cache**
+
+- Files go under `cache_dir/<key>/`: `doc.pdf`, then
+  `<page>-<width_px>.png`.
 - `<key>` is the hex SHA-256 of: the absolute path, the file's size and
-  mtime, and `BUILD_ID` (or `"sys"` for the system renderer).
-- So a file that has not changed costs nothing the second time, and one
-  that changed gets a new key.
-- Keep at most 500 MB in total. When it is over, delete the
-  least-recently-used keys (by the directory's mtime; touch it on every
-  hit).
+  mtime, and this crate's `RENDER_VERSION` constant. Bump that constant
+  whenever the output changes.
+- Keep at most 500 MB in total. When it is over, evict the
+  least-recently-used keys (by the directory's mtime; touch it on every hit).
 - The UI passes `dirs::cache_dir()/Atrium/previews`.
 
-### 5. Worker lifetime
+**Limits**, so a preview can never hang or exhaust the app:
 
-- The worker starts on the first call that needs it.
-- Quit it after 5 minutes with no call, and on `shutdown()` (the UI calls it
-  when the app quits).
-- Give it a profile dir of its own, `cache_dir/../lok-profile`, and never
-  share ElyOffice's. The vendored client already sets `SAL_NOLOCK_PROFILE`.
-- If the worker dies, log `ended()` and retry the call once with a fresh
-  worker.
+- Files over 100 MB: `TooBig`.
+- Do not render more than 20 pages per call.
+- Grid: at most 10 000 rows and 200 columns per call, with `more_rows` set.
+- Run conversion and rendering in a worker thread with a 30 s deadline,
+  and return `Timeout` when it passes. A conversion cannot be interrupted,
+  so let the thread finish and discard its result. Never run two
+  conversions of the same file at once.
+- Catch panics from the dependencies (`std::panic::catch_unwind` around
+  each call) and return `Failed`, so a bad file cannot crash Atrium.
+- Zip bombs: before converting, reject any OOXML whose total uncompressed
+  size is over 500 MB (`TooBig`).
+
+### 4. Fonts (Chinese first)
+
+The UI is used mostly in Chinese, so Chinese documents must not show tofu
+(empty boxes).
+
+- `Fonts` holds the system font directories plus any extra paths. Pass
+  them through `ConvertOptions::font_paths`.
+  - macOS: `/System/Library/Fonts`, `/Library/Fonts`, `~/Library/Fonts`.
+  - Windows: `%WINDIR%\Fonts`, `%LOCALAPPDATA%\Microsoft\Windows\Fonts`.
+  - Linux: `/usr/share/fonts`, `~/.local/share/fonts`.
+- **Map common Chinese font names** to what is installed, so a document set
+  in 宋体, 微软雅黑, 黑体 or 等线 does not fall back to a Latin font:
+  - macOS: PingFang SC, Songti SC, Heiti SC.
+  - Windows: Microsoft YaHei, SimSun, DengXian.
+  - Linux: Noto Sans/Serif CJK SC, WenQuanYi.
+  Use the API office2pdf provides for substitutes. If it has none, open an
+  issue upstream and fall back to the system CJK font for any CJK run.
+- **hayro**: set `InterpreterSettings::font_resolver` so non-embedded CJK
+  fonts in PDFs use the system CJK font. The PDFs office2pdf writes embed
+  their fonts already, so this matters for PDFs from elsewhere.
+
+### 5. Later, not in this item
+
+- ElyOffice's LOK engine as an optional "original layout" mode, for files
+  the pure-Rust path draws badly.
+- `.doc`, `.ppt`, `.odt` and `.odp`.
+- Editing anything.
 
 ## Tests
 
-The engine is not available in CI, so most tests do not need it:
+1. **Kinds.** `kind()` for each extension, and for a `.xlsx` whose content
+   is a PDF (gives `Other`).
+2. **Fixtures.** Commit small files under
+   `crates/atrium-preview/tests/fixtures/`, each under 100 KB:
+   - Docx: Chinese headings, a table, an image, a header and footer, and
+     two pages. Write it in Chinese, for example a 周报 (weekly report).
+   - Pptx: three slides, one with a Chinese title.
+   - Xlsx: two sheets with Chinese names, a merged cell, a date and a
+     currency cell.
+   - Csv: one in GBK and one in UTF-8 with a BOM.
+   - Pdf: two pages.
 
-1. `kind()` for each extension, and for a file whose name says `.xlsx`
-   but whose content is a PDF.
-2. `find_engine()` from a fake layout under a temp dir, for each OS's
-   layout. Make the roots injectable, for example `find_engine_in(&[roots])`.
-3. **Fallbacks**, from small fixture files committed under
-   `crates/atrium-preview/tests/fixtures/` (keep each under 50 KB; create
-   them with LibreOffice or by hand):
-   - the Word `Outline` has the headings in order, a table and an image;
-   - the PowerPoint `Outline` has two slides with their titles;
-   - `Table` for `.xlsx`, `.ods` and `.csv`, including a GBK-encoded CSV
-     and Chinese sheet names.
-4. Limits: a generated CSV with 20 000 rows gives 10 000 rows and
-   `more_rows = true`.
-5. Cache: a second call does not render again (count the calls through a
-   test hook); touching the file renders again; going over the size limit
-   evicts the oldest key.
-6. Engine tests behind `#[ignore]`, run with `ATRIUM_LOK_WORKER` and
-   `ATRIUM_LOK_DIR` set to an ElyOffice 0.1.16 install:
-   - a `.docx` gives `Pages` with the right page count;
-   - a `.pptx` gives one page per slide;
-   - a wrong `BUILD_ID` gives `EngineVersion`;
-   - killing the worker mid-call recovers on the next call.
-   Run these once on a machine with ElyOffice installed, and paste the
-   output in the PR.
-7. The system PDF renderer on macOS and Windows: a two-page fixture PDF
-   gives two PNGs of the asked width. Put these behind
-   `cfg(target_os = ...)`; on Linux, test `pdftoppm` when present.
+   Make them with any office suite, or by hand. office2pdf's
+   `tests/golden_mocks` files (Apache-2.0) may be copied with attribution.
+3. **Output checks.**
+   - Each page and table count is right.
+   - Each PNG is `width_px` wide.
+   - For the Chinese docx, the page's text has no tofu: render it, then
+     check with `find("周报")` that the text is there and positioned.
+   - Pixel checks stay loose (the page is not blank and has dark text
+     pixels). No exact pixel comparisons: fonts differ per OS.
+4. **Grid.**
+   - Merged spans, formatted dates, both CSV encodings.
+   - A generated 20 000-row CSV gives 10 000 rows and `more_rows`.
+5. **Cache.**
+   - A second call does not convert again (count with a test hook).
+   - Touching the file converts again.
+   - Going over the size limit evicts the oldest key.
+6. **Failure.**
+   - A truncated docx gives `Damaged` or `Failed`, not a panic.
+   - An encrypted PDF gives `Password`.
+   - A zip bomb gives `TooBig`.
+7. **Timing.** Behind `#[ignore]`: preview each fixture in release mode and
+   print the times. Paste the output in the PR.
 
 ## Done when
 
-- `cargo test -p atrium-preview` passes on Linux without ElyOffice.
-- The ignored engine tests pass on at least one OS with ElyOffice 0.1.16
-  installed, with the output in the PR.
-- `third_party/ely-office/README.md` lists what was taken and what was
-  changed.
-- `docs/licenses` or the README credits ElyOffice (MIT) and LibreOffice
-  (MPL-2.0, used through the user's own install). The PR states that no
-  MuPDF code is included.
-- No GPUI in `atrium-preview`. The UI side then adds the Preview tab on
-  top of this API.
+- `cargo test -p atrium-preview` passes on Linux. CI runs it on macOS and
+  Windows too, if the workflow has them.
+- A Chinese docx renders with Chinese text on each OS it was tried on.
+  Paste a screenshot or describe it in the PR.
+- The PR lists:
+  - how much bigger the release binary got;
+  - every new dependency and its license.
+- The README credits office2pdf, hayro and calamine.
+- No GPUI in `atrium-preview`. The UI side then adds the Preview tab on top
+  of this API.

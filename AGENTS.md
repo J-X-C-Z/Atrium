@@ -24,7 +24,7 @@ existing functions to call, the tests to write and when it is done.
 | 5 | **Worktrees**: one git worktree and branch per lead and pool worker, worker tasks merged into the lead's branch, lead branches merged on request | [`docs/worktree-implementation.md`](docs/worktree-implementation.md) | 1, 2 |
 | 7 | **PR/CI status, previews, agent environments**: poll `gh` for lead branches (auto-fix on failing CI under the autopilot), screenshot UI work from `.atrium/launch.json`, start ACP agents with the chosen environment | [`docs/pr-preview-implementation.md`](docs/pr-preview-implementation.md) | 5 for PRs |
 | 6 | **Phone view API**: a tailnet-only HTTP API and event stream to follow projects, answer approvals and post notices from a phone (the web page is built on the UI side) | [`docs/remote-view-implementation.md`](docs/remote-view-implementation.md) | 1 |
-| 8 | **File previews**: Word, Excel, PowerPoint and PDF in the side panel, rendered by the user's ElyOffice install (LibreOffice through LOK; no MuPDF), with text and table fallbacks without it, a page cache and hard limits | [`docs/file-preview-implementation.md`](docs/file-preview-implementation.md) | — |
+| 8 | **File previews**: Word, PowerPoint, Excel, CSV and PDF in the side panel, read-only, in pure Rust (office2pdf → PDF, hayro → PNG, calamine for grids), Chinese fonts first, with a page cache and hard limits | [`docs/file-preview-implementation.md`](docs/file-preview-implementation.md) | — |
 
 Do one item per pull request. In each PR, tick its row here (add "✓ done in
 #N") and list which of the brief's tests and end-to-end checks you ran.
