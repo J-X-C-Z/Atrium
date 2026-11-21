@@ -57,9 +57,12 @@ fn on_path(command: &str) -> Option<PathBuf> {
 
 fn mac_app(app: &str) -> bool {
     cfg!(target_os = "macos")
-        && [PathBuf::from("/Applications"), dirs::home_dir().unwrap_or_default().join("Applications")]
-            .iter()
-            .any(|dir| dir.join(format!("{app}.app")).exists())
+        && [
+            PathBuf::from("/Applications"),
+            dirs::home_dir().unwrap_or_default().join("Applications"),
+        ]
+        .iter()
+        .any(|dir| dir.join(format!("{app}.app")).exists())
 }
 
 /// The editors installed here, in the order of [`EDITORS`].
@@ -88,7 +91,8 @@ pub fn editor_args(editor: &Editor, path: &Path, line: Option<u32>) -> Vec<Strin
 /// Opens `path` (a file or a folder) in `editor`, at `line` when given.
 pub fn open_in(editor: &Editor, path: &Path, line: Option<u32>) -> Result<()> {
     let mut cmd = if on_path(editor.command).is_some() {
-        let mut cmd = Command::new(on_path(editor.command).unwrap_or_else(|| editor.command.into()));
+        let mut cmd =
+            Command::new(on_path(editor.command).unwrap_or_else(|| editor.command.into()));
         cmd.args(editor_args(editor, path, line));
         cmd
     } else {
@@ -96,9 +100,33 @@ pub fn open_in(editor: &Editor, path: &Path, line: Option<u32>) -> Result<()> {
         cmd.args(["-a", editor.app]).arg(path);
         cmd
     };
-    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     cmd.spawn()
         .with_context(|| format!("could not start {}", editor.name))?;
+    Ok(())
+}
+
+/// Opens `path` with the app the system uses for it.
+pub fn open_default(path: &Path) -> Result<()> {
+    let mut cmd = if cfg!(target_os = "macos") {
+        let mut cmd = Command::new("open");
+        cmd.arg(path);
+        cmd
+    } else if cfg!(windows) {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", "start", ""]).arg(path);
+        cmd
+    } else {
+        let mut cmd = Command::new("xdg-open");
+        cmd.arg(path);
+        cmd
+    };
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    cmd.spawn().context("could not open the file")?;
     Ok(())
 }
 
@@ -121,7 +149,9 @@ pub fn reveal(path: &Path) -> Result<()> {
         });
         cmd
     };
-    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     cmd.spawn().context("could not open the file manager")?;
     Ok(())
 }
@@ -138,8 +168,14 @@ mod tests {
             editor_args(code, file, Some(12)),
             vec!["-g".to_string(), "/nowhere/src/main.rs:12".into()]
         );
-        assert_eq!(editor_args(code, file, None), vec!["/nowhere/src/main.rs".to_string()]);
+        assert_eq!(
+            editor_args(code, file, None),
+            vec!["/nowhere/src/main.rs".to_string()]
+        );
         let zed = EDITORS.iter().find(|e| e.command == "zed").unwrap();
-        assert_eq!(editor_args(zed, file, Some(3)), vec!["/nowhere/src/main.rs:3".to_string()]);
+        assert_eq!(
+            editor_args(zed, file, Some(3)),
+            vec!["/nowhere/src/main.rs:3".to_string()]
+        );
     }
 }

@@ -269,6 +269,7 @@ cargo test --workspace
 - **独立工作树**：新对话输入框的文件夹菜单里勾选「在独立工作树中开始」，每个新对话在自己的 worktree 和 `atrium/<名称>` 分支上改，几个 agent 同时改一个仓库互不干扰；顶栏显示分支，对话菜单里「合并回主分支」「删除这个工作树」
 - **终端**（右侧面板「终端」）：在对话所在的文件夹里开一个 shell
 - **运行与预览**（右侧面板「运行」）：自动猜启动命令（`npm/pnpm/yarn/bun` 的 dev 脚本、`cargo run`、Django、Go、静态页面），按文件夹记住；识别它输出的本地地址，「打开预览」在浏览器里打开
+- **预览与编辑文件**（右侧面板「预览」）：改动列表里的眼睛按钮、对话里文件改动卡片下的「预览」都能打开。图片、Markdown、CSV、PDF 直接看；Word、Excel、PPT 可以直接改（Word 按段落和表格、Excel 按单元格、PPT 改文本框文字；含修订、批注、域的段落只读），「编辑 / 页面」切换可编辑视图和原样版式。保存后自动生成中文改动说明（「我在 报告.docx 里改了这些地方：……」），随你的下一条消息发给 agent，让它在你的版本上继续；agent 运行中会等它停下再保存；文件被 agent 同时改过时，可选「载入磁盘上的版本」「保留我的」「另存一份」；保存后可「撤销保存」。读写 docx/xlsx/pptx 和渲染页面的后端还在做（见下一步），在那之前这些文件会提示「暂时还不能编辑 / 预览」
 - **在编辑器中打开**：改动面板里每个文件、对话菜单里整个文件夹，用 VS Code、Cursor、Zed、Windsurf 或 Sublime Text 打开（设置里选）；也可以在文件管理器中显示
 - **导出**：对话菜单「导出为 Markdown…」「复制为 Markdown」，标题跟随界面语言
 - **定时对话**（设置）：到点由 Atrium 自动在某个文件夹、用某个 agent 发出一条消息，可选每天 / 工作日 / 周末；错过的当天补跑；可「立即运行」
@@ -284,7 +285,7 @@ cargo test --workspace
 - 手机 App 外壳（Tauri 2），后台推送和锁屏审批
 - 无人值守的运行状态（今天跑了几轮、离上限多远、下次唤醒时间）
 - 应用内直接安装更新（现在是提示后跳转下载页）
-- 侧栏预览和编辑 Word、Excel、PPT：纯 Rust 实现，只改动你改过的地方，保存后把改动说明交给 AI（需求见 `docs/file-preview-implementation.md` 和 `docs/office-editing-implementation.md`）
+- 侧栏预览和编辑 Word、Excel、PPT 的文件读写：界面、文档模型、改动说明已完成，读写 docx/xlsx/pptx 和渲染页面待后端实现（需求见 `docs/file-preview-implementation.md` 和 `docs/office-editing-implementation.md`）
 - 多台电脑同步：每台电脑都能看到并继续所有设备上的对话和项目，只走 Tailscale，不经服务器；也可以把对话连同代码改动搬到当前电脑（需求见 `docs/multi-device-sync-implementation.md`）
 - 应用内预览窗口（GPUI 还没有内嵌网页视图，现在在浏览器里打开）
 

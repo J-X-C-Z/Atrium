@@ -56,6 +56,18 @@ short: `rdocx` (DOCX layout to PDF and PNG, MIT/Apache), `dxpdf` (DOCX, but
 uses Skia, which is C++), `ppt-rs` and `zavora-slide` (PPTX). Do not mix
 them in v1. If you switch, say why in the PR, with the fixtures that showed it.
 
+## Status
+
+- **`crates/atrium-preview` exists** with the API below; `kind()` is
+  implemented and tested.
+- **Yours**: the bodies of `Previewer::preview` and `Previewer::find`,
+  which return `Unsupported` today.
+- **The Preview view is built and calls them**:
+  - for PDF, CSV, xls and ods;
+  - for docx, xlsx and pptx when `atrium_office::open` cannot open them;
+  - in the "Pages" view of any of them. A sheet in "Pages" asks with
+    `Layout::Pages`.
+
 ## What the UI does (built on the UI side, not in this item)
 
 - A new side tab, **Preview**. You open a file from:

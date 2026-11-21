@@ -671,6 +671,7 @@ fn body(
         rows::row(&rows_from, ix, window, cx)
     });
     let next = next_steps_strip(workspace, cx);
+    let reports = doc_reports_strip(workspace, cx);
     ChatContainer::new(messages)
         .composer(
             div()
@@ -679,9 +680,68 @@ fn body(
                 .flex_col()
                 .gap_2()
                 .children(next)
+                .children(reports)
                 .child(composer_column(composer)),
         )
         .into_any_element()
+}
+
+/// Documents you edited and saved, whose changes go with your next message.
+fn doc_reports_strip(workspace: &Entity<Workspace>, cx: &App) -> Option<AnyElement> {
+    let files = workspace.read(cx).pending_doc_reports();
+    if files.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = files
+        .iter()
+        .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(str::to_string))
+        .collect();
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let paths: Vec<std::path::PathBuf> = files.iter().map(|p| p.to_path_buf()).collect();
+    let drop = workspace.clone();
+    Some(
+        div()
+            .w_full()
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(COLUMN))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_1p5()
+                    .rounded(theme.radius(Radius::Md))
+                    .bg(colors.accent.opacity(0.08))
+                    .text_size(theme.text_size(TextSize::Sm))
+                    .child(
+                        Icon::new(IconName::FileText)
+                            .size(IconSize::Xs)
+                            .color(colors.accent),
+                    )
+                    .child(div().flex_1().min_w_0().child(tf(
+                        "Your changes to {files} go to the agent with your next message.",
+                        &[("files", &names.join("、"))],
+                    )))
+                    .child(
+                        IconButton::new("doc-reports-drop", IconName::X)
+                            .variant(ButtonVariant::Ghost)
+                            .size(ControlSize::Sm)
+                            .tooltip(t("Don't send"))
+                            .on_click(move |_, _, cx| {
+                                drop.update(cx, |ws, cx| {
+                                    for p in &paths {
+                                        ws.drop_doc_report(p, cx);
+                                    }
+                                })
+                            }),
+                    ),
+            )
+            .into_any_element(),
+    )
 }
 
 /// The follow-ups the agent proposed, each to send here or start in a new

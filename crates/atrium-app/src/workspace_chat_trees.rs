@@ -44,7 +44,10 @@ impl Workspace {
                 return Ok(folder);
             }
             repo::add_worktree(&folder, &worktrees_base(), &title).map_err(|e| {
-                tf("Could not make a worktree: {error}", &[("error", &format!("{e:#}"))])
+                tf(
+                    "Could not make a worktree: {error}",
+                    &[("error", &format!("{e:#}"))],
+                )
             })
         })
     }
@@ -64,7 +67,10 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let result = job.await;
             let _ = this.update(cx, |_, cx| match result {
-                Ok(into) => cx.emit(Notice::Success(tf("Merged into {branch}.", &[("branch", &into)]))),
+                Ok(into) => cx.emit(Notice::Success(tf(
+                    "Merged into {branch}.",
+                    &[("branch", &into)],
+                ))),
                 Err(e) => cx.emit(Notice::Error(format!("{e:#}"))),
             });
         })
@@ -77,7 +83,9 @@ impl Workspace {
             return;
         };
         if self.is_running() {
-            cx.emit(Notice::Info(t("Stop the agent before removing its worktree.").into()));
+            cx.emit(Notice::Info(
+                t("Stop the agent before removing its worktree.").into(),
+            ));
             return;
         }
         let job = cx.background_spawn(async move { repo::remove_worktree(&dir) });

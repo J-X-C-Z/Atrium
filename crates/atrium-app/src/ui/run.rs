@@ -53,15 +53,23 @@ pub fn guess_command(dir: &Path) -> Option<String> {
 
 /// The first local web address in a command's output.
 pub fn find_url(text: &str) -> Option<String> {
-    for word in text.split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | '(' | ')' | ',')) {
+    for word in text
+        .split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | '(' | ')' | ','))
+    {
         let word = word.trim_end_matches(['.', ';']);
         let rest = word
             .strip_prefix("http://")
             .or_else(|| word.strip_prefix("https://"));
         let Some(rest) = rest else { continue };
         let host = rest.split(['/', ':']).next().unwrap_or_default();
-        if matches!(host, "localhost" | "127.0.0.1" | "0.0.0.0" | "[::]" | "[::1]") {
-            return Some(word.replacen("0.0.0.0", "localhost", 1).replacen("[::]", "localhost", 1));
+        if matches!(
+            host,
+            "localhost" | "127.0.0.1" | "0.0.0.0" | "[::]" | "[::1]"
+        ) {
+            return Some(
+                word.replacen("0.0.0.0", "localhost", 1)
+                    .replacen("[::]", "localhost", 1),
+            );
         }
     }
     None
@@ -69,7 +77,10 @@ pub fn find_url(text: &str) -> Option<String> {
 
 fn launch(dir: &Path, command: &str) -> Launch {
     let program = if cfg!(windows) {
-        ("cmd".to_string(), vec!["/C".to_string(), command.to_string()])
+        (
+            "cmd".to_string(),
+            vec!["/C".to_string(), command.to_string()],
+        )
     } else {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
         (shell, vec!["-lc".to_string(), command.to_string()])
@@ -124,7 +135,10 @@ impl RootView {
         };
         let command = self.dev_command(&dir, cx);
         if command.is_empty() {
-            self.toast(&Notice::Info(t("Write the command that starts the project.").into()), cx);
+            self.toast(
+                &Notice::Info(t("Write the command that starts the project.").into()),
+                cx,
+            );
             return;
         }
         self.workspace.update(cx, |ws, _| {
@@ -150,8 +164,12 @@ impl RootView {
         let watched = term.downgrade();
         cx.spawn(async move |this, cx| {
             for _ in 0..120 {
-                cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
-                let Some(term) = watched.upgrade() else { return };
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+                let Some(term) = watched.upgrade() else {
+                    return;
+                };
                 let found = term.read_with(cx, |t, _| find_url(&t.text()).is_some());
                 if this.update(cx, |_, cx| cx.notify()).is_err() || found {
                     return;
@@ -226,13 +244,7 @@ impl RootView {
                     }),
             ),
         };
-        let mut body = div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .p_2()
-            .child(bar);
+        let mut body = div().size_full().flex().flex_col().gap_2().p_2().child(bar);
         if let Some(url) = url {
             let open = url.clone();
             body = body.child(
@@ -245,10 +257,13 @@ impl RootView {
                     .rounded_md()
                     .bg(colors.success.opacity(0.10))
                     .text_size(small)
-                    .child(div().flex_1().min_w_0().truncate().child(tf(
-                        "Serving at {url}",
-                        &[("url", &url)],
-                    )))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(tf("Serving at {url}", &[("url", &url)])),
+                    )
                     .child(
                         Button::new("run-preview", t("Open preview"))
                             .size(ControlSize::Sm)
@@ -261,7 +276,11 @@ impl RootView {
             body = body.child(
                 div()
                     .text_size(small)
-                    .text_color(if status.success() { colors.fg_muted } else { colors.danger })
+                    .text_color(if status.success() {
+                        colors.fg_muted
+                    } else {
+                        colors.danger
+                    })
                     .child(match status.code() {
                         Some(code) => tf("Stopped with exit code {code}", &[("code", &code)]),
                         None => t("Stopped").to_string(),
@@ -304,7 +323,11 @@ mod tests {
     fn commands_are_guessed_from_the_project() {
         let dir = std::env::temp_dir().join(format!("atrium-run-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("package.json"), r#"{"scripts":{"build":"x","dev":"vite"}}"#).unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"scripts":{"build":"x","dev":"vite"}}"#,
+        )
+        .unwrap();
         std::fs::write(dir.join("pnpm-lock.yaml"), "").unwrap();
         assert_eq!(guess_command(&dir).as_deref(), Some("pnpm dev"));
         std::fs::remove_dir_all(&dir).unwrap();

@@ -100,7 +100,6 @@ fn exercise(cx: &mut TestAppContext, backend: &str) {
                 link: None,
                 _pump: None,
                 reopen: Vec::new(),
-
             });
         }
         ws.transcripts

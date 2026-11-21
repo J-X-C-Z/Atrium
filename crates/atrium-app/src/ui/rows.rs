@@ -174,15 +174,17 @@ fn footer(
         .filter(|e| matches!(e.kind, EntryKind::Item(Item::User { .. })))
         .count()
         .checked_sub(1);
-    let undo = number.filter(|n| workspace.read(cx).has_checkpoint(*n)).map(|n| {
-        let restore = workspace.clone();
-        IconButton::new(key("undo-files", &turn), IconName::History)
-            .variant(ButtonVariant::Ghost)
-            .size(ControlSize::Sm)
-            .disabled(transcript.is_running())
-            .tooltip(t("Undo this turn's file changes"))
-            .on_click(move |_, _, cx| restore.update(cx, |ws, cx| ws.restore_turn(n, cx)))
-    });
+    let undo = number
+        .filter(|n| workspace.read(cx).has_checkpoint(*n))
+        .map(|n| {
+            let restore = workspace.clone();
+            IconButton::new(key("undo-files", &turn), IconName::History)
+                .variant(ButtonVariant::Ghost)
+                .size(ControlSize::Sm)
+                .disabled(transcript.is_running())
+                .tooltip(t("Undo this turn's file changes"))
+                .on_click(move |_, _, cx| restore.update(cx, |ws, cx| ws.restore_turn(n, cx)))
+        });
     Some(
         footer
             .child(actions)
@@ -514,15 +516,48 @@ fn item(workspace: &Entity<Workspace>, item: &Item, live: bool, cx: &App) -> Any
                 ItemStatus::Completed => ChangeState::Accepted,
                 ItemStatus::Failed | ItemStatus::Declined => ChangeState::Rejected,
             };
+            let cwd = workspace
+                .read(cx)
+                .active_thread()
+                .map(|t| t.cwd.clone())
+                .unwrap_or_default();
             div()
                 .flex()
                 .flex_col()
                 .gap_1p5()
                 .children(changes.iter().enumerate().map(|(ix, change)| {
-                    FileChangeCard::new(
+                    let card = FileChangeCard::new(
                         key("patch", &format!("{id}-{ix}")),
                         diff_change(change, state),
-                    )
+                    );
+                    let path = std::path::Path::new(&cwd).join(&change.path);
+                    if !super::preview::previewable(&path)
+                        || matches!(change.kind, ChangeKind::Delete)
+                    {
+                        return card.into_any_element();
+                    }
+                    let ask = workspace.clone();
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_0p5()
+                        .child(card)
+                        .child(
+                            div().child(
+                                Button::new(key("preview", &format!("{id}-{ix}")), t("Preview"))
+                                    .variant(ButtonVariant::Ghost)
+                                    .size(ControlSize::Sm)
+                                    .icon(IconName::Eye)
+                                    .on_click(move |_, _, cx| {
+                                        let path = path.clone();
+                                        ask.update(cx, |ws, cx| {
+                                            ws.preview_request = Some(path);
+                                            cx.notify();
+                                        })
+                                    }),
+                            ),
+                        )
+                        .into_any_element()
                 }))
                 .into_any_element()
         }

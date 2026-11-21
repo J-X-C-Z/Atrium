@@ -30,7 +30,10 @@ fn parts(version: &str) -> Vec<u64> {
 pub fn newer(current: &str, latest: &str) -> bool {
     let (a, b) = (parts(current), parts(latest));
     for i in 0..a.len().max(b.len()) {
-        let (x, y) = (a.get(i).copied().unwrap_or(0), b.get(i).copied().unwrap_or(0));
+        let (x, y) = (
+            a.get(i).copied().unwrap_or(0),
+            b.get(i).copied().unwrap_or(0),
+        );
         if x != y {
             return y > x;
         }
@@ -41,14 +44,25 @@ pub fn newer(current: &str, latest: &str) -> bool {
 /// The latest release, when it is newer than this build.
 pub fn check() -> Result<Option<Update>> {
     let out = Command::new("curl")
-        .args(["-fsSL", "-m", "15", "-H", "Accept: application/vnd.github+json", "-A", "Atrium", RELEASES])
+        .args([
+            "-fsSL",
+            "-m",
+            "15",
+            "-H",
+            "Accept: application/vnd.github+json",
+            "-A",
+            "Atrium",
+            RELEASES,
+        ])
         .stdin(Stdio::null())
         .output()
         .context("curl is not available")?;
     ensure!(out.status.success(), "no release found");
     let json: serde_json::Value = serde_json::from_slice(&out.stdout)?;
     let tag = json["tag_name"].as_str().context("no tag")?;
-    let url = json["html_url"].as_str().unwrap_or("https://github.com/J-X-C-Z/Atrium/releases");
+    let url = json["html_url"]
+        .as_str()
+        .unwrap_or("https://github.com/J-X-C-Z/Atrium/releases");
     Ok(newer(env!("CARGO_PKG_VERSION"), tag).then(|| Update {
         version: tag.trim_start_matches('v').to_string(),
         url: url.to_string(),

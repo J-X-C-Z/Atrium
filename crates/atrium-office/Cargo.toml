@@ -1,0 +1,9 @@
+[package]
+name = "atrium-office"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Atrium's document core: Word, Excel and PowerPoint as a simple editable model, saved without losing what it does not touch."
+
+[dependencies]

@@ -28,22 +28,24 @@ use notice_dispatch::{NoticeSendResult, NoticeTarget, codex_notice_outcome};
 
 #[path = "workspace_acp.rs"]
 mod acp;
-#[path = "workspace_checkpoints.rs"]
-mod checkpoints;
 #[path = "workspace_chat_trees.rs"]
 mod chat_trees;
+#[path = "workspace_checkpoints.rs"]
+mod checkpoints;
+#[path = "workspace_devices.rs"]
+mod devices;
+#[path = "workspace_docs.rs"]
+mod docs;
+#[path = "workspace_phone.rs"]
+mod phone;
+#[path = "workspace_preview.rs"]
+mod preview;
+#[path = "workspace_project.rs"]
+mod projects;
 #[path = "workspace_schedules.rs"]
 mod schedules;
 #[path = "workspace_updates.rs"]
 mod updates;
-#[path = "workspace_devices.rs"]
-mod devices;
-#[path = "workspace_preview.rs"]
-mod preview;
-#[path = "workspace_phone.rs"]
-mod phone;
-#[path = "workspace_project.rs"]
-mod projects;
 pub use acp::{AcpAgent, AgentStatus, CODEX};
 pub use devices::{Device, DeviceStatus};
 pub use projects::{Activity, ActivityKind, Room, StreamState, StreamView, activities};
@@ -169,6 +171,11 @@ pub struct Workspace {
     checkpoints: HashMap<String, Vec<usize>>,
     /// The checkpoint that undoes each conversation's last restore.
     restores: HashMap<String, usize>,
+    /// Your saved document edits, to go to the agent with your next message,
+    /// by conversation ("" for a new one).
+    pub doc_reports: HashMap<String, Vec<(std::path::PathBuf, String)>>,
+    /// A file a transcript row asked the side panel to show.
+    pub preview_request: Option<std::path::PathBuf>,
     /// A newer Atrium, when one is out.
     pub update: Option<crate::updates::Update>,
     pub goals: HashMap<String, Goal>,
@@ -273,6 +280,8 @@ impl Workspace {
             prediction_forks: HashMap::new(),
             checkpoints: HashMap::new(),
             restores: HashMap::new(),
+            doc_reports: HashMap::new(),
+            preview_request: None,
             update: None,
             goals: HashMap::new(),
             memory_off: HashSet::new(),
@@ -1452,6 +1461,11 @@ impl Workspace {
         if composed.text.is_empty() && composed.images.is_empty() {
             return NoticeSendResult::NoDispatch;
         }
+        let composed = if target.is_none() {
+            self.with_doc_reports(composed)
+        } else {
+            composed
+        };
         if !self.is_codex_view() {
             return self.acp_send(composed, target, cx);
         }

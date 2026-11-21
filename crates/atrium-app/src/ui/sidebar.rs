@@ -411,7 +411,11 @@ pub fn render(
                     "Atrium {version} is out",
                     &[("version", &update.version)],
                 )))
-                .child(div().text_size(theme.text_size(TextSize::Xs)).child(t("Download")))
+                .child(
+                    div()
+                        .text_size(theme.text_size(TextSize::Xs))
+                        .child(t("Download")),
+                )
         }))
         .child({
             let open = account_root.clone();

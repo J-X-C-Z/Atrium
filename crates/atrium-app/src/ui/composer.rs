@@ -612,13 +612,20 @@ impl Composer {
                 }),
             );
             let label = if isolated {
-                tf("{folder} · own worktree", &[("folder", &folder_name(&folder))])
+                tf(
+                    "{folder} · own worktree",
+                    &[("folder", &folder_name(&folder))],
+                )
             } else {
                 folder_name(&folder)
             };
             tools.push(
                 DropdownMenu::new("folder", label, menu)
-                    .icon(if isolated { IconName::GitBranch } else { IconName::Folder })
+                    .icon(if isolated {
+                        IconName::GitBranch
+                    } else {
+                        IconName::Folder
+                    })
                     .variant(ButtonVariant::Ghost)
                     .into_any_element(),
             );

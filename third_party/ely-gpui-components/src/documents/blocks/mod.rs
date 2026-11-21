@@ -145,6 +145,22 @@ impl BlockEditor {
             .collect()
     }
 
+    /// The document as it stands, each block with its key: keys stay with
+    /// a block for the editor's life, so an owner can tell which of its
+    /// blocks an edit touched, and which are new.
+    pub fn keyed_blocks(&self, cx: &App) -> Vec<(u64, BlockData)> {
+        self.snapshot(cx).blocks
+    }
+
+    /// Makes block `key`'s fields read-only, or editable again.
+    pub fn set_locked(&mut self, key: u64, locked: bool, cx: &mut Context<Self>) {
+        if let Some(block) = self.blocks.iter().find(|b| b.key == key) {
+            for field in &block.fields {
+                field.update(cx, |field, cx| field.set_disabled(locked, cx));
+            }
+        }
+    }
+
     /// A field for `kind`: inline markdown styled as typed, or code colored as code.
     fn field(
         kind: &BlockKind,

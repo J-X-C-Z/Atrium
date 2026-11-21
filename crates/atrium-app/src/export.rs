@@ -55,11 +55,16 @@ fn status_word(status: ItemStatus) -> &'static str {
 pub fn to_markdown(title: &str, folder: &str, transcript: &Transcript) -> String {
     let mut out = format!("# {}\n\n", title.trim());
     if !folder.is_empty() {
-        out.push_str(&format!("> {}\n\n", tf("Folder: {folder}", &[("folder", &folder)])));
+        out.push_str(&format!(
+            "> {}\n\n",
+            tf("Folder: {folder}", &[("folder", &folder)])
+        ));
     }
     for entry in transcript.entries() {
         let part = match &entry.kind {
-            EntryKind::Item(Item::User { text, attachments, .. }) => {
+            EntryKind::Item(Item::User {
+                text, attachments, ..
+            }) => {
                 let mut s = format!("## {}\n\n{}\n", t("You"), text.trim());
                 for path in attachments {
                     s.push_str(&format!("\n- 📎 `{path}`"));
@@ -72,7 +77,13 @@ pub fn to_markdown(title: &str, folder: &str, transcript: &Transcript) -> String
             EntryKind::Item(Item::Agent { text, .. }) if !text.trim().is_empty() => {
                 format!("### {}\n\n{}\n", t("Agent"), text.trim())
             }
-            EntryKind::Item(Item::Command { command, output, exit_code, status, .. }) => {
+            EntryKind::Item(Item::Command {
+                command,
+                output,
+                exit_code,
+                status,
+                ..
+            }) => {
                 let mut s = format!("**{}** {}\n\n", t("Ran"), status_word(*status));
                 s.push_str(&block("sh", command));
                 if !output.trim().is_empty() {
@@ -80,7 +91,10 @@ pub fn to_markdown(title: &str, folder: &str, transcript: &Transcript) -> String
                     s.push_str(&block("", &cut(output)));
                 }
                 if let Some(code) = exit_code.filter(|c| *c != 0) {
-                    s.push_str(&format!("\n{}\n", tf("Exit code {code}", &[("code", &code)])));
+                    s.push_str(&format!(
+                        "\n{}\n",
+                        tf("Exit code {code}", &[("code", &code)])
+                    ));
                 }
                 s
             }
@@ -102,7 +116,9 @@ pub fn to_markdown(title: &str, folder: &str, transcript: &Transcript) -> String
             EntryKind::Item(Item::WebSearch { query, .. }) => {
                 format!("**{}** {query}\n", t("Searched the web"))
             }
-            EntryKind::Item(Item::Image { path: Some(path), .. }) => format!("![]({path})\n"),
+            EntryKind::Item(Item::Image {
+                path: Some(path), ..
+            }) => format!("![]({path})\n"),
             EntryKind::Plan { explanation, steps } => {
                 let mut s = format!("**{}**\n\n", t("Plan"));
                 if let Some(e) = explanation {
@@ -117,7 +133,9 @@ pub fn to_markdown(title: &str, folder: &str, transcript: &Transcript) -> String
                 }
                 s
             }
-            EntryKind::Question { request, answers, .. } => {
+            EntryKind::Question {
+                request, answers, ..
+            } => {
                 let mut s = String::new();
                 for q in &request.questions {
                     s.push_str(&format!("**{}** {}\n", t("Question"), q.question));
@@ -150,13 +168,26 @@ pub fn to_markdown(title: &str, folder: &str, transcript: &Transcript) -> String
 pub fn file_name(title: &str) -> String {
     let name: String = title
         .chars()
-        .map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { ' ' } else { c })
+        .map(|c| {
+            if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
     let name: String = name.chars().take(60).collect();
-    format!("{}.md", if name.is_empty() { "Atrium" } else { name.as_str() })
+    format!(
+        "{}.md",
+        if name.is_empty() {
+            "Atrium"
+        } else {
+            name.as_str()
+        }
+    )
 }
 
 #[cfg(test)]
@@ -171,7 +202,10 @@ mod tests {
 
     #[test]
     fn long_output_is_cut() {
-        let long = (0..100).map(|i| i.to_string()).collect::<Vec<_>>().join("\n");
+        let long = (0..100)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
         let kept = cut(&long);
         assert!(kept.lines().count() == OUTPUT_LINES + 1);
         assert!(kept.ends_with("60 more lines"));

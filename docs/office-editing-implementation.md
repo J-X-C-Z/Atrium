@@ -5,6 +5,61 @@ It lets you edit a file an agent wrote, in the side panel, save it, and hand
 your changes back to the agent. Read `AGENTS.md` first, then
 `docs/file-preview-implementation.md` (item 8), which this builds on.
 
+## Status: what exists, what is yours
+
+**Built on the UI side, with tests: everything that does not touch the file.**
+
+- **`crates/atrium-office`**, without GPUI:
+  - the model: `WordDoc`/`Block`/`Para`/`Inline`, `Workbook`/`Sheet`/`Cell`,
+    and `Deck`/`Slide`/`Shape`;
+  - the edit ops, each returning its exact inverse;
+  - `Document`, which records the ops since the last save in `pending`;
+  - `snapshot`, `changes` and `describe` (§6).
+- **The ops, as built** (they replace the finer-grained list in §2):
+  - Word: `SetContent { para, inlines }`, `InsertPara { at: Place, id,
+    style, inlines }`, `DeletePara`, `SetStyle`, `SetAlign`;
+  - Excel: `SetCell { sheet, r, c, input }` and `Restore`;
+  - PowerPoint: `SetContent` on a paragraph in a text box.
+
+  The editor works a paragraph at a time, so `SetContent` replaces a whole
+  paragraph's inlines.
+- **The side panel's Preview view** (`ui/preview.rs`, `ui/document.rs`,
+  `docmap.rs`):
+  - Word and PowerPoint in Ely's block editor, with locked paragraphs
+    read-only;
+  - Excel in Ely's spreadsheet;
+  - save, "save when the agent stops", undo save (from a backup copy);
+  - the changed-on-disk prompt (load theirs, keep mine, save a copy);
+  - the change report put before your next message.
+
+**Yours: the file binding.** The bodies of `atrium_office::open` and
+`Document::save_as` / `save_over`, which today return `Unsupported`.
+
+- **`open`**:
+  - read the package (§1);
+  - build the model with stable `NodeId`s: Word paragraph ids must also
+    work for paragraphs inside table cells;
+  - extract images to a temp folder for `AtomKind::Image`;
+  - set `Document.hash` to the file's SHA-256.
+- **`save_as`**:
+  - check the hash (`ChangedOnDisk`, except in `save_over`);
+  - replay `pending` onto the XML, touching only the paragraphs and cells
+    the ops name (the lossless rules below);
+  - write atomically;
+  - clear `pending` and update `hash`.
+- **`InsertPara` gets no XML of its own.** Copy the `w:pPr` of the
+  paragraph it follows (or the first in its container) and change only the
+  style. A paragraph that was deleted and then restored by undo (`id:
+  Some(..)`) must come back with its original XML: keep deleted
+  paragraphs' bytes until save.
+- **Mapping `SetContent` onto runs.** Diff the paragraph's old text
+  against the new one. Keep every run whose text and marks are unchanged,
+  with its `w:rPr`. For changed spans, copy the `w:rPr` of the neighbouring
+  run, then set or clear b, i, u, strike, and `w:hyperlink`.
+
+The tests in §7 stand, run against `open` and `save`. In-memory op
+semantics are already covered by the crate's tests.
+
 ## What we take from LibreOffice, and what we leave
 
 LibreOffice's core has four layers. We rebuild the first three, cut down to

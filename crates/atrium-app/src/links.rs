@@ -30,7 +30,11 @@ fn decode(text: &str) -> String {
         match bytes[i] {
             b'+' => out.push(b' '),
             b'%' if i + 2 < bytes.len() => {
-                match std::str::from_utf8(&bytes[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok()).ok_or(()) {
+                match std::str::from_utf8(&bytes[i + 1..i + 3])
+                    .ok()
+                    .and_then(|h| u8::from_str_radix(h, 16).ok())
+                    .ok_or(())
+                {
                     Ok(b) => {
                         out.push(b);
                         i += 2;
@@ -48,7 +52,11 @@ fn decode(text: &str) -> String {
 pub fn parse(url: &str) -> Option<Link> {
     let rest = url.trim().strip_prefix("atrium://")?;
     let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
-    let parts: Vec<String> = path.split('/').filter(|p| !p.is_empty()).map(decode).collect();
+    let parts: Vec<String> = path
+        .split('/')
+        .filter(|p| !p.is_empty())
+        .map(decode)
+        .collect();
     let param = |name: &str| {
         query
             .split('&')
@@ -56,7 +64,12 @@ pub fn parse(url: &str) -> Option<Link> {
             .find(|(k, _)| *k == name)
             .map(|(_, v)| decode(v))
     };
-    match parts.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+    match parts
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
         ["new"] => Some(Link::New {
             prompt: param("prompt").unwrap_or_default(),
             folder: param("folder").filter(|f| !f.is_empty()).map(PathBuf::from),
@@ -78,7 +91,9 @@ mod tests {
     #[test]
     fn links_parse() {
         assert_eq!(
-            parse("atrium://new?prompt=%E4%BF%AE%E4%B8%80%E4%B8%8B+bug&folder=%2Fcode%2Fapp&send=1"),
+            parse(
+                "atrium://new?prompt=%E4%BF%AE%E4%B8%80%E4%B8%8B+bug&folder=%2Fcode%2Fapp&send=1"
+            ),
             Some(Link::New {
                 prompt: "修一下 bug".into(),
                 folder: Some(PathBuf::from("/code/app")),
@@ -87,16 +102,29 @@ mod tests {
         );
         assert_eq!(
             parse("atrium://new"),
-            Some(Link::New { prompt: String::new(), folder: None, send: false })
+            Some(Link::New {
+                prompt: String::new(),
+                folder: None,
+                send: false
+            })
         );
         assert_eq!(
             parse("atrium://project/2/stream/frontend-w1"),
-            Some(Link::Stream { project: 2, stream: "frontend-w1".into() })
+            Some(Link::Stream {
+                project: 2,
+                stream: "frontend-w1".into()
+            })
         );
-        assert_eq!(parse("atrium://chat/thread-9"), Some(Link::Chat("thread-9".into())));
+        assert_eq!(
+            parse("atrium://chat/thread-9"),
+            Some(Link::Chat("thread-9".into()))
+        );
         assert_eq!(parse("https://example.com"), None);
         assert_eq!(parse("atrium://project/x/stream/a"), None);
         assert_eq!(decode("100%"), "100%");
-        assert_eq!(decode("%E4中"), "\u{FFFD}中".replace('\u{FFFD}', &String::from_utf8_lossy(&[0xE4])));
+        assert_eq!(
+            decode("%E4中"),
+            "\u{FFFD}中".replace('\u{FFFD}', &String::from_utf8_lossy(&[0xE4]))
+        );
     }
 }

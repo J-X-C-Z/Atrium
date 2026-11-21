@@ -43,12 +43,14 @@ impl ExtrasInputs {
                     .multi_line(2, 6)
                     .placeholder(t("One KEY=value per line"))
             }),
-            schedule_name: cx.new(|cx| TextInput::new(window, cx).placeholder(t("Name, such as Morning CI check"))),
+            schedule_name: cx.new(|cx| {
+                TextInput::new(window, cx).placeholder(t("Name, such as Morning CI check"))
+            }),
             schedule_time: cx.new(|cx| TextInput::new(window, cx).placeholder("09:00")),
             schedule_prompt: cx.new(|cx| {
-                TextInput::new(window, cx)
-                    .multi_line(2, 5)
-                    .placeholder(t("What to ask, such as: Check last night's CI runs and summarise the failures"))
+                TextInput::new(window, cx).multi_line(2, 5).placeholder(t(
+                    "What to ask, such as: Check last night's CI runs and summarise the failures",
+                ))
             }),
             schedule_days: crate::schedule::Days::Weekdays,
             push_topic: cx.new(|cx| {
@@ -90,7 +92,11 @@ impl RootView {
             let (ws, command) = (self.workspace.clone(), editor.command);
             row = row.child(
                 Button::new(SharedString::from(format!("editor-{command}")), editor.name)
-                    .variant(if on { ButtonVariant::Primary } else { ButtonVariant::Ghost })
+                    .variant(if on {
+                        ButtonVariant::Primary
+                    } else {
+                        ButtonVariant::Ghost
+                    })
                     .size(ControlSize::Sm)
                     .on_click(move |_, _, cx| {
                         ws.update(cx, |ws, cx| {
@@ -113,7 +119,11 @@ impl RootView {
         let colors = theme.colors.clone();
         let mut list = div().flex().flex_col().gap_1();
         for s in &ws.settings.schedules {
-            let (run, toggle, remove) = (self.workspace.clone(), self.workspace.clone(), self.workspace.clone());
+            let (run, toggle, remove) = (
+                self.workspace.clone(),
+                self.workspace.clone(),
+                self.workspace.clone(),
+            );
             let id = s.id.clone();
             let (id1, id2, id3) = (id.clone(), id.clone(), id);
             let folder = std::path::Path::new(&s.folder)
@@ -123,8 +133,17 @@ impl RootView {
             list = list.child(
                 row_box(cx)
                     .when(s.off, |el| el.opacity(0.55))
-                    .child(Icon::new(IconName::AlarmClock).size(IconSize::Xs).color(colors.fg_muted))
-                    .child(div().flex_none().font_weight(gpui::FontWeight::MEDIUM).child(s.name.clone()))
+                    .child(
+                        Icon::new(IconName::AlarmClock)
+                            .size(IconSize::Xs)
+                            .color(colors.fg_muted),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .child(s.name.clone()),
+                    )
                     .child(
                         div()
                             .flex_1()
@@ -141,10 +160,15 @@ impl RootView {
                             )),
                     )
                     .child(
-                        Button::new(SharedString::from(format!("schedule-run-{id1}")), t("Run now"))
-                            .variant(ButtonVariant::Ghost)
-                            .size(ControlSize::Sm)
-                            .on_click(move |_, _, cx| run.update(cx, |ws, cx| ws.run_schedule(&id1, cx))),
+                        Button::new(
+                            SharedString::from(format!("schedule-run-{id1}")),
+                            t("Run now"),
+                        )
+                        .variant(ButtonVariant::Ghost)
+                        .size(ControlSize::Sm)
+                        .on_click(move |_, _, cx| {
+                            run.update(cx, |ws, cx| ws.run_schedule(&id1, cx))
+                        }),
                     )
                     .child(
                         Button::new(
@@ -153,14 +177,21 @@ impl RootView {
                         )
                         .variant(ButtonVariant::Ghost)
                         .size(ControlSize::Sm)
-                        .on_click(move |_, _, cx| toggle.update(cx, |ws, cx| ws.toggle_schedule(&id2, cx))),
+                        .on_click(move |_, _, cx| {
+                            toggle.update(cx, |ws, cx| ws.toggle_schedule(&id2, cx))
+                        }),
                     )
                     .child(
-                        IconButton::new(SharedString::from(format!("schedule-remove-{id3}")), IconName::X)
-                            .variant(ButtonVariant::Ghost)
-                            .size(ControlSize::Sm)
-                            .tooltip(t("Remove"))
-                            .on_click(move |_, _, cx| remove.update(cx, |ws, cx| ws.remove_schedule(&id3, cx))),
+                        IconButton::new(
+                            SharedString::from(format!("schedule-remove-{id3}")),
+                            IconName::X,
+                        )
+                        .variant(ButtonVariant::Ghost)
+                        .size(ControlSize::Sm)
+                        .tooltip(t("Remove"))
+                        .on_click(move |_, _, cx| {
+                            remove.update(cx, |ws, cx| ws.remove_schedule(&id3, cx))
+                        }),
                     ),
             );
         }
@@ -171,15 +202,22 @@ impl RootView {
             let on = self.extras.schedule_days == d;
             let root = cx.entity();
             days = days.child(
-                Button::new(SharedString::from(format!("schedule-days-{d:?}")), t(d.label()))
-                    .variant(if on { ButtonVariant::Primary } else { ButtonVariant::Ghost })
-                    .size(ControlSize::Sm)
-                    .on_click(move |_, _, cx| {
-                        root.update(cx, |r, cx| {
-                            r.extras.schedule_days = d;
-                            cx.notify();
-                        })
-                    }),
+                Button::new(
+                    SharedString::from(format!("schedule-days-{d:?}")),
+                    t(d.label()),
+                )
+                .variant(if on {
+                    ButtonVariant::Primary
+                } else {
+                    ButtonVariant::Ghost
+                })
+                .size(ControlSize::Sm)
+                .on_click(move |_, _, cx| {
+                    root.update(cx, |r, cx| {
+                        r.extras.schedule_days = d;
+                        cx.notify();
+                    })
+                }),
             );
         }
         let add = (
@@ -199,7 +237,11 @@ impl RootView {
                         .items_center()
                         .gap_2()
                         .child(div().flex_1().child(Input::new(&self.extras.schedule_name)))
-                        .child(div().w(gpui::px(80.)).child(Input::new(&self.extras.schedule_time)))
+                        .child(
+                            div()
+                                .w(gpui::px(80.))
+                                .child(Input::new(&self.extras.schedule_time)),
+                        )
                         .child(days),
                 )
                 .child(Input::new(&self.extras.schedule_prompt))
@@ -228,7 +270,9 @@ impl RootView {
                                 .size(ControlSize::Sm)
                                 .on_click(move |_, _, cx| {
                                     let (root, ws, backend, folder) = add.clone();
-                                    let read = |e: &Entity<TextInput>, cx: &gpui::App| e.read(cx).text().trim().to_string();
+                                    let read = |e: &Entity<TextInput>, cx: &gpui::App| {
+                                        e.read(cx).text().trim().to_string()
+                                    };
                                     let (name, time, prompt, days) = {
                                         let r = root.read(cx);
                                         (
@@ -240,17 +284,32 @@ impl RootView {
                                     };
                                     let Some(at) = parse_time(&time) else {
                                         root.update(cx, |r, cx| {
-                                            r.toast(&crate::workspace::Notice::Info(t("Write the time as HH:MM, such as 09:00.").into()), cx)
+                                            r.toast(
+                                                &crate::workspace::Notice::Info(
+                                                    t("Write the time as HH:MM, such as 09:00.")
+                                                        .into(),
+                                                ),
+                                                cx,
+                                            )
                                         });
                                         return;
                                     };
                                     if prompt.is_empty() {
                                         root.update(cx, |r, cx| {
-                                            r.toast(&crate::workspace::Notice::Info(t("Write what to ask.").into()), cx)
+                                            r.toast(
+                                                &crate::workspace::Notice::Info(
+                                                    t("Write what to ask.").into(),
+                                                ),
+                                                cx,
+                                            )
                                         });
                                         return;
                                     }
-                                    let name = if name.is_empty() { prompt.chars().take(24).collect() } else { name };
+                                    let name = if name.is_empty() {
+                                        prompt.chars().take(24).collect()
+                                    } else {
+                                        name
+                                    };
                                     ws.update(cx, |ws, cx| {
                                         ws.add_schedule(
                                             Schedule {
@@ -268,7 +327,11 @@ impl RootView {
                                         )
                                     });
                                     root.update(cx, |r, cx| {
-                                        for e in [&r.extras.schedule_name, &r.extras.schedule_time, &r.extras.schedule_prompt] {
+                                        for e in [
+                                            &r.extras.schedule_name,
+                                            &r.extras.schedule_time,
+                                            &r.extras.schedule_prompt,
+                                        ] {
                                             e.update(cx, |i, cx| i.set_text("", cx));
                                         }
                                     });

@@ -10,7 +10,9 @@ use crate::updates;
 impl Workspace {
     pub(super) fn start_update_checks(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_secs(20)).await;
+            cx.background_executor()
+                .timer(Duration::from_secs(20))
+                .await;
             loop {
                 let Ok(skip) = this.update(cx, |ws, _| ws.settings.no_update_check) else {
                     return;
@@ -18,7 +20,9 @@ impl Workspace {
                 if !skip {
                     let _ = this.update(cx, |ws, cx| ws.check_for_update(false, cx));
                 }
-                cx.background_executor().timer(Duration::from_secs(24 * 3600)).await;
+                cx.background_executor()
+                    .timer(Duration::from_secs(24 * 3600))
+                    .await;
             }
         })
         .detach();

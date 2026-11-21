@@ -23,3 +23,6 @@ Examples and the web gallery are left out of this copy.
   `EllipsisTooltip`) join a multi-line text into one line, trimming each
   line, for both the painted line and the hidden text that sizes the box.
   Before, a multi-line command kept one blank line of height per line.
+- `documents/blocks`: `BlockEditor::keyed_blocks` gives each block with its
+  key, so an owner can map edits onto its own model; `set_locked` makes a
+  block read-only (Atrium shows Word paragraphs it cannot edit this way).

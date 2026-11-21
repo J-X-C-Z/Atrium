@@ -569,7 +569,9 @@ dependencies = [
  "agent-rpc",
  "anyhow",
  "atrium-core",
+ "atrium-office",
  "atrium-phone",
+ "atrium-preview",
  "atrium-project",
  "codex-client",
  "dirs 6.0.0",
@@ -621,6 +623,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "atrium-office"
+version = "0.1.0"
+
+[[package]]
 name = "atrium-phone"
 version = "0.1.0"
 dependencies = [
@@ -636,6 +642,10 @@ dependencies = [
  "ureq",
  "url",
 ]
+
+[[package]]
+name = "atrium-preview"
+version = "0.1.0"
 
 [[package]]
 name = "atrium-process"

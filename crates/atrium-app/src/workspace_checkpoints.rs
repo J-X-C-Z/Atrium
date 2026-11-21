@@ -47,7 +47,11 @@ impl Workspace {
 
     /// Records the files before the next turn of `thread`. Await the task
     /// before sending, so the agent cannot change anything first.
-    pub(super) fn checkpoint_next_turn(&mut self, thread: &str, cx: &mut Context<Self>) -> Task<()> {
+    pub(super) fn checkpoint_next_turn(
+        &mut self,
+        thread: &str,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
         let Some(dir) = self.local_dir(thread) else {
             return Task::ready(());
         };
@@ -113,7 +117,13 @@ impl Workspace {
     }
 
     /// Gives a new chat's checkpoints, taken under `draft`, its id.
-    pub(super) fn adopt_checkpoints(&mut self, dir: PathBuf, draft: String, thread: String, cx: &mut Context<Self>) {
+    pub(super) fn adopt_checkpoints(
+        &mut self,
+        dir: PathBuf,
+        draft: String,
+        thread: String,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(turns) = self.checkpoints.remove(&draft) {
             self.checkpoints.insert(thread.clone(), turns);
         }
@@ -166,7 +176,9 @@ impl Workspace {
             return;
         };
         if self.is_running() {
-            cx.emit(Notice::Info(t("Stop the agent before undoing files.").into()));
+            cx.emit(Notice::Info(
+                t("Stop the agent before undoing files.").into(),
+            ));
             return;
         }
         let Some(dir) = self.local_dir(&thread) else {
@@ -205,7 +217,9 @@ impl Workspace {
         let Some(thread) = self.active_thread_id().map(str::to_owned) else {
             return;
         };
-        let (Some(dir), Some(undo)) = (self.local_dir(&thread), self.restores.get(&thread).copied()) else {
+        let (Some(dir), Some(undo)) =
+            (self.local_dir(&thread), self.restores.get(&thread).copied())
+        else {
             return;
         };
         let key = thread.clone();

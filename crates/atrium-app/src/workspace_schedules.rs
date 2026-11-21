@@ -14,7 +14,9 @@ impl Workspace {
     pub(super) fn start_schedules(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(Duration::from_secs(30)).await;
+                cx.background_executor()
+                    .timer(Duration::from_secs(30))
+                    .await;
                 if this.update(cx, |ws, cx| ws.run_due_schedules(cx)).is_err() {
                     return;
                 }

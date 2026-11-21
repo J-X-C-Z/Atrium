@@ -69,7 +69,10 @@ impl Schedule {
             return false;
         };
         let today = now.date().to_string();
-        if self.off || !self.days.includes(now.weekday()) || self.last_run.as_deref() == Some(today.as_str()) {
+        if self.off
+            || !self.days.includes(now.weekday())
+            || self.last_run.as_deref() == Some(today.as_str())
+        {
             return false;
         }
         let minutes = |t: Time| i32::from(t.hour()) * 60 + i32::from(t.minute());

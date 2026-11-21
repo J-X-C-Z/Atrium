@@ -16,8 +16,8 @@ use ely_gpui_component::{
     theme::{ActiveTheme, ControlSize, IconSize, Radius, TextSize},
 };
 use gpui::{
-    AnyElement, Context, Entity, Focusable, IntoElement, ParentElement,
-    SharedString, Styled, Window, div, prelude::*,
+    AnyElement, Context, Entity, Focusable, IntoElement, ParentElement, SharedString, Styled,
+    Window, div, prelude::*,
 };
 
 use super::RootView;
@@ -145,6 +145,10 @@ impl RootView {
         if !self.review.open {
             return;
         }
+        if self.review.tab == SideTab::Preview {
+            self.prepare_preview(window, cx);
+            return;
+        }
         let Some(dir) = self.chat_dir(cx) else {
             return;
         };
@@ -230,7 +234,10 @@ impl RootView {
                 match result {
                     Ok(done) if done.starts_with("https://") => {
                         cx.open_url(&done);
-                        root.toast(&Notice::Success(tf("Pull request opened: {url}", &[("url", &done)])), cx);
+                        root.toast(
+                            &Notice::Success(tf("Pull request opened: {url}", &[("url", &done)])),
+                            cx,
+                        );
                     }
                     Ok(done) if !done.is_empty() => root.toast(&Notice::Success(done), cx),
                     Ok(_) => {}
@@ -272,7 +279,12 @@ impl RootView {
         );
     }
 
-    pub(super) fn revert_hunk(&mut self, change: repo::Change, hunk: usize, cx: &mut Context<Self>) {
+    pub(super) fn revert_hunk(
+        &mut self,
+        change: repo::Change,
+        hunk: usize,
+        cx: &mut Context<Self>,
+    ) {
         self.git_action(
             t("Undoing…"),
             move |root| {
@@ -344,7 +356,12 @@ impl RootView {
     }
 
     /// Opens a file of the conversation, at `line`, in the preferred editor.
-    pub(super) fn open_in_editor(&mut self, path: &Path, line: Option<u32>, cx: &mut Context<Self>) {
+    pub(super) fn open_in_editor(
+        &mut self,
+        path: &Path,
+        line: Option<u32>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(editor) = self.editor(cx) else {
             if let Err(e) = opener::reveal(path) {
                 self.toast(&Notice::Error(format!("{e:#}")), cx);
@@ -378,9 +395,12 @@ impl RootView {
                     .color(colors.fg_muted),
             )
             .child(
-                div()
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .child(status.branch.clone().unwrap_or_else(|| t("detached").into())),
+                div().font_weight(gpui::FontWeight::MEDIUM).child(
+                    status
+                        .branch
+                        .clone()
+                        .unwrap_or_else(|| t("detached").into()),
+                ),
             );
         if let Some(up) = &status.upstream {
             let mut sync = Vec::new();
@@ -390,16 +410,14 @@ impl RootView {
             if status.behind > 0 {
                 sync.push(tf("{n} behind", &[("n", &status.behind)]));
             }
-            where_line = where_line.child(
-                div()
-                    .text_size(tiny)
-                    .text_color(colors.fg_subtle)
-                    .child(if sync.is_empty() {
+            where_line =
+                where_line.child(div().text_size(tiny).text_color(colors.fg_subtle).child(
+                    if sync.is_empty() {
                         tf("up to date with {up}", &[("up", up)])
                     } else {
                         sync.join(" · ")
-                    }),
-            );
+                    },
+                ));
         } else if status.branch.is_some() {
             where_line = where_line.child(
                 div()
@@ -408,13 +426,15 @@ impl RootView {
                     .child(t("not pushed yet")),
             );
         }
-        where_line = where_line.child(div().flex_1()).children(busy.clone().map(|b| {
-            div()
-                .text_size(tiny)
-                .text_color(colors.accent)
-                .child(b)
-                .into_any_element()
-        }));
+        where_line = where_line
+            .child(div().flex_1())
+            .children(busy.clone().map(|b| {
+                div()
+                    .text_size(tiny)
+                    .text_color(colors.accent)
+                    .child(b)
+                    .into_any_element()
+            }));
         let refresh = root.clone();
         where_line = where_line.child(
             IconButton::new("git-refresh", IconName::RefreshCw)
@@ -492,35 +512,53 @@ impl RootView {
     }
 
     /// A file's undo and open buttons, for its card's header in git mode.
-    pub(super) fn file_buttons(&self, ix: usize, file: &ChangedFile, cx: &Context<Self>) -> Option<AnyElement> {
-        let (_, change) = self.git_view(cx)?.files.iter().find(|(f, _)| f.path == file.path)?;
+    pub(super) fn file_buttons(
+        &self,
+        ix: usize,
+        file: &ChangedFile,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        let (_, change) = self
+            .git_view(cx)?
+            .files
+            .iter()
+            .find(|(f, _)| f.path == file.path)?;
         let root = cx.entity();
-        let (undo, open) = ((root.clone(), change.clone()), (root, PathBuf::from(&file.path)));
+        let (undo, open) = (
+            (root.clone(), change.clone()),
+            (root, PathBuf::from(&file.path)),
+        );
         let enabled = self.tools.busy.is_none();
         Some(
             div()
                 .flex()
                 .items_center()
                 .child(
-                    IconButton::new(SharedString::from(format!("file-open-{ix}")), IconName::ExternalLink)
-                        .variant(ButtonVariant::Ghost)
-                        .size(ControlSize::Sm)
-                        .tooltip(t("Open in editor"))
-                        .on_click(move |_, _, cx| {
-                            let (root, path) = open.clone();
-                            root.update(cx, |r, cx| r.open_in_editor(&path, None, cx))
-                        }),
+                    IconButton::new(
+                        SharedString::from(format!("file-open-{ix}")),
+                        IconName::ExternalLink,
+                    )
+                    .variant(ButtonVariant::Ghost)
+                    .size(ControlSize::Sm)
+                    .tooltip(t("Open in editor"))
+                    .on_click(move |_, _, cx| {
+                        let (root, path) = open.clone();
+                        root.update(cx, |r, cx| r.open_in_editor(&path, None, cx))
+                    }),
                 )
                 .child(
-                    IconButton::new(SharedString::from(format!("file-undo-{ix}")), IconName::Undo2)
-                        .variant(ButtonVariant::Ghost)
-                        .size(ControlSize::Sm)
-                        .disabled(!enabled)
-                        .tooltip(t("Undo this file's changes"))
-                        .on_click(move |_, _, cx| {
-                            let (root, change) = undo.clone();
-                            root.update(cx, |r, cx| r.revert_file(change, cx))
-                        }),
+                    IconButton::new(
+                        SharedString::from(format!("file-undo-{ix}")),
+                        IconName::Undo2,
+                    )
+                    .variant(ButtonVariant::Ghost)
+                    .size(ControlSize::Sm)
+                    .disabled(!enabled)
+                    .tooltip(t("Undo this file's changes"))
+                    .on_click(move |_, _, cx| {
+                        let (root, change) = undo.clone();
+                        root.update(cx, |r, cx| r.revert_file(change, cx))
+                    }),
                 )
                 .into_any_element(),
         )
@@ -534,7 +572,11 @@ impl RootView {
         id: SharedString,
         cx: &Context<Self>,
     ) -> Option<AnyElement> {
-        let (_, change) = self.git_view(cx)?.files.iter().find(|(f, _)| f.path == file.path)?;
+        let (_, change) = self
+            .git_view(cx)?
+            .files
+            .iter()
+            .find(|(f, _)| f.path == file.path)?;
         let undo = (cx.entity(), change.clone());
         Some(
             Button::new(id, t("Undo"))
@@ -560,7 +602,9 @@ impl RootView {
                 .p_3()
                 .text_size(small)
                 .text_color(colors.fg_muted)
-                .child(t("A terminal opens in a conversation's folder on this computer."))
+                .child(t(
+                    "A terminal opens in a conversation's folder on this computer.",
+                ))
                 .into_any_element();
         };
         match self.tools.terminals.get(&dir) {
@@ -579,11 +623,18 @@ impl RootView {
     pub fn open_link(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
         use crate::links::{Link, parse};
         let Some(link) = parse(url) else {
-            self.toast(&Notice::Error(tf("Atrium cannot open {url}", &[("url", &url)])), cx);
+            self.toast(
+                &Notice::Error(tf("Atrium cannot open {url}", &[("url", &url)])),
+                cx,
+            );
             return;
         };
         match link {
-            Link::New { prompt, folder, send } => {
+            Link::New {
+                prompt,
+                folder,
+                send,
+            } => {
                 self.workspace.update(cx, |ws, cx| {
                     if let Some(dir) = folder.filter(|d| d.is_dir()) {
                         ws.set_working_dir(dir, cx);
@@ -592,7 +643,9 @@ impl RootView {
                     if send && !prompt.trim().is_empty() {
                         ws.send(crate::workspace::Composed::text(prompt), cx);
                     } else if !prompt.is_empty() {
-                        cx.emit(crate::workspace::Fill(crate::workspace::Composed::text(prompt)));
+                        cx.emit(crate::workspace::Fill(crate::workspace::Composed::text(
+                            prompt,
+                        )));
                     }
                 });
                 super::composer::Composer::focus_entity(&self.composer, window, cx);

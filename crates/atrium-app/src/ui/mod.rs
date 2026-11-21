@@ -7,13 +7,15 @@ mod chat;
 mod composer;
 mod context;
 mod devices;
+mod document;
 mod extras;
-mod run;
-mod tools;
 mod motion;
+mod preview;
 mod project;
 mod rows;
+mod run;
 mod sidebar;
+mod tools;
 
 use atrium_core::{Account, plan_label};
 use codex_client::AccessMode;
@@ -193,6 +195,8 @@ pub struct RootView {
     comment_input: Entity<TextInput>,
     /// Git and the terminal for the open conversation's folder.
     pub(super) tools: tools::Tools,
+    /// The Preview view: the file it shows, and the document open for editing.
+    pub(super) preview: preview::PreviewPane,
     /// Inputs of the shared MCP and environment settings.
     extras: extras::ExtrasInputs,
     /// The theme last applied, so a change of preference or system appearance re-applies.
@@ -220,9 +224,12 @@ impl RootView {
         });
         let extras = extras::ExtrasInputs::new(window, cx);
         let subscriptions = vec![
-            cx.observe_in(&workspace, window, |this, _, window, cx| {
+            cx.observe_in(&workspace, window, |this, workspace, window, cx| {
                 this.apply_theme(window, cx);
                 this.refresh_placeholders(cx);
+                if let Some(path) = workspace.update(cx, |ws, _| ws.preview_request.take()) {
+                    this.open_preview(path, window, cx);
+                }
                 cx.notify();
             }),
             cx.observe(&search, |this, search, cx| {
@@ -261,6 +268,7 @@ impl RootView {
             review: changes::Review::default(),
             comment_input,
             tools: tools::Tools::new(window, cx),
+            preview: preview::PreviewPane::new(),
             extras,
             applied: None,
             placeholders_chinese: crate::i18n::chinese(),
@@ -670,8 +678,16 @@ impl RootView {
         let codex_path =
             cx.new(|cx| TextInput::new(window, cx).placeholder(t("Found on PATH (leave empty)")));
         codex_path.update(cx, |input, cx| input.set_text(current, cx));
-        let topic = self.workspace.read(cx).settings.push_topic.clone().unwrap_or_default();
-        self.extras.push_topic.update(cx, |input, cx| input.set_text(topic, cx));
+        let topic = self
+            .workspace
+            .read(cx)
+            .settings
+            .push_topic
+            .clone()
+            .unwrap_or_default();
+        self.extras
+            .push_topic
+            .update(cx, |input, cx| input.set_text(topic, cx));
         let node_address = cx.new(|cx| {
             TextInput::new(window, cx).placeholder(t("Add a node by address, such as studio:7381"))
         });

@@ -7,10 +7,11 @@ mod agents;
 mod alerts;
 mod i18n;
 use atrium_project as project;
+mod docmap;
 mod export;
-mod schedule;
 mod links;
 mod opener;
+mod schedule;
 mod settings;
 mod skills;
 mod sleep_inhibitor;
@@ -80,64 +81,64 @@ fn main() {
         }
     });
     app.run(move |cx: &mut App| {
-            gpui_kit::init(cx);
-            ely_gpui_component::init(cx).expect("Ely failed to start");
-            apply_language(settings::Settings::load().language, cx);
+        gpui_kit::init(cx);
+        ely_gpui_component::init(cx).expect("Ely failed to start");
+        apply_language(settings::Settings::load().language, cx);
 
-            cx.bind_keys([
-                KeyBinding::new("cmd-n", NewChat, None),
-                KeyBinding::new("ctrl-n", NewChat, None),
-                KeyBinding::new("cmd-b", ToggleSidebar, None),
-                KeyBinding::new("ctrl-b", ToggleSidebar, None),
-                KeyBinding::new("cmd-k", OpenPalette, None),
-                KeyBinding::new("ctrl-k", OpenPalette, None),
-                KeyBinding::new("cmd-,", OpenSettings, None),
-                KeyBinding::new("ctrl-,", OpenSettings, None),
-                KeyBinding::new("cmd-l", FocusComposer, None),
-                KeyBinding::new("ctrl-l", FocusComposer, None),
-                KeyBinding::new("cmd-shift-a", AttachFiles, None),
-                KeyBinding::new("cmd-i", ShowContext, None),
-                KeyBinding::new("ctrl-i", ShowContext, None),
-                KeyBinding::new("cmd-shift-d", ToggleChanges, None),
-                KeyBinding::new("ctrl-o", CycleTranscript, None),
-                KeyBinding::new("ctrl-shift-d", ToggleChanges, None),
-                KeyBinding::new("cmd-.", StopTurn, None),
-                KeyBinding::new("ctrl-.", StopTurn, None),
-                KeyBinding::new("cmd-q", Quit, None),
-                KeyBinding::new("tab", ui::AcceptPrediction, Some("Predicting")),
-            ]);
-            cx.on_action(|_: &Quit, cx| cx.quit());
-            ui::register_actions(cx);
-            set_menus(cx);
+        cx.bind_keys([
+            KeyBinding::new("cmd-n", NewChat, None),
+            KeyBinding::new("ctrl-n", NewChat, None),
+            KeyBinding::new("cmd-b", ToggleSidebar, None),
+            KeyBinding::new("ctrl-b", ToggleSidebar, None),
+            KeyBinding::new("cmd-k", OpenPalette, None),
+            KeyBinding::new("ctrl-k", OpenPalette, None),
+            KeyBinding::new("cmd-,", OpenSettings, None),
+            KeyBinding::new("ctrl-,", OpenSettings, None),
+            KeyBinding::new("cmd-l", FocusComposer, None),
+            KeyBinding::new("ctrl-l", FocusComposer, None),
+            KeyBinding::new("cmd-shift-a", AttachFiles, None),
+            KeyBinding::new("cmd-i", ShowContext, None),
+            KeyBinding::new("ctrl-i", ShowContext, None),
+            KeyBinding::new("cmd-shift-d", ToggleChanges, None),
+            KeyBinding::new("ctrl-o", CycleTranscript, None),
+            KeyBinding::new("ctrl-shift-d", ToggleChanges, None),
+            KeyBinding::new("cmd-.", StopTurn, None),
+            KeyBinding::new("ctrl-.", StopTurn, None),
+            KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("tab", ui::AcceptPrediction, Some("Predicting")),
+        ]);
+        cx.on_action(|_: &Quit, cx| cx.quit());
+        ui::register_actions(cx);
+        set_menus(cx);
 
-            let bounds = Bounds::centered(None, size(px(1180.), px(800.)), cx);
-            let options = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Atrium".into()),
-                    appears_transparent: true,
-                    traffic_light_position: Some(point(px(14.), px(15.))),
-                }),
-                window_min_size: Some(size(px(640.), px(480.))),
-                app_id: Some("dev.atrium".into()),
-                ..Default::default()
-            };
-            let (window, root) = gpui_kit::open_window(options, cx, |window, cx| {
-                cx.new(|cx| RootView::new(window, cx))
-            })
-            .expect("open the main window");
-            cx.activate(true);
-            cx.spawn(async move |cx| {
-                use futures::StreamExt;
-                while let Some(url) = incoming.next().await {
-                    let _ = window.update(cx, |_, window, cx| {
-                        root.update(cx, |root, cx| root.open_link(&url, window, cx));
-                        window.activate_window();
-                    });
-                }
-            })
-            .detach();
-        });
+        let bounds = Bounds::centered(None, size(px(1180.), px(800.)), cx);
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Atrium".into()),
+                appears_transparent: true,
+                traffic_light_position: Some(point(px(14.), px(15.))),
+            }),
+            window_min_size: Some(size(px(640.), px(480.))),
+            app_id: Some("dev.atrium".into()),
+            ..Default::default()
+        };
+        let (window, root) = gpui_kit::open_window(options, cx, |window, cx| {
+            cx.new(|cx| RootView::new(window, cx))
+        })
+        .expect("open the main window");
+        cx.activate(true);
+        cx.spawn(async move |cx| {
+            use futures::StreamExt;
+            while let Some(url) = incoming.next().await {
+                let _ = window.update(cx, |_, window, cx| {
+                    root.update(cx, |root, cx| root.open_link(&url, window, cx));
+                    window.activate_window();
+                });
+            }
+        })
+        .detach();
+    });
 }
 
 /// Shows `language` everywhere: Atrium's strings, Ely's components and the menu bar.

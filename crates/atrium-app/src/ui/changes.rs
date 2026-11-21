@@ -80,6 +80,7 @@ pub enum SideTab {
     Watch,
     Terminal,
     Run,
+    Preview,
 }
 
 /// Reads a unified diff leniently: hunk headers with or without numbers, and
@@ -87,6 +88,18 @@ pub enum SideTab {
 pub fn parse_diff(diff: &str, kind: &ChangeKind) -> Vec<DiffLine> {
     let unified = diff.lines().any(|l| l.starts_with("@@"));
     let mut out = Vec::new();
+    // git's header for a binary file: nothing to show line by line.
+    if !unified && diff.starts_with("diff --git") {
+        if diff.lines().any(|l| l.starts_with("Binary files")) {
+            out.push(DiffLine {
+                kind: LineKind::Context,
+                old: None,
+                new: None,
+                text: crate::i18n::t("Binary file").to_string(),
+            });
+        }
+        return out;
+    }
     if !unified {
         let added = !matches!(kind, ChangeKind::Delete);
         for (i, text) in diff.lines().enumerate() {
@@ -283,8 +296,8 @@ impl RootView {
             .filter(|g| g.status.is_some())
             .map(|g| g.files.iter().map(|(f, _)| f.clone()).collect::<Vec<_>>());
         let in_git = git_files.is_some();
-        let files = git_files
-            .unwrap_or_else(|| ws.transcript().map(changed_files).unwrap_or_default());
+        let files =
+            git_files.unwrap_or_else(|| ws.transcript().map(changed_files).unwrap_or_default());
         let cwd = ws
             .active_thread()
             .map(|t| t.cwd.clone())
@@ -317,11 +330,31 @@ impl RootView {
             ),
             cx,
         );
+        if self.review.tab == SideTab::Preview {
+            return Some(
+                div()
+                    .flex_none()
+                    .w(px(600.))
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .border_l_1()
+                    .border_color(colors.border)
+                    .bg(colors.bg)
+                    .child(header)
+                    .child(div().flex_1().min_h_0().child(self.preview_body(cx)))
+                    .into_any_element(),
+            );
+        }
         if matches!(self.review.tab, SideTab::Terminal | SideTab::Run) {
             let body = if self.review.tab == SideTab::Run {
                 self.run_body(cx)
             } else {
-                div().size_full().p_1().child(self.terminal_body(cx)).into_any_element()
+                div()
+                    .size_full()
+                    .p_1()
+                    .child(self.terminal_body(cx))
+                    .into_any_element()
             };
             return Some(
                 div()
@@ -348,16 +381,13 @@ impl RootView {
 
         let mut body = div().flex().flex_col().gap_3().p_3();
         if files.is_empty() {
-            body = body.child(
-                div()
-                    .text_size(small)
-                    .text_color(colors.fg_muted)
-                    .child(if in_git {
-                        t("Nothing uncommitted.")
-                    } else {
-                        t("No file changes in this conversation yet.")
-                    }),
-            );
+            body = body.child(div().text_size(small).text_color(colors.fg_muted).child(
+                if in_git {
+                    t("Nothing uncommitted.")
+                } else {
+                    t("No file changes in this conversation yet.")
+                },
+            ));
         }
         for (file_ix, file) in files.iter().enumerate() {
             let mut card = div()
@@ -409,6 +439,7 @@ impl RootView {
                                 .text_color(colors.danger)
                                 .child(format!("−{}", file.removed)),
                         )
+                        .children(self.preview_button(file_ix, &file.path, &cwd, cx))
                         .children(self.file_buttons(file_ix, file, cx)),
                 );
             let mut hunk = 0usize;
@@ -721,6 +752,7 @@ impl RootView {
             .child(tab("side-watch", t("Side by side"), SideTab::Watch))
             .child(tab("side-terminal", t("Terminal"), SideTab::Terminal))
             .child(tab("side-run", t("Run"), SideTab::Run))
+            .child(tab("side-preview", t("Preview"), SideTab::Preview))
             .child(div().flex_1())
             .children(extra.filter(|_| self.review.tab == SideTab::Changes))
             .child(
@@ -742,6 +774,14 @@ impl RootView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binary_files_show_one_line() {
+        let diff = "diff --git a/x.png b/x.png\nnew file mode 100644\nindex 0000000..7988b5a\nBinary files /dev/null and b/x.png differ\n";
+        let lines = parse_diff(diff, &ChangeKind::Add);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].kind, LineKind::Context);
+    }
 
     #[test]
     fn git_header_lines_stay_out() {
