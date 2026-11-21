@@ -29,3 +29,5 @@ Examples and the web gallery are left out of this copy.
 - `chat/conversations.rs`: `Conversation::status` (`ConversationStatus`:
   idle, working, waiting on the user, or a count of unread replies) shows a
   spinner, a dot or a count at the end of the row.
+- `forms/files.rs`: `DropZone`'s "Drop files here" and "Browse…" read
+  through `i18n::word` (`files.drop`, `files.drop_one`, `files.browse`), with Chinese entries.

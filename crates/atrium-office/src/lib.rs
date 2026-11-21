@@ -2,16 +2,24 @@
 //! model you can edit in the side panel, saved without losing anything the
 //! model does not cover.
 //!
-//! Done here: the model, the edits with their exact inverses, and the
-//! change reports handed to the agent. To build
-//! (`docs/office-editing-implementation.md`): the file binding behind
-//! [`open`] and [`Office::save`], which reads the package into this model and
-//! writes back only the parts the edits touched.
+//! The file binding behind [`open`] and [`Document::save`] reads OOXML into
+//! the public model and writes back only the parts touched by recorded edits.
+//! There is no GPUI or native Office dependency in this crate.
 
+mod media;
+mod package;
+mod relationships;
+mod xml;
+mod zip_edit;
+pub(crate) use package::{Limits, Package};
+mod file_binding;
 mod report;
 mod sheet;
+mod sheet_binding;
 mod slides;
+mod slides_binding;
 mod word;
+mod word_binding;
 
 use std::path::{Path, PathBuf};
 
@@ -70,6 +78,11 @@ impl std::fmt::Display for OpenError {
 }
 
 impl std::error::Error for OpenError {}
+impl From<std::io::Error> for OpenError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error.to_string())
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SaveError {
@@ -135,6 +148,7 @@ pub struct Document {
     pub office: Office,
     /// Edits since the last save, in order, for the file binding to write.
     pending: Vec<Op>,
+    binding: Option<Box<file_binding::FileBinding>>,
     /// The file's SHA-256 when opened or last saved.
     pub hash: String,
 }
@@ -147,6 +161,7 @@ impl Document {
             path,
             office,
             pending: Vec::new(),
+            binding: None,
             hash,
         }
     }
@@ -171,14 +186,14 @@ impl Document {
 
     /// Saves even though the file changed on disk, replacing those changes.
     pub fn save_over(&mut self) -> Result<(), SaveError> {
-        // The file binding re-reads the file's hash, then saves as usual.
         let to = self.path.clone();
-        self.save_as(&to)
+        file_binding::save(self, &to, true)
     }
 
-    pub fn save_as(&mut self, _to: &Path) -> Result<(), SaveError> {
-        // The file binding replays `pending` onto the package here.
-        Err(SaveError::Unsupported)
+    /// Saves in place, or saves a conflict-free copy at a new destination.
+    /// A new destination never clobbers an existing file.
+    pub fn save_as(&mut self, to: &Path) -> Result<(), SaveError> {
+        file_binding::save(self, to, false)
     }
 }
 
@@ -195,7 +210,5 @@ pub fn open(path: &Path) -> Result<Document, OpenError> {
     if Format::of(path).is_none() {
         return Err(OpenError::Unsupported);
     }
-    std::fs::metadata(path).map_err(|e| OpenError::Io(e.to_string()))?;
-    // The file binding reads the package into a model here.
-    Err(OpenError::Unsupported)
+    file_binding::open(path)
 }

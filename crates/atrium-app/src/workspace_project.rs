@@ -46,6 +46,7 @@ pub enum Room {
         /// The workstream whose chat is open; the overview when `None`.
         stream: Option<String>,
     },
+    /// Workflows: the run shown, or the templates to start one from.
     Workflows {
         run: Option<PathBuf>,
     },
