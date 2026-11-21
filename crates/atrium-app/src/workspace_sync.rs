@@ -1027,6 +1027,18 @@ impl Workspace {
             .and_then(|sync| sync.owners.get(thread_id).cloned())
     }
 
+    /// Whether the device that owns `thread_id` can be reached now.
+    pub fn sync_owner_online(&self, thread_id: &str) -> bool {
+        let Some(device) = self
+            .sync_owner(thread_id)
+            .and_then(|owner| self.sync.as_ref()?.devices.get(&owner).cloned())
+        else {
+            return false;
+        };
+        self.device(&device)
+            .is_some_and(|d| d.status == super::DeviceStatus::Online)
+    }
+
     pub fn sync_is_remote(&self, thread_id: &str) -> bool {
         self.sync_owner(thread_id)
             .is_some_and(|owner| owner != self.settings.install_id)

@@ -44,10 +44,10 @@ mod preview;
 mod projects;
 #[path = "workspace_schedules.rs"]
 mod schedules;
-#[path = "workspace_updates.rs"]
-mod updates;
 #[path = "workspace_sync.rs"]
 mod sync;
+#[path = "workspace_updates.rs"]
+mod updates;
 pub use acp::{AcpAgent, AgentStatus, CODEX};
 pub use devices::{Device, DeviceStatus};
 pub use projects::{Activity, ActivityKind, Room, StreamState, StreamView, activities};
@@ -848,6 +848,12 @@ impl Workspace {
 
     /// Whether the shown chat's agent can take a message.
     pub fn is_ready(&self) -> bool {
+        // Another device's conversation goes to its owner, which runs the agent.
+        if let View::Thread(id) = &self.view
+            && self.sync_is_remote(id)
+        {
+            return self.sync_owner_online(id);
+        }
         self.view_agent_ready()
     }
 
