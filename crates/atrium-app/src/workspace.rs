@@ -51,7 +51,7 @@ mod workflows;
 pub use acp::{AcpAgent, AgentStatus, CODEX};
 pub use devices::{Device, DeviceStatus};
 pub use projects::{Activity, ActivityKind, Room, StreamState, StreamView, activities};
-pub use workflows::{RunEntry, TemplateSource};
+pub use workflows::{RunEntry, TemplateSource, experience, experience_file};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {

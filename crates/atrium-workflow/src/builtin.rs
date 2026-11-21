@@ -48,8 +48,12 @@ mod tests {
             ("identity".to_string(), "张三".to_string()),
         ]
         .into();
-        let run = Run::new(t.clone(), inputs, &["diagrams".into()], 0).unwrap();
-        assert!(!run.inputs.contains_key("status") || run.inputs["status"] == "草稿");
+        let mut run = Run::new(t.clone(), inputs, &["diagrams".into()], 0).unwrap();
+        assert_eq!(
+            run.step("select").unwrap().status,
+            StepStatus::Skipped,
+            "one problem given: no choosing"
+        );
         assert_eq!(run.step("diagrams").unwrap().status, StepStatus::Skipped);
         assert_eq!(run.ready(), vec!["analysis"]);
 
@@ -71,8 +75,39 @@ mod tests {
         assert!(!p.contains("张三"));
         assert!(p.contains("/mathmodel-contest-suite:2analysis-modeling"));
 
-        // The writer waits for the optional diagrams only while they run.
-        let needs = t.needs_of(t.steps.iter().position(|s| s.id == "writing").unwrap());
-        assert_eq!(needs, vec!["coding", "diagrams"]);
+        // Analysis lists the sub-questions; the route is the user's pick;
+        // each sub-question is solved on its own.
+        let pass = || vec![crate::run::CheckResult::pass("ok")];
+        for id in ["analysis", "models"] {
+            run.begin(id, None, 1).unwrap();
+            run.turn_finished(id, 2).unwrap();
+            run.checked(id, pass(), 3).unwrap();
+        }
+        let p = prompt(&run, "models", true, Lang::Zh);
+        assert!(p.is_some());
+        let route = crate::read_choices(r#"[{"id":"A","title":"排队论 + 整数规划"}]"#);
+        run.approve("models", Some(route[0].clone()), "Q2 先用启发式", 4)
+            .unwrap();
+        let p = prompt(&run, "foundation", true, Lang::Zh).unwrap();
+        assert!(p.contains("选定 排队论 + 整数规划；补充：Q2 先用启发式"));
+        run.begin("foundation", None, 5).unwrap();
+        run.turn_finished("foundation", 6).unwrap();
+        run.checked("foundation", pass(), 7).unwrap();
+        run.approve("foundation", None, "", 8).unwrap();
+        assert_eq!(run.to_expand().len(), 1);
+        run.expand(
+            "solve",
+            crate::read_choices(r#"[{"id":"Q1","title":"问题一"},{"id":"Q2","title":"问题二"}]"#),
+            9,
+        )
+        .unwrap();
+        let q2 = prompt(&run, "solve:Q2", false, Lang::Zh).unwrap();
+        assert!(q2.contains("这一步只做 问题二（编号 Q2）"));
+        assert!(q2.contains("`code/Q2.py`"));
+        assert!(
+            run.checks_of("solve:Q2").iter().any(
+                |c| matches!(c, crate::Check::Contains { path, .. } if path == "reports/Q2.md")
+            )
+        );
     }
 }

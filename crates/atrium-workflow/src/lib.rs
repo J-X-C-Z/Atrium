@@ -164,11 +164,24 @@ pub struct Step {
     /// in a way that needs its files should be optional.
     #[serde(default)]
     pub optional: bool,
-    /// When this step's checks fail, send the faults back to that earlier
-    /// step to fix, then run this one again. For a step that reviews
-    /// another's work.
-    #[serde(default)]
-    pub fixes: Option<String>,
+    /// When this step's checks fail, send the faults back to an earlier
+    /// step to fix, then run this one again: for a step that reviews
+    /// others' work. With several, a reviewer's verdict names the one at
+    /// fault (`send_back_to`); otherwise the first. One name or a list.
+    #[serde(
+        default,
+        deserialize_with = "one_or_many",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub fixes: Vec<String>,
+    /// The step writes options and the user picks one at its stop; the
+    /// choice goes to every later step's prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decide: Option<Decide>,
+    /// The step runs once per item an earlier step listed, such as once
+    /// per sub-question; `{{item.id}}` and `{{item.title}}` are filled in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub each: Option<Each>,
     /// Shown only when an input has this value: `contest=CUMCM`.
     #[serde(default)]
     pub when: Option<String>,
@@ -176,6 +189,109 @@ pub struct Step {
     pub attempts: Option<u32>,
     #[serde(default)]
     pub timeout_min: Option<u32>,
+}
+
+/// A choice for the user at a step's stop.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Decide {
+    /// A JSON file the step writes: a list of `{"id", "title", "summary"}`
+    /// (or plain strings).
+    pub options: String,
+    /// What the user is asked, such as "Which modeling route?".
+    #[serde(default)]
+    pub question: String,
+}
+
+/// Run a step once per item of a list an earlier step wrote.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Each {
+    /// A JSON file: a list of `{"id", "title"}` (or plain strings).
+    pub from: String,
+    /// At most this many items are taken.
+    #[serde(default = "eight")]
+    pub max: usize,
+}
+
+fn eight() -> usize {
+    8
+}
+
+fn one_or_many<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match OneOrMany::deserialize(d)? {
+        OneOrMany::One(s) => vec![s],
+        OneOrMany::Many(v) => v,
+    })
+}
+
+/// An entry of an options or items file.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Choice {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub summary: String,
+}
+
+/// Reads an options or items file leniently: objects with `id`/`title`
+/// (or `name`)/`summary`, or plain strings; ids made safe and unique.
+pub fn read_choices(text: &str) -> Vec<Choice> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return Vec::new();
+    };
+    let list = match &value {
+        serde_json::Value::Array(list) => list.clone(),
+        serde_json::Value::Object(map) => map
+            .get("items")
+            .or_else(|| map.get("options"))
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    let mut out: Vec<Choice> = Vec::new();
+    for (n, entry) in list.iter().enumerate() {
+        let (id, title, summary) = match entry {
+            serde_json::Value::String(s) => (String::new(), s.clone(), String::new()),
+            serde_json::Value::Object(o) => {
+                let get = |k: &str| o.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let title = if get("title").is_empty() {
+                    get("name")
+                } else {
+                    get("title")
+                };
+                (get("id"), title, get("summary"))
+            }
+            _ => continue,
+        };
+        let mut id: String = id
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        if id.is_empty() {
+            id = format!("{}", n + 1);
+        }
+        while out.iter().any(|c| c.id == id) {
+            id.push('_');
+        }
+        let title = if title.trim().is_empty() {
+            id.clone()
+        } else {
+            title.trim().to_string()
+        };
+        out.push(Choice {
+            id,
+            title,
+            summary: summary.trim().to_string(),
+        });
+    }
+    out
 }
 
 /// A check as a step lists it, perhaps only for some inputs.
@@ -235,6 +351,10 @@ pub enum Check {
         #[serde(default)]
         min: Option<u32>,
     },
+    /// A verdict file the step wrote: `{"pass": bool, "issues": [{"step",
+    /// "problem", "fix"}]}`. Each issue fails, and goes back to the step it
+    /// names when that step is in `fixes`.
+    Verdict { path: String },
     /// A reviewing agent reads the files against `rubric` and must answer
     /// that it passes; its reasons go back on failure.
     Review {
@@ -255,7 +375,10 @@ impl Check {
     pub fn is_local(&self) -> bool {
         matches!(
             self,
-            Check::Exists { .. } | Check::Contains { .. } | Check::Absent { .. }
+            Check::Exists { .. }
+                | Check::Contains { .. }
+                | Check::Absent { .. }
+                | Check::Verdict { .. }
         )
     }
 }
@@ -380,13 +503,13 @@ impl Template {
                     });
                 }
             }
-            if let Some(target) = &step.fixes
-                && !before.contains(target.as_str())
-            {
-                return Err(TemplateError::UnknownFix {
-                    step: step.id.clone(),
-                    target: target.clone(),
-                });
+            for target in &step.fixes {
+                if !before.contains(target.as_str()) {
+                    return Err(TemplateError::UnknownFix {
+                        step: step.id.clone(),
+                        target: target.clone(),
+                    });
+                }
             }
             if let Some(key) = condition_key(&step.when)
                 && !inputs.contains(key.as_str())

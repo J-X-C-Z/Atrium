@@ -1,18 +1,22 @@
 id = "mathmodel"
 name = "数学建模竞赛"
-description = "从赛题到论文：读题建模、编程求解出图、画流程图、用 LaTeX 写论文、按竞赛规则验收，最后按评分标准自评。适用于国赛、华为杯、美赛等。"
-version = 1
+description = "从赛题到论文：读题拆解 → 你来选建模路线 → 假设与符号 → 每个子问题单独建模求解验证 → 稳健性与评价 → LaTeX 论文 → 逐项验收（问题退回出错的那一步）→ 独立评审团 → 赛后复盘。适用于国赛、华为杯、美赛等。"
+version = 2
 
 preamble = """
 你在参加数学建模竞赛（{{input.contest}}），论文语言：{{input.language}}。赛题和附件在：{{input.problem}}。
-当前文件夹就是这次比赛的工作目录，各步骤约定的位置如下：
+当前文件夹就是这次比赛的工作目录，约定如下：
 - `plan.md`：整体方案和决策记录；`reports/`：各阶段报告；`code/`：全部程序；`results/`：计算结果；`figures/`：全部图（PDF 优先）；`paper/`：论文源文件和 PDF。
+- `reports/STATE.md`：项目状态。每一步结束时更新：当前用的模型和参数版本、各子问题做到哪里、哪些结果已经运行并核验、哪些因为前面的改动需要重跑。
 
 所有步骤都要遵守：
-- 不编造数值、数据、文献或结论。论文里的每个数都要能在 `results/` 或 `reports/RESULTS_REPORT.md` 里找到出处。
-- 用到的公开资料（论文、网页、数据、代码）都记在 `reports/SOURCE_LEDGER.md`，写明作者或机构、题名、出处或网址、访问日期、用在哪里；核实不了的标「待补证」。
+- 结果分三种状态，写清楚是哪一种：代码已写、程序已运行、结果已核验。只有已核验的结果才能写进论文。
+- 不编造数值、数据、文献或结论。论文里的每个数都要能在 `results/` 或报告里找到出处。
+- 用到的公开资料（论文、网页、数据、代码）都记在 `reports/SOURCE_LEDGER.md`：作者或机构、题名、出处或网址、访问日期、用在哪里；核实不了的标「待补证」。
+- 把 AI 参与了什么（哪一步、做了什么、人怎么核对的）记在 `reports/AI_USAGE.md`，论文按竞赛规则如实披露。
 - 论文、代码、图里不出现队员姓名、学校、队号、邮箱、带用户名的绝对路径等身份信息。
-- 只做当前步骤的事，前面步骤的产出有问题就写进你的报告，不要悄悄改掉别人的结论。
+- 只做当前步骤的事。前面步骤的产出有问题，写进你的报告并说明属于哪一步，不要悄悄改掉别人的结论。
+- 用通俗的话解释，同时保留专业的模型名、数学结构和求解算法名，方便人判断。
 
 用户的补充要求（可能为空）：{{input.notes}}
 """
@@ -20,7 +24,7 @@ preamble = """
 [[inputs]]
 key = "problem"
 label = "赛题"
-help = "题目 PDF 和附件数据，一起拖进来。"
+help = "题目 PDF 和附件数据，一起拖进来。几道题都放进来也可以，下面选「帮我选题」。"
 kind = "files"
 required = true
 
@@ -30,6 +34,13 @@ label = "竞赛"
 kind = "choice"
 options = ["CUMCM", "华为杯", "MCM/ICM", "其他"]
 help = "CUMCM 是全国大学生数学建模竞赛（国赛），MCM/ICM 是美赛。"
+
+[[inputs]]
+key = "picked"
+label = "选题"
+kind = "choice"
+options = ["已经选好", "帮我选题"]
+help = "放进来的是一道题还是几道题。"
 
 [[inputs]]
 key = "language"
@@ -50,7 +61,7 @@ when = "contest=CUMCM"
 key = "notes"
 label = "你的想法"
 kind = "long"
-help = "可选：想用的模型、重点、已有的思路或限制。"
+help = "可选：想用的模型、重点、已有的思路、时间安排或限制。"
 
 [[inputs]]
 key = "identity"
@@ -64,56 +75,147 @@ effort = "high"
 attempts = 2
 timeout_min = 120
 
-
+[[steps]]
+id = "select"
+title = "选题"
+summary = "比较几道题的数据、模型适配、风险和工作量，你来选"
+agent = "claude"
+when = "picked=帮我选题"
+prompt = """
+文件夹里有几道候选题。逐题提炼：核心任务（一句话）、子问题和各自难点、附件数据（规模、格式、清洗工作量）、大致属于哪类问题、可能用到的模型。
+然后按「数据可用性、模型把握、可展示的亮点、主要风险、工作量」五个维度做对比表，写进 `reports/PROBLEM_SELECTION.md`，并给出你的推荐和理由。
+"""
+outputs = ["reports/PROBLEM_SELECTION.md"]
+decide = { options = "reports/problem_options.json", question = "做哪一道题？" }
 
 [[steps]]
 id = "analysis"
-title = "读题与建模方案"
-summary = "拆解子问题，定假设、变量、目标和约束，选模型和求解路线"
+title = "读题与拆解"
+summary = "拆出子问题，统一变量编号，摸清数据，画出子问题之间的关系"
 agent = "claude"
 skill = "mathmodel-contest-suite:2analysis-modeling"
+needs = ["select"]
 prompt = """
-仔细读题和全部附件，完成赛题分析与建模设计：
+精读题目和全部附件（如果前面选过题，只做选定的那道）：
 
-1. 拆解子问题。每个子问题写清：已知条件和数据、要求的对象（决策变量或预测目标）、目标函数或评价指标、约束、和其他子问题的关系、准备用什么图表展示结果。
-2. 找出题目里有歧义的表述，列出可能的理解，用快速估算比较，选定一种并说明理由。
-3. 理解数据：规模、字段含义、缺失和异常、单位，需要派生哪些指标。
-4. 给每个子问题定模型：符号与变量、假设（每条都要能说清必要性）、目标函数、约束、求解方法、预期输出、结果怎么检验。至少说明一个备选模型和不选它的原因。
-5. 写 `plan.md`：总体技术路线、每个子问题的模型、各阶段的产物和风险。
+1. 拆出子问题。每个子问题写清：已知条件和数据、要求什么（决策变量或预测对象）、目标或评价指标、约束、和其他子问题的依赖、打算用什么图表展示结果。
+2. 找出有歧义的表述，列出可能的理解，用快速估算比较后选定一种并说明理由。
+3. 给关键变量统一编号和单位，后面所有步骤沿用。
+4. 扫描数据：规模、字段含义、缺失和异常、单位，需要派生哪些指标。
+5. 画出子问题之间的关系（文字或 mermaid 即可），写出每个子问题目标函数的雏形。
 
-把以上写成 `reports/ANALYSIS_MODELING_REPORT.md`，并建立 `reports/SOURCE_LEDGER.md`（没用到公开资料也要写明核查结论）。
+写成 `reports/ANALYSIS.md`，建立 `reports/SOURCE_LEDGER.md`，初始化 `reports/STATE.md`。
+最后把子问题列表写成 JSON 数组存到 `reports/subproblems.json`，每项 `{"id": "Q1", "title": "问题一：一句话概括"}`，id 依次为 Q1、Q2……，后面会按这个列表逐个求解。
 """
-outputs = ["reports/ANALYSIS_MODELING_REPORT.md", "reports/SOURCE_LEDGER.md", "plan.md"]
+outputs = ["reports/ANALYSIS.md", "reports/subproblems.json", "reports/SOURCE_LEDGER.md", "reports/STATE.md"]
 checks = [
-  { kind = "contains", path = "reports/ANALYSIS_MODELING_REPORT.md", pattern = "(问题|Problem|Question)\\s*[一二三四五六1-6]", message = "建模报告按子问题分别给出了模型" },
-  { kind = "contains", path = "reports/ANALYSIS_MODELING_REPORT.md", pattern = "假设|[Aa]ssumption", message = "建模报告写了模型假设" },
+  { kind = "contains", path = "reports/subproblems.json", pattern = "\"Q1\"", message = "子问题列表从 Q1 开始编号" },
+]
+
+[[steps]]
+id = "models"
+title = "建模路线"
+summary = "为每个子问题比较候选模型、做小样验证，给出几条完整路线让你选"
+agent = "claude"
+prompt = """
+为每个子问题给出候选模型，并说明选择依据：
+
+1. 先判断每个子问题属于哪类问题（预测、优化、评价、分类、机理或仿真等）。
+2. 每个子问题列 2–4 个候选模型，用决策矩阵比较：与题意的贴合度、对数据的要求、能否求解和求解成本、可解释性、主要风险。写出每个模型可以查证的专业名称。
+3. 对最有希望的候选，用真实数据跑一个很小的试验（放在 `code/demo/`），确认能跑通、量级合理，把结果写进报告。
+4. 检查各子问题的模型能不能串成一条前后一致的路线（同一批变量、同一套假设）。
+5. 换位思考：假设你是挑刺的评委，写出这条路线最容易被质疑的三点和应对办法。
+
+写成 `reports/MODEL_SELECTION.md`，然后组合出 2–4 条完整的建模路线供用户选择。
+"""
+outputs = ["reports/MODEL_SELECTION.md"]
+decide = { options = "reports/route_options.json", question = "采用哪条建模路线？" }
+
+[[steps]]
+id = "foundation"
+title = "假设、符号与术语"
+summary = "每条假设都有依据和状态，符号表和术语表全文统一"
+agent = "claude"
+prompt = """
+按选定的路线，整理后面所有步骤共用的基础：
+
+1. 模型假设：每条写清为什么需要、有什么依据（题目、数据或文献），以及状态（已验证 / 待验证 / 无法验证但影响有限）。待验证的假设注明在哪一步验证。
+2. 符号表：符号、含义、单位、首次出现的子问题，沿用 `reports/ANALYSIS.md` 里的变量编号。
+3. 术语表：专业名词和它在本文中的确切含义。
+4. 自查：符号不重名、单位一致、每条假设都能对应到用它的模型。
+
+写成 `reports/FOUNDATION.md`，更新 `reports/STATE.md`。
+"""
+outputs = ["reports/FOUNDATION.md"]
+checks = [
+  { kind = "contains", path = "reports/FOUNDATION.md", pattern = "假设|[Aa]ssumption", message = "写了模型假设" },
+  { kind = "contains", path = "reports/FOUNDATION.md", pattern = "符号|[Nn]otation", message = "写了符号表" },
 ]
 gate = true
 
 [[steps]]
-id = "coding"
-title = "编程求解与数据图"
-summary = "实现模型、跑出结果、画论文用的数据图，记录可复现的运行方式"
+id = "solve"
+title = "子问题建模与求解"
+summary = "完整建模、写代码求解、核验结果、做本问的灵敏度"
 agent = "codex"
 skill = "mathmodel-contest-suite:3coding-visual"
+each = { from = "reports/subproblems.json", max = 8 }
+timeout_min = 180
 prompt = """
-按 `reports/ANALYSIS_MODELING_REPORT.md` 和 `plan.md` 实现全部模型：
+这一步只做 {{item.title}}（编号 {{item.id}}），按选定路线和 `reports/FOUNDATION.md`：
 
-1. 每个子问题一个程序（如 `code/problem1.py`），公共部分放 `code/utils.py`；提供一个统一入口 `code/run_all.py`，从原始数据一路跑到全部结果和图。固定随机种子，记录依赖和版本（`code/requirements.txt` 或同等文件）。
-2. 真正运行它，把结果表写进 `results/`（CSV 或 JSON），把关键数值、运行命令、用时和退出状态写进 `reports/RESULTS_REPORT.md`。
-3. 画论文用的数据图到 `figures/`（矢量 PDF 优先）：每张图先想清楚它要证明哪句结论，再选图型；配色统一、色盲友好，字号在缩放到正文宽度后仍清晰。流程图、技术路线图这类非数据图不归这一步。
-4. 做模型检验和灵敏度分析，结果和图同样放进 `results/`、`figures/`，并写进报告。
-5. 写 `reports/SUPPORTING_MATERIALS_MANIFEST.md`：每个程序的用途、运行方式、输入输出、对应哪个问题、结果在论文哪里用到。
+1. 把模型写完整：目标函数、约束、参数取值和来源。
+2. 实现求解：程序放 `code/{{item.id}}.py`（公共部分放 `code/utils.py`），固定随机种子；在 `code/run_all.py` 里登记本问的入口。
+3. 真正运行，结果写到 `results/{{item.id}}/`（CSV 或 JSON），记下运行命令、用时和退出状态。
+4. 核验：检查约束是否满足、单位和量级是否合理；和一个简单的基线方法（比如贪心或均值）比较，说明好在哪里。
+5. 对本问最关键的 2–3 个参数做灵敏度分析，参数的变动范围要有依据（测量精度、估计区间或文献）。
+6. 画本问的结果图到 `figures/`（矢量 PDF），每张图先想清楚它证明哪句结论。
+7. 讨论结果的实际含义：结论在现实中说得通吗？
 
-不要修改建模结论；发现模型跑不通或结果明显不合理，在报告里写清楚原因和你的处理。
+写成 `reports/{{item.id}}.md`，开头写明结果状态（已运行 / 已核验），更新 `reports/STATE.md`。
 """
-outputs = ["code/run_all.py", "results", "reports/RESULTS_REPORT.md", "reports/SUPPORTING_MATERIALS_MANIFEST.md"]
+outputs = ["code/{{item.id}}.py", "results/{{item.id}}", "reports/{{item.id}}.md"]
 checks = [
-  { kind = "exists", path = "figures/*.pdf", min = 3 },
-  { kind = "contains", path = "reports/RESULTS_REPORT.md", pattern = "灵敏度|敏感性|[Ss]ensitivity", message = "结果报告包含灵敏度分析" },
+  { kind = "contains", path = "reports/{{item.id}}.md", pattern = "已核验|[Vv]erified", message = "本问的结果已核验" },
+  { kind = "contains", path = "reports/{{item.id}}.md", pattern = "灵敏度|敏感性|[Ss]ensitivity", message = "做了本问的灵敏度分析" },
   { kind = "absent", path = "code", input = "identity", message = "代码里没有身份信息" },
 ]
-timeout_min = 180
+
+[[steps]]
+id = "robustness"
+title = "稳健性与整体检验"
+summary = "先列风险再选检验方法，跑出可复核的记录，讲清结论的适用范围"
+agent = "codex"
+prompt = """
+在各子问题都已核验的基础上，做整体的验证与稳健性分析：
+
+1. 先列出最可能让结论站不住的风险（数据误差、假设不成立、参数不确定、模型设定）。
+2. 为每个风险选合适的检验（扰动、交叉验证、对照实验、极端情形、换一种模型对比），事先定好指标和判断标准。
+3. 运行并保存可复核的记录（`results/robustness/`），只画能回答问题的图。
+4. 写清结论在什么范围内成立、什么情况下会失效。
+5. 回头检查：灵敏度结果有没有推翻 `reports/FOUNDATION.md` 里的某条假设？有就写明并在 `reports/STATE.md` 标出受影响的结果。
+
+写成 `reports/ROBUSTNESS.md`，补全 `code/run_all.py` 让它能从原始数据复现全部结果，并写 `reports/SUPPORTING_MATERIALS_MANIFEST.md`（每个程序的用途、运行方式、输入输出、对应哪一问）。
+"""
+outputs = ["reports/ROBUSTNESS.md", "code/run_all.py", "reports/SUPPORTING_MATERIALS_MANIFEST.md"]
+checks = [
+  { kind = "exists", path = "figures/*.pdf", min = 3 },
+]
+
+[[steps]]
+id = "evaluation"
+title = "模型评价与推广"
+summary = "只写有证据的优点，从证据缺口提炼局限，改进写成可做的实验"
+agent = "claude"
+prompt = """
+写模型评价，写成 `reports/EVALUATION.md`：
+
+1. 优点：每条都要指向具体的结果或检验，没有证据的不写。
+2. 局限：从验证中发现的问题和没能验证的假设里提炼，坦白说明影响有多大。
+3. 改进：写成能做的实验（改什么、预期怎样、怎么判断），不要空话。
+4. 推广：说明在什么条件下能用到别的场景，并用一个具体的例子说明，不要罗列领域。
+"""
+outputs = ["reports/EVALUATION.md"]
 
 [[steps]]
 id = "diagrams"
@@ -122,10 +224,11 @@ summary = "画技术路线、算法流程等非数据图"
 agent = "claude"
 skill = "mathmodel-contest-suite:4drawio"
 optional = true
+needs = ["foundation"]
 prompt = """
 为论文画必要的非数据图：总体技术路线图（`figures/fig_roadmap`），以及确有需要的子问题求解流程图、数据处理流程或指标体系图。
-用 draw.io 格式保存源文件（`figures/*.drawio`），并导出为 PDF；导不出 PDF 时，在报告里说明。节点文字简短，样式统一，箭头不交叉，文字语言和论文一致。
-不要重画已有的数据图。把每张图的用途和打算放在论文哪一节写进 `reports/DRAWIO_REPORT.md`。
+用 draw.io 格式保存源文件（`figures/*.drawio`）并导出 PDF；导不出 PDF 时在报告里说明。节点文字简短，样式统一，箭头不交叉，文字语言和论文一致。
+不要重画数据图。把每张图的用途和打算放在论文哪一节写进 `reports/DRAWIO_REPORT.md`。
 """
 outputs = ["figures/*.drawio", "reports/DRAWIO_REPORT.md"]
 
@@ -135,25 +238,27 @@ title = "撰写论文（LaTeX）"
 summary = "按竞赛格式写完整论文并编译成 PDF"
 agent = "claude"
 skill = "mathmodel-contest-suite:5writing"
-needs = ["coding", "diagrams"]
+needs = ["evaluation", "diagrams"]
+timeout_min = 180
 prompt = """
 用 LaTeX 写完整的竞赛论文，放在 `paper/`：入口 `paper/main.tex`，各节放在 `paper/sections/`，用 XeLaTeX 编译（跑两遍以解决交叉引用），得到 `paper/main.pdf`。
 
-结构：摘要（最后写）、问题重述、问题分析、模型假设、符号说明、各问题的模型建立与求解（每个问题一节）、模型检验与灵敏度分析、模型评价与推广、参考文献、附录（支撑材料清单和完整程序）。
+结构：摘要（最后写）、问题重述、问题分析、模型假设、符号说明、各问题的模型建立与求解（每个子问题一节）、模型检验与稳健性分析、模型评价与推广、参考文献、附录（支撑材料清单、完整程序、AI 使用说明）。
 
 要求：
-- 只用 `reports/` 和 `results/` 里的结论和数值；图从 `figures/` 引用，每张图表都有编号、题注，并在正文里引用和解释。
-- 公式里的每个符号在符号说明或首次出现处解释。
+- 只用 `reports/` 和 `results/` 里已核验的结论和数值；图从 `figures/` 引用，每张图表都有编号和题注，并在正文里引用和解释。
+- 公式里的每个符号在符号说明或首次出现处解释，和 `reports/FOUNDATION.md` 一致。
 - 参考文献和 `reports/SOURCE_LEDGER.md` 一致，每条都在正文中被引用。
 - 摘要要写清每个问题用了什么方法、得到了什么具体结果。
+- 按 `reports/AI_USAGE.md` 和竞赛规则写 AI 使用说明。
 - 不要留下 TODO、待补充之类的占位文字。
 
 竞赛的格式规则：
 - CUMCM（国赛）：A4，页边距不小于 2.5 cm；不要目录；前两页为承诺书和编号专用页（草稿阶段放占位页，不要自己编写它们的内容），第 3 页是只有一页的中文摘要，页码从摘要页开始为 1 并连续；正文加参考文献控制在 30 页以内，最好 27–29 页；全文匿名。
-- MCM/ICM（美赛）：英文，第一页是 Summary Sheet，全文不超过 25 页。
+- MCM/ICM（美赛）：英文，第一页是 Summary Sheet，全文不超过 25 页（按当年规则核对 AI 使用报告是否计入页数）。
 - 其他竞赛：按题目文件里的格式要求。
 """
-outputs = ["paper/main.tex", "paper/main.pdf"]
+outputs = ["paper/main.tex", "paper/main.pdf", "reports/AI_USAGE.md"]
 checks = [
   { kind = "command", run = "xelatex -interaction=nonstopmode -halt-on-error main.tex && xelatex -interaction=nonstopmode -halt-on-error main.tex", cwd = "paper", timeout_min = 10, message = "论文能用 XeLaTeX 编译通过" },
   { kind = "absent", path = "paper", pattern = "TODO|PLACEHOLDER|待补充|待续写|示例数据|\\?\\?", message = "论文里没有占位文字或未解析的引用" },
@@ -161,44 +266,70 @@ checks = [
   { kind = "absent", path = "paper/main.tex", pattern = "\\\\tableofcontents", message = "国赛论文没有目录", when = "contest=CUMCM" },
   { kind = "pdf_pages", path = "paper/main.pdf", max = 25, when = "contest=MCM/ICM" },
 ]
-timeout_min = 180
 
 [[steps]]
 id = "verify"
-title = "验收"
-summary = "按竞赛规则逐项检查论文、结果和程序，发现问题退回写作"
+title = "验收与跨阶段回检"
+summary = "逐项核对规则、数值、引用和前后一致性，问题退回出错的那一步"
 agent = "claude"
 skill = "mathmodel-contest-suite:6verity"
-fixes = "writing"
+fixes = ["writing", "solve", "robustness", "foundation", "analysis"]
 attempts = 3
 prompt = """
-对照竞赛规则和前面各阶段的产物，逐项验收（只检查和记录，小的笔误可以直接改，涉及内容的问题交回写作步骤）：
+对照竞赛规则和前面各步的产物逐项验收。小的笔误可以直接改；涉及内容的问题要退回到出错的那一步：
 
-1. 结构：章节齐全、顺序正确，子问题数量和建模报告一致。
-2. 图表：每张引用的图都存在，每张图表都在正文里被引用并有解释，题注贴切。
-3. 数值一致：论文里的关键数值逐个和 `results/`、`reports/RESULTS_REPORT.md` 核对。
-4. 可复现：运行 `code/run_all.py`（耗时太长时运行其中能在合理时间内完成的部分），确认能跑通、关键结果一致。
-5. 引用：正文引用、参考文献和来源台账三者一致。
-6. 格式：按 `{{input.contest}}` 的规则检查页数、目录、页码、摘要页、页边距；国赛的论文状态是「{{input.status}}」，提交状态下官方页面必须已替换占位页。
-7. 写作：没有占位文字、没有正文里暴露内部文件名或路径、没有只报数不解释的地方。
+1. 前后一致：符号有没有中途变了含义？有没有论文里用了但 `reports/FOUNDATION.md` 没写的隐含假设？各问的模型是否属于选定的路线？灵敏度结果有没有推翻某条假设？
+2. 数值：论文里的关键数值逐个和 `results/`、各问报告核对；`reports/STATE.md` 里标为需要重跑的结果有没有被引用。
+3. 可复现：运行 `code/run_all.py`（太久时运行能在合理时间内完成的部分），确认跑通且关键结果一致。
+4. 图表：每张引用的图都存在、都在正文中被引用和解释。
+5. 引用：正文引用、参考文献和来源台账三者一致；AI 使用说明和 `reports/AI_USAGE.md` 一致。
+6. 格式：按 {{input.contest}} 的规则检查页数、目录、页码、摘要页、页边距；国赛论文状态是「{{input.status}}」，提交状态下官方页面必须已替换占位页。
+7. 写作：没有占位文字，没有在正文里暴露内部文件名或路径，没有只报数不解释的地方。
 
-写 `reports/VERIFY_REPORT.md`：逐项列出检查结果和发现的问题（每个问题写明位置和改法），最后单独一行写结论：`结论：通过` 或 `结论：未通过`。只要还有会影响得分或违反规则的问题，就写未通过。
+写 `reports/VERIFY_REPORT.md` 逐项记录。然后把结论写成 `reports/verify.json`：
+`{"pass": true 或 false, "issues": [{"step": "出错的步骤", "problem": "问题", "fix": "怎么改", "blocking": true 或 false}]}`
+`step` 填出错的步骤：`writing`、`robustness`、`foundation`、`analysis`，或某个子问题 `solve:Q2`。只有会影响得分或违反规则的问题才标 `blocking: true`；有任何这样的问题，`pass` 就是 false。
 """
-outputs = ["reports/VERIFY_REPORT.md"]
+outputs = ["reports/VERIFY_REPORT.md", "reports/verify.json"]
 checks = [
-  { kind = "contains", path = "reports/VERIFY_REPORT.md", pattern = "结论[:：]\\s*通过", message = "验收结论为通过（未通过的问题清单见 reports/VERIFY_REPORT.md，请逐条修正）" },
+  { kind = "verdict", path = "reports/verify.json" },
+]
+
+[[steps]]
+id = "panel"
+title = "独立评审团"
+summary = "几位评审各自独立审稿，汇总成修改清单，你来定稿"
+agent = "claude"
+skill = "mathmodel-contest-suite:bzd-review-paper"
+optional = true
+fixes = ["writing"]
+prompt = """
+论文已经过验收。现在做定稿前的最后一读：通读 `paper/main.pdf`，把你认为最值得在定稿前改的地方（不超过五处，每处写清位置和改法）写进 `reports/PANEL.md`。
+另有几位评审会各自独立审稿，他们的意见会自动汇总；不要声称官方奖项或确切名次。
+"""
+outputs = ["reports/PANEL.md"]
+checks = [
+  { kind = "review", files = ["paper/main.pdf", "reports/"], rubric = "数学严谨性：模型推导是否正确、假设是否合理且被用到、符号是否一致、结论是否有证据支撑。" },
+  { kind = "review", files = ["paper/main.pdf", "reports/"], rubric = "建模贡献：是否抓住了题目的关键、模型选择是否有说服力、是否比简单方法更好、亮点是否突出。" },
+  { kind = "review", files = ["paper/main.pdf", "code/", "results/"], rubric = "代码与可复现性：结果能否由程序复现、论文中的数值是否与结果一致、支撑材料是否完整。", agent = "codex" },
+  { kind = "review", files = ["paper/main.pdf"], rubric = "表达与图表：摘要是否一页内讲清方法和结果、图表是否清楚且被解释、行文是否流畅、格式是否符合本竞赛要求。" },
 ]
 gate = true
 
 [[steps]]
-id = "review"
-title = "按评分标准自评"
-summary = "像评委一样打分，给出最该改的地方"
+id = "retro"
+title = "赛后复盘"
+summary = "总结值得保留的做法和走过的弯路，你认可的经验下次比赛会带上"
 agent = "claude"
-skill = "mathmodel-contest-suite:bzd-review-paper"
 optional = true
+needs = ["verify"]
 prompt = """
-像这项竞赛的评委一样审阅 `paper/main.pdf`：先根据题目定出评分要点（每个问题的关键点、模型合理性、结果正确性、检验与灵敏度、摘要质量、写作与格式），再逐项打分并说明依据，给出总评和最值得优先修改的五处（每处写清位置和改法）。
-不要声称官方奖项或确切名次。写入 `reports/REVIEW.md`。
+比赛结束了。回顾这次的全过程（`plan.md`、`reports/` 里的各阶段报告、`reports/STATE.md` 的变化、被退回修改的记录），写 `reports/RETRO.md`：
+
+1. 哪些选择和做法值得下次沿用（具体到场景，比如「数据量小时先用 X 做基线」）。
+2. 哪些地方走了弯路，原因是什么，下次怎么提前避免。
+3. 时间花在哪里，哪一步最费时，下次怎么安排。
+
+每条写成一两句、能直接拿来用的经验，最后单独列一节「建议保留的经验」，用短条目列出。
 """
-outputs = ["reports/REVIEW.md"]
+outputs = ["reports/RETRO.md"]

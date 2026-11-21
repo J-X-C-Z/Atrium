@@ -53,6 +53,47 @@ fn user_dir() -> Option<PathBuf> {
     Some(dirs::config_dir()?.join("Atrium").join("workflows"))
 }
 
+/// Lessons kept from earlier runs of template `id`, given to new runs.
+pub fn experience_file(id: &str) -> Option<PathBuf> {
+    Some(user_dir()?.join(format!("{id}.experience.md")))
+}
+
+pub fn experience(id: &str) -> Option<String> {
+    std::fs::read_to_string(experience_file(id)?)
+        .ok()
+        .filter(|t| !t.trim().is_empty())
+}
+
+/// The "lessons worth keeping" section of a retrospective: what follows a
+/// heading naming it, up to the next heading of the same or a higher level.
+fn kept_lessons(retro: &str) -> Option<String> {
+    let mut lines = retro.lines();
+    let mut level = 0;
+    for line in lines.by_ref() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#')
+            && (trimmed.contains("建议保留的经验")
+                || trimmed.to_lowercase().contains("lessons worth keeping"))
+        {
+            level = trimmed.chars().take_while(|c| *c == '#').count();
+            break;
+        }
+    }
+    if level == 0 {
+        return None;
+    }
+    let mut out = Vec::new();
+    for line in lines {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#') && trimmed.chars().take_while(|c| *c == '#').count() <= level {
+            break;
+        }
+        out.push(line);
+    }
+    let text = out.join("\n").trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
 fn run_file(dir: &Path) -> PathBuf {
     dir.join(".atrium").join("run.json")
 }
@@ -299,8 +340,9 @@ impl Workspace {
                 dir.join(".atrium").join("workflow.toml"),
                 template.to_toml(),
             )?;
-            let run = Run::new(template.clone(), values, &skip, now_ms())
+            let mut run = Run::new(template.clone(), values, &skip, now_ms())
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
+            run.experience = experience(&template.id);
             save_run(&dir, &run)?;
             Ok(run)
         })();
@@ -349,9 +391,31 @@ impl Workspace {
         cx.notify();
     }
 
-    pub fn approve_step(&mut self, dir: &Path, step: &str, cx: &mut Context<Self>) {
+    /// Lets the run go on past a stop, with the option picked there (by
+    /// id, from the step's options file) and a note for later steps.
+    pub fn approve_step(
+        &mut self,
+        dir: &Path,
+        step: &str,
+        choice: Option<String>,
+        note: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let picked = choice.and_then(|id| {
+            let run = load_run(dir)?;
+            let file = run.options_file(step)?;
+            let text = std::fs::read_to_string(dir.join(file)).ok()?;
+            atrium_workflow::read_choices(&text)
+                .into_iter()
+                .find(|c| c.id == id)
+        });
         self.change_run(dir, cx, |run, now| {
-            run.approve(step, now).map_err(|e| e.to_string())
+            run.approve(step, picked, note, now).map_err(|e| match e {
+                atrium_workflow::run::RunError::ChoiceNeeded(_) => {
+                    t("Pick one of the options first.").to_string()
+                }
+                other => other.to_string(),
+            })
         });
     }
 
@@ -388,6 +452,47 @@ impl Workspace {
         });
     }
 
+    /// Keeps a finished run's retrospective lessons for the next runs of
+    /// its template (appended, dated, to the template's experience file).
+    pub fn keep_lessons(&mut self, dir: &Path, cx: &mut Context<Self>) {
+        let Some(run) = load_run(dir) else { return };
+        let lessons = std::fs::read_to_string(dir.join("reports").join("RETRO.md"))
+            .ok()
+            .and_then(|t| kept_lessons(&t));
+        let Some(lessons) = lessons else {
+            cx.emit(Notice::Error(
+                t("The retrospective has no lessons worth keeping section.").into(),
+            ));
+            return;
+        };
+        let Some(file) = experience_file(&run.template.id) else {
+            return;
+        };
+        let title = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let mut text = std::fs::read_to_string(&file).unwrap_or_default();
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&format!("\n## {title}\n\n{lessons}\n"));
+        let written = file
+            .parent()
+            .map(std::fs::create_dir_all)
+            .transpose()
+            .and_then(|_| std::fs::write(&file, text));
+        match written {
+            Ok(()) => cx.emit(Notice::Success(tf(
+                "Kept. The next {name} runs start with these lessons; edit them in {path}.",
+                &[("name", &run.template.name), ("path", &file.display())],
+            ))),
+            Err(error) => cx.emit(Notice::Error(error.to_string())),
+        }
+        cx.notify();
+    }
+
     /// Drops a run from the list; its folder stays.
     pub fn forget_run(&mut self, dir: &Path, cx: &mut Context<Self>) {
         self.settings.workflow_runs.retain(|d| d != dir);
@@ -403,6 +508,16 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_lessons_section_is_taken_from_a_retrospective() {
+        let retro = "# 复盘\n## 弯路\n- 第二天才清洗数据\n## 建议保留的经验\n- 数据先清洗再建模\n- 每问先做基线\n### 细节\n- 图用 PDF\n## 时间\n- 写作太晚\n";
+        assert_eq!(
+            kept_lessons(retro).as_deref(),
+            Some("- 数据先清洗再建模\n- 每问先做基线\n### 细节\n- 图用 PDF")
+        );
+        assert_eq!(kept_lessons("# 复盘\n没有那一节"), None);
+    }
 
     #[test]
     fn inputs_are_copied_without_clobbering() {
