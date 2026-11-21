@@ -46,12 +46,15 @@ mod projects;
 mod schedules;
 #[path = "workspace_sync.rs"]
 mod sync;
+#[path = "workspace_sync_view.rs"]
+mod sync_view;
 #[path = "workspace_updates.rs"]
 mod updates;
 pub use acp::{AcpAgent, AgentStatus, CODEX};
 pub use devices::{Device, DeviceStatus};
 pub use projects::{Activity, ActivityKind, Room, StreamState, StreamView, activities};
 pub use sync::SyncRuntime;
+pub use sync_view::DeviceFilter;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
@@ -179,6 +182,10 @@ pub struct Workspace {
     pub doc_reports: HashMap<String, Vec<(std::path::PathBuf, String)>>,
     /// Folded runs of steps the user opened or closed, by their first item.
     pub step_folds: HashMap<String, bool>,
+    /// Which device's chats the list shows.
+    pub device_filter: DeviceFilter,
+    /// The pairing code shown in Settings, and when it was made.
+    pub pairing: Option<(String, Instant)>,
     /// Turns that ended in chats not open, by chat: the list shows the count.
     pub unread: HashMap<String, usize>,
     /// Steps in an open run whose full card is shown.
@@ -298,6 +305,8 @@ impl Workspace {
             doc_reports: HashMap::new(),
             step_folds: HashMap::new(),
             unread: HashMap::new(),
+            device_filter: DeviceFilter::default(),
+            pairing: None,
             open_steps: Default::default(),
             preview_request: None,
             update: None,

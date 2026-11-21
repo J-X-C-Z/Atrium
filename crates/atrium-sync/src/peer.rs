@@ -227,6 +227,15 @@ impl PeerClient {
         })
     }
 
+    /// Trades a pairing code shown on that device for a lasting token.
+    pub fn pair_join(&self, code: &str) -> Result<String, PeerError> {
+        let answer = self.post("/v1/sync/pair/join", &serde_json::json!({ "code": code }))?;
+        answer["token"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| PeerError::Transport("pairing returned no token".into()))
+    }
+
     fn get(&self, path: &str) -> Result<serde_json::Value, PeerError> {
         let mut request = self.agent.get(&format!("{}{path}", self.base));
         if let Some(token) = &self.token {

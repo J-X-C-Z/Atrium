@@ -683,6 +683,7 @@ fn body(
     });
     let next = next_steps_strip(workspace, cx);
     let reports = doc_reports_strip(workspace, cx);
+    let offline = offline_strip(workspace, cx);
     ChatContainer::new(messages)
         .composer(
             div()
@@ -690,11 +691,49 @@ fn body(
                 .flex()
                 .flex_col()
                 .gap_2()
+                .children(offline)
                 .children(next)
                 .children(reports)
                 .child(composer_column(composer)),
         )
         .into_any_element()
+}
+
+/// The shown chat lives on a device that is offline: what shows is the last
+/// copy, and nothing can be sent until it is back.
+fn offline_strip(workspace: &Entity<Workspace>, cx: &App) -> Option<AnyElement> {
+    let device = workspace.read(cx).offline_owner()?;
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    Some(
+        div()
+            .w_full()
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(COLUMN))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_1p5()
+                    .rounded(theme.radius(Radius::Md))
+                    .bg(colors.warning.opacity(0.12))
+                    .text_size(theme.text_size(TextSize::Sm))
+                    .child(
+                        Icon::new(IconName::WifiOff)
+                            .size(IconSize::Xs)
+                            .color(colors.warning),
+                    )
+                    .child(div().flex_1().min_w_0().child(tf(
+                        "{device} is offline. This is the copy from when it was last seen, read-only; you can continue once it is back.",
+                        &[("device", &device)],
+                    ))),
+            )
+            .into_any_element(),
+    )
 }
 
 /// Documents you edited and saved, whose changes go with your next message.
@@ -1059,6 +1098,18 @@ fn backend_status(ws: &Workspace, backend: &str) -> Option<&'static str> {
 
 /// "Claude Code is ready in ~/app", or why it is not.
 fn readiness(ws: &Workspace, folder: &str) -> String {
+    if let Some(device) = ws.offline_owner() {
+        return tf(
+            "{device} is offline. This conversation has not been copied here yet; it shows once {device} is back.",
+            &[("device", &device)],
+        );
+    }
+    if let Some(id) = ws.active_thread_id()
+        && ws.sync_is_remote(id)
+    {
+        let device = ws.chat_device(id).unwrap_or_default();
+        return tf("Runs on {device}", &[("device", &device)]);
+    }
     let backend = ws.view_backend();
     let name = crate::agents::backend_label(backend);
     match backend_status(ws, backend) {

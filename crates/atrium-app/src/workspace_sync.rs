@@ -897,10 +897,11 @@ impl Workspace {
                         return None;
                     }
                     sync.polling = true;
+                    // Offline devices are asked too, so one that comes back
+                    // shows as online within a round, not at the next discovery.
                     let devices: Vec<(String, PeerClient)> = workspace
                         .devices
                         .iter()
-                        .filter(|device| device.status == super::DeviceStatus::Online)
                         .map(|device| (device.id.clone(), sync_peer(&device.node)))
                         .collect();
                     Some((
@@ -916,10 +917,13 @@ impl Workspace {
                     .background_executor()
                     .spawn(async move {
                         let mut rounds = Vec::new();
+                        let mut reached = Vec::new();
                         for (device, peer) in devices {
                             let Ok(directory) = peer.directory() else {
+                                reached.push((device, false));
                                 continue;
                             };
+                            reached.push((device.clone(), true));
                             if directory.install_id == me {
                                 continue;
                             }
@@ -935,10 +939,25 @@ impl Workspace {
                             let threads = peer.threads(None).unwrap_or_default();
                             rounds.push((device, directory.install_id, threads, merged.ok()));
                         }
-                        rounds
+                        (rounds, reached)
                     })
                     .await;
+                let (rounds, reached) = rounds;
                 let _ = this.update(cx, |workspace, cx| {
+                    for (id, up) in reached {
+                        if let Some(device) = workspace.devices.iter_mut().find(|d| d.id == id) {
+                            match (&device.status, up) {
+                                (super::DeviceStatus::Online, false) => {
+                                    device.status =
+                                        super::DeviceStatus::Offline("did not answer".into());
+                                }
+                                (super::DeviceStatus::Offline(_), true) => {
+                                    device.status = super::DeviceStatus::Online;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     for (device, install, threads, applied) in rounds {
                         if applied.is_some() {
                             workspace.sync_merge_remote(device, install, threads);
@@ -1644,9 +1663,9 @@ impl Workspace {
                     );
                 }
                 Err(error) => {
-                    cx.emit(Notice::Error(crate::i18n::tf(
-                        "Could not move the conversation: {error}",
-                        &[("error", &error)],
+                    log::warn!("move from {device}: {error}");
+                    cx.emit(Notice::Error(super::sync_view::move_error_text(
+                        &error, &device,
                     )));
                 }
             });

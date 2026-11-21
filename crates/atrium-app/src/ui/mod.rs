@@ -923,7 +923,13 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let agents = self.agents_list(cx);
-        let devices = devices::section(&self.workspace, node_address, cx);
+        let devices = div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(devices::this_computer(&self.workspace, &self.extras, cx))
+            .child(devices::section(&self.workspace, node_address, cx))
+            .into_any_element();
         let phone = self.phone_section(cx);
         let schedules = self.schedules_section(cx);
         let editor = self.editor_section(cx);
