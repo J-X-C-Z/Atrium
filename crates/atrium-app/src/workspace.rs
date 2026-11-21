@@ -46,9 +46,12 @@ mod projects;
 mod schedules;
 #[path = "workspace_updates.rs"]
 mod updates;
+#[path = "workspace_workflows.rs"]
+mod workflows;
 pub use acp::{AcpAgent, AgentStatus, CODEX};
 pub use devices::{Device, DeviceStatus};
 pub use projects::{Activity, ActivityKind, Room, StreamState, StreamView, activities};
+pub use workflows::{RunEntry, TemplateSource};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
@@ -176,6 +179,10 @@ pub struct Workspace {
     pub doc_reports: HashMap<String, Vec<(std::path::PathBuf, String)>>,
     /// Folded runs of steps the user opened or closed, by their first item.
     pub step_folds: HashMap<String, bool>,
+    /// Workflow runs as last read from their folders.
+    pub workflow_runs: Vec<RunEntry>,
+    /// A template picked in the sidebar, for the start form to take up.
+    pub pick_template: Option<String>,
     /// Turns that ended in chats not open, by chat: the list shows the count.
     pub unread: HashMap<String, usize>,
     /// Steps in an open run whose full card is shown.
@@ -289,6 +296,8 @@ impl Workspace {
             doc_reports: HashMap::new(),
             step_folds: HashMap::new(),
             unread: HashMap::new(),
+            workflow_runs: Vec::new(),
+            pick_template: None,
             open_steps: Default::default(),
             preview_request: None,
             update: None,

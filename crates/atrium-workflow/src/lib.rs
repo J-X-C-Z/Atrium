@@ -100,7 +100,7 @@ pub enum InputKind {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Defaults {
-    /// A backend id, such as `codex` or `claude-code`.
+    /// A backend id, such as `codex` or `claude`.
     #[serde(default)]
     pub agent: Option<String>,
     #[serde(default)]

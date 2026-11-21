@@ -115,6 +115,7 @@ pub fn render(
 
     let now = Timestamp::now();
     let in_project = ws.project_root().is_some();
+    let in_workflows = matches!(ws.room, crate::workspace::Room::Workflows { .. });
     // Workstreams' sessions live in their project, not among the chats.
     let project_threads = ws.project_threads();
     let conversations: Vec<Conversation> = ws
@@ -228,34 +229,47 @@ pub fn render(
         .child({
             let switch = workspace.clone();
             div().flex_none().px_3().pb_2().child(
-                SegmentedControl::new("room", if in_project { "projects" } else { "chats" })
-                    .segment("chats", t("Chats"), Some(IconName::MessageSquare))
-                    .segment("projects", t("Projects"), Some(IconName::Layers))
-                    .size(ControlSize::Sm)
-                    .on_change(move |value, _, cx| {
-                        let projects = value.as_ref() == "projects";
-                        switch.update(cx, |ws, cx| {
-                            if projects {
-                                match ws
-                                    .settings
-                                    .active_project
-                                    .clone()
-                                    .or_else(|| ws.projects.first().map(|p| p.root.clone()))
-                                {
-                                    Some(root) => ws.enter_project(root, cx),
-                                    None => {
-                                        ws.room = crate::workspace::Room::Project {
-                                            root: std::path::PathBuf::new(),
-                                            stream: None,
-                                        };
-                                        cx.notify();
-                                    }
+                SegmentedControl::new(
+                    "room",
+                    if in_project {
+                        "projects"
+                    } else if in_workflows {
+                        "workflows"
+                    } else {
+                        "chats"
+                    },
+                )
+                .segment("chats", t("Chats"), Some(IconName::MessageSquare))
+                .segment("projects", t("Projects"), Some(IconName::Layers))
+                .segment("workflows", t("Workflows"), Some(IconName::Workflow))
+                .size(ControlSize::Sm)
+                .on_change(move |value, _, cx| {
+                    let projects = value.as_ref() == "projects";
+                    let workflows = value.as_ref() == "workflows";
+                    switch.update(cx, |ws, cx| {
+                        if workflows {
+                            ws.enter_workflows(None, cx);
+                        } else if projects {
+                            match ws
+                                .settings
+                                .active_project
+                                .clone()
+                                .or_else(|| ws.projects.first().map(|p| p.root.clone()))
+                            {
+                                Some(root) => ws.enter_project(root, cx),
+                                None => {
+                                    ws.room = crate::workspace::Room::Project {
+                                        root: std::path::PathBuf::new(),
+                                        stream: None,
+                                    };
+                                    cx.notify();
                                 }
-                            } else {
-                                ws.enter_chats(cx);
                             }
-                        })
-                    }),
+                        } else {
+                            ws.enter_chats(cx);
+                        }
+                    })
+                }),
             )
         })
         .when(in_project, |sidebar| {
@@ -289,7 +303,32 @@ pub fn render(
                     cx,
                 ))
         })
-        .when(!in_project, |sidebar| {
+        .when(in_workflows, |sidebar| {
+            let fresh = workspace.clone();
+            sidebar
+                .child(
+                    div().flex_none().px_3().pb_2().child(
+                        Button::new("new-run", t("New run"))
+                            .icon(IconName::Plus)
+                            .variant(ButtonVariant::Outline)
+                            .full_width()
+                            .on_click(move |_, _, cx| {
+                                fresh.update(cx, |ws, cx| ws.enter_workflows(None, cx))
+                            }),
+                    ),
+                )
+                .child(
+                    div()
+                        .id("workflow-scroll")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .px_2()
+                        .pb_2()
+                        .child(super::workflow::sidebar_list(workspace, cx)),
+                )
+        })
+        .when(!in_project && !in_workflows, |sidebar| {
             sidebar
                 .child(
                     div().flex_none().px_3().pb_2().child(

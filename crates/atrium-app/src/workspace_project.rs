@@ -46,6 +46,10 @@ pub enum Room {
         /// The workstream whose chat is open; the overview when `None`.
         stream: Option<String>,
     },
+    /// Workflows: the run shown, or the templates to start one from.
+    Workflows {
+        run: Option<PathBuf>,
+    },
 }
 
 /// How a workstream is doing, for its card.
@@ -595,7 +599,7 @@ impl Workspace {
     pub fn project_root(&self) -> Option<PathBuf> {
         match &self.room {
             Room::Project { root, .. } => Some(root.clone()),
-            Room::Chats => None,
+            Room::Chats | Room::Workflows { .. } => None,
         }
     }
 

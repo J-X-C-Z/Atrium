@@ -56,13 +56,36 @@ skill if it is installed. That is the only coupling.
   checks in words, the reasons from the last try, and the skill hint.
 - `builtin::all()`: the math modeling template (`builtin/mathmodel.toml`).
 
+**Built in the app (UI side):**
+
+- `workspace_workflows.rs` handles templates and runs on disk:
+  - **Templates:** the built-in and the user's templates
+    (`workflow_templates`, `copy_template`).
+  - **Runs:** `start_run` makes the run folder, copies the files into
+    `inputs/`, and writes the snapshot and `run.json`. It also keeps the
+    run list in settings (`workflow_runs`, `refresh_workflows`).
+  - **Your decisions on a run:** `approve_step`, `redo_step`,
+    `skip_step`, `pause_run`, `resume_run`, `stop_run` and `forget_run`.
+    Each loads the run, changes it and saves it atomically.
+- The **Workflows room** (`ui/workflow.rs`):
+  - The start form has a drop zone for files, choices, and private
+    inputs.
+  - Optional steps can be switched off.
+  - The run view is a timeline of steps. For each step it shows its
+    checks, its files (opened in the preview panel), the exact prompt, its
+    conversation, and the buttons approve, ask for changes, retry and skip.
+- `ui::workflow::RUNNER_READY` is `false` until the runner lands. While
+  it is false, the run view says so. Set it to `true` in your PR.
+
 **Yours:**
 
 1. The **runner**: it drives runs, starts agents, waits, checks and
    saves.
 2. The **runner's checks**: `command`, `pdf_pages` and `review`.
-3. **Storage and discovery** of templates and runs, with the API the UI
-   calls (section 5).
+3. **Storage**: the app already reads and writes templates and runs
+   (above). Add folder templates (`<folder>/.atrium/workflows/`), with the
+   command confirmation in section 3, and the `.atrium/log.jsonl` event
+   log.
 4. **The TeX environment**: detect it and say what is missing.
 
 The UI (the Workflows room, the template editor, the start dialog, the run
@@ -188,7 +211,7 @@ The writing step needs `xelatex`, plus Chinese fonts for a Chinese paper.
 - **Expose** this as `workflow_environment() -> Vec<Need>` with
   `{ tool, found: bool, hint }`. The UI shows it.
 
-## 5. API for the UI (on `Workspace`, in `workspace_workflows.rs`)
+## 5. API for the UI (on `Workspace`, in `workspace_workflows.rs`; most of it exists, keep its names)
 
 ```rust
 pub struct TemplateEntry { pub template: Template, pub source: Source, pub path: Option<PathBuf> }

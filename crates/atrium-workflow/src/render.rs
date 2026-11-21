@@ -35,7 +35,7 @@ pub fn fill(text: &str, run: &Run) -> String {
 }
 
 /// The full prompt for step `id`'s next try. `skills` says whether the
-/// step's agent can use installed skills (Claude Code can).
+/// step's agent can use installed skills (Claude Code, `claude`, can).
 pub fn prompt(run: &Run, id: &str, skills: bool, lang: Lang) -> Option<String> {
     let ix = run.template.steps.iter().position(|s| s.id == id)?;
     let step = &run.template.steps[ix];

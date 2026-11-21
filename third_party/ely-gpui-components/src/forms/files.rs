@@ -311,9 +311,9 @@ impl RenderOnce for DropZone {
                     .color(colors.fg_muted),
             )
             .child(div().text_color(colors.fg).child(if multiple {
-                "Drop files here"
+                crate::i18n::word("files.drop")
             } else {
-                "Drop a file here"
+                crate::i18n::word("files.drop_one")
             }))
             .when_some(self.hint, |zone, hint| {
                 zone.child(
@@ -325,7 +325,7 @@ impl RenderOnce for DropZone {
             })
             .child(
                 div().pt_2().child(
-                    Button::new((self.id, "browse"), "Browse…")
+                    Button::new((self.id, "browse"), crate::i18n::word("files.browse"))
                         .size(ControlSize::Sm)
                         .on_click(move |_, window, cx| {
                             let take = chosen.clone();
