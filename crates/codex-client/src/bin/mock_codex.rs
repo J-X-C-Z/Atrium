@@ -11,8 +11,10 @@
 //! containing "edit" proposes a file change.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
+    fs,
     io::{self, BufRead, Write},
+    path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -54,7 +56,7 @@ fn next_id(prefix: &str) -> String {
     )
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
 struct Thread {
     id: String,
     preview: String,
@@ -75,6 +77,90 @@ fn thread_json(t: &Thread, with_turns: bool) -> Value {
     })
 }
 
+fn codex_home() -> PathBuf {
+    std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("mock-codex"))
+}
+
+fn session_path(id: &str) -> PathBuf {
+    let safe: String = id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let now = now();
+    codex_home()
+        .join("sessions")
+        .join(format!("{:04}", 1970 + now / 31_556_952))
+        .join(format!("{:02}", (now / 2_592_000) % 12 + 1))
+        .join(format!("rollout-{now}-{safe}.jsonl"))
+}
+
+fn persist_thread(thread: &Thread) {
+    let path = session_path(&thread.id);
+    let Some(parent) = path.parent() else { return };
+    if fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let Ok(bytes) = serde_json::to_vec(thread) else {
+        return;
+    };
+    let temp = path.with_extension("part");
+    if fs::write(&temp, bytes).is_ok() {
+        let _ = fs::rename(temp, path);
+    }
+}
+
+fn load_persisted_thread(id: &str) -> Option<Thread> {
+    let sessions = codex_home().join("sessions");
+    let mut stack = vec![sessions];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let name = path.file_name()?.to_string_lossy();
+            if !name.ends_with(".jsonl") || !name.contains(id) {
+                continue;
+            }
+            let Ok(bytes) = fs::read(&path) else { continue };
+            if let Ok(thread) = serde_json::from_slice::<Thread>(&bytes)
+                && thread.id == id
+            {
+                return Some(thread);
+            }
+        }
+    }
+    None
+}
+
+fn find_thread(state: &State, id: &str) -> Option<Thread> {
+    if let Some(thread) = state
+        .threads
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|thread| thread.id == id)
+        .cloned()
+    {
+        return Some(thread);
+    }
+    let thread = load_persisted_thread(id)?;
+    state.threads.lock().unwrap().push(thread.clone());
+    Some(thread)
+}
+
 struct State {
     threads: Mutex<Vec<Thread>>,
     /// Waiters for answers to our requests, by request id.
@@ -89,6 +175,9 @@ struct State {
     running: Mutex<HashMap<String, String>>,
     /// Messages steered into running turns, by turn.
     steered: Mutex<HashMap<String, Vec<String>>>,
+    /// Threads loaded with `thread/resume` in this process. `thread/read`
+    /// deliberately does not count: real Codex refuses turns on those.
+    resumed: Mutex<HashSet<String>>,
 }
 
 fn main() {
@@ -103,6 +192,7 @@ fn main() {
         used: AtomicU64::new(230),
         running: Mutex::new(HashMap::new()),
         steered: Mutex::new(HashMap::new()),
+        resumed: Mutex::new(HashSet::new()),
     });
     // Two stored threads so the sidebar has history.
     {
@@ -120,7 +210,7 @@ fn main() {
             ),
         ] {
             let id = next_id("thread");
-            threads.push(Thread {
+            let thread = Thread {
                 id: id.clone(),
                 preview: text.into(),
                 cwd: std::env::current_dir().unwrap().display().to_string(),
@@ -133,7 +223,9 @@ fn main() {
                         {"type": "agentMessage", "id": next_id("item"), "text": answer},
                     ]
                 })],
-            });
+            };
+            persist_thread(&thread);
+            threads.push(thread);
         }
     }
     eprintln!("mock-codex: ready");
@@ -171,7 +263,7 @@ fn handle(method: &str, id: Value, params: Value, out: &Out, state: &Arc<State>)
         "initialize" => reply(
             out,
             id,
-            json!({"userAgent": "mock-codex/0.0.0", "codexHome": "/tmp/mock-codex", "platformFamily": "unix", "platformOs": std::env::consts::OS}),
+            json!({"userAgent": "mock-codex/0.0.0", "codexHome": codex_home().display().to_string(), "platformFamily": "unix", "platformOs": std::env::consts::OS}),
         ),
         "account/read" => {
             let account = if state.signed_in.load(Ordering::Relaxed) {
@@ -288,6 +380,10 @@ fn handle(method: &str, id: Value, params: Value, out: &Out, state: &Arc<State>)
                 ephemeral,
             };
             let body = thread_json(&fork, false);
+            if !fork.ephemeral {
+                persist_thread(&fork);
+            }
+            state.resumed.lock().unwrap().insert(fork.id.clone());
             state.threads.lock().unwrap().push(fork);
             reply(
                 out,
@@ -399,6 +495,13 @@ fn handle(method: &str, id: Value, params: Value, out: &Out, state: &Arc<State>)
         }
         "turn/steer" => {
             let thread_id = params["threadId"].as_str().unwrap_or_default().to_string();
+            if !state.resumed.lock().unwrap().contains(&thread_id) {
+                send(
+                    out,
+                    json!({"id": id, "error": {"code": -32600, "message": format!("thread {thread_id} is not loaded; call thread/resume first")}}),
+                );
+                return;
+            }
             let expected = params["expectedTurnId"]
                 .as_str()
                 .unwrap_or_default()
@@ -469,6 +572,8 @@ fn handle(method: &str, id: Value, params: Value, out: &Out, state: &Arc<State>)
                 ephemeral: params["ephemeral"].as_bool().unwrap_or(false),
             };
             let body = thread_json(&thread, false);
+            persist_thread(&thread);
+            state.resumed.lock().unwrap().insert(thread.id.clone());
             state.threads.lock().unwrap().push(thread);
             reply(
                 out,
@@ -479,19 +584,31 @@ fn handle(method: &str, id: Value, params: Value, out: &Out, state: &Arc<State>)
         }
         "thread/resume" | "thread/read" => {
             let wanted = params["threadId"].as_str().unwrap_or_default();
-            let found = state
-                .threads
-                .lock()
-                .unwrap()
-                .iter()
-                .find(|t| t.id == wanted)
-                .cloned();
-            match found {
-                Some(thread) => reply(
-                    out,
-                    id,
-                    json!({"thread": thread_json(&thread, true), "model": "mock-1"}),
-                ),
+            let resume = method == "thread/resume";
+            match find_thread(state, wanted) {
+                Some(mut thread) => {
+                    if resume {
+                        if let Some(cwd) = params["cwd"].as_str() {
+                            thread.cwd = cwd.to_string();
+                            if let Some(stored) = state
+                                .threads
+                                .lock()
+                                .unwrap()
+                                .iter_mut()
+                                .find(|stored| stored.id == wanted)
+                            {
+                                stored.cwd = thread.cwd.clone();
+                            }
+                        }
+                        persist_thread(&thread);
+                        state.resumed.lock().unwrap().insert(thread.id.clone());
+                    }
+                    reply(
+                        out,
+                        id,
+                        json!({"thread": thread_json(&thread, true), "model": "mock-1"}),
+                    )
+                }
                 None => send(
                     out,
                     json!({"id": id, "error": {"code": -32602, "message": format!("no thread {wanted}")}}),
@@ -505,6 +622,13 @@ fn handle(method: &str, id: Value, params: Value, out: &Out, state: &Arc<State>)
         }
         "turn/start" | "review/start" => {
             let thread_id = params["threadId"].as_str().unwrap_or_default().to_string();
+            if !state.resumed.lock().unwrap().contains(&thread_id) {
+                send(
+                    out,
+                    json!({"id": id, "error": {"code": -32600, "message": format!("thread {thread_id} is not loaded; call thread/resume first")}}),
+                );
+                return;
+            }
             let input = if method == "review/start" {
                 let what = match params["target"]["type"].as_str() {
                     Some("custom") => params["target"]["instructions"]
@@ -1132,6 +1256,7 @@ fn run_turn(
         }
         thread.updated = now();
         thread.turns.push(turn);
+        persist_thread(thread);
     }
 }
 

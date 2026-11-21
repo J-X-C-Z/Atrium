@@ -569,12 +569,13 @@ dependencies = [
  "agent-rpc",
  "anyhow",
  "atrium-core",
- "atrium-office",
  "atrium-node",
+ "atrium-office",
  "atrium-phone",
  "atrium-preview",
  "atrium-project",
  "atrium-sync",
+ "atrium-workflow",
  "base64 0.22.1",
  "codex-client",
  "dirs 6.0.0",
@@ -587,6 +588,7 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "ureq",
  "uuid",
@@ -694,6 +696,19 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "ureq",
+]
+
+[[package]]
+name = "atrium-workflow"
+version = "0.1.0"
+dependencies = [
+ "glob",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "toml 0.8.23",
 ]
 
 [[package]]

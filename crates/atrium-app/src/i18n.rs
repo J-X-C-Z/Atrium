@@ -837,6 +837,11 @@ const ZH: &[(&str, &str)] = &[
         "Could not read this conversation from {device}: {error}",
         "无法从 {device} 读取此对话：{error}",
     ),
+    ("Already answered on {device}.", "已在 {device} 上答复。"),
+    (
+        "Could not deliver a turn from another computer: {error}",
+        "无法执行另一台电脑发来的消息：{error}",
+    ),
     (
         "Could not answer on {device}: {error}",
         "无法在 {device} 上回答：{error}",
@@ -846,6 +851,8 @@ const ZH: &[(&str, &str)] = &[
         "无法在 {device} 上停止本轮：{error}",
     ),
     ("Move to this computer", "移到此电脑"),
+    ("Workflows", "工作流"),
+    ("Start a workflow", "开始工作流"),
     (
         "Moving the conversation from {device}…",
         "正在从 {device} 移来对话…",
@@ -861,6 +868,34 @@ const ZH: &[(&str, &str)] = &[
     (
         "The files moved, but Codex could not reopen the session; its history is shown read-only.",
         "文件已迁来，但 Codex 无法重新打开会话；历史将以只读方式显示。",
+    ),
+    (
+        "The other computer could not find this conversation's Codex session file. Open the conversation there once, then try again.",
+        "另一台电脑找不到这段对话的 Codex 会话文件。请先在那台电脑上打开一次，再重试。",
+    ),
+    (
+        "Stop the running turn before moving the conversation.",
+        "请先在原电脑停止正在运行的回答，再移动对话。",
+    ),
+    (
+        "This conversation's folder is not a Git project, so it cannot be moved.",
+        "这段对话所在的文件夹不是 Git 项目，无法移动。",
+    ),
+    (
+        "This computer has no checkout of the conversation's project. Clone it here first.",
+        "这台电脑没有该项目的代码副本。请先克隆项目，再移动对话。",
+    ),
+    (
+        "The conversation's session or working tree is larger than 32 MB.",
+        "这段对话的会话文件或工作区超过 32 MB，无法移动。",
+    ),
+    (
+        "Moving an ACP conversation is not implemented yet.",
+        "暂不支持移动 ACP 对话。",
+    ),
+    (
+        "The other computer no longer has this conversation.",
+        "另一台电脑上已经没有这段对话。",
     ),
 ];
 
@@ -886,6 +921,7 @@ mod tests {
             include_str!("main.rs"),
             include_str!("agents.rs"),
             include_str!("workspace.rs"),
+            include_str!("workspace_sync.rs"),
             include_str!("workspace_acp.rs"),
             include_str!("workspace_devices.rs"),
             include_str!("workspace_project.rs"),

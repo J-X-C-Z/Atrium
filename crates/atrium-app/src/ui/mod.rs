@@ -18,6 +18,7 @@ mod run;
 mod sidebar;
 mod steps;
 mod tools;
+mod workflow;
 
 use atrium_core::{Account, plan_label};
 use codex_client::AccessMode;
@@ -201,6 +202,7 @@ pub struct RootView {
     pub(super) preview: preview::PreviewPane,
     /// Inputs of the shared MCP and environment settings.
     extras: extras::ExtrasInputs,
+    workflow: workflow::WorkflowForm,
     /// The theme last applied, so a change of preference or system appearance re-applies.
     applied: Option<(ThemePref, bool)>,
     /// Whether the long-lived inputs show Chinese placeholders.
@@ -225,6 +227,7 @@ impl RootView {
                 .placeholder(t("Comment on this line…"))
         });
         let extras = extras::ExtrasInputs::new(window, cx);
+        let workflow = workflow::WorkflowForm::new(window, cx);
         let subscriptions = vec![
             cx.observe_in(&workspace, window, |this, workspace, window, cx| {
                 this.apply_theme(window, cx);
@@ -272,6 +275,7 @@ impl RootView {
             tools: tools::Tools::new(window, cx),
             preview: preview::PreviewPane::new(),
             extras,
+            workflow,
             applied: None,
             placeholders_chinese: crate::i18n::chinese(),
             _subscriptions: subscriptions,
@@ -1215,7 +1219,24 @@ impl Render for RootView {
             self.workspace.read(cx).room,
             crate::workspace::Room::Project { stream: None, .. }
         );
-        let main = if overview {
+        let in_workflows = matches!(
+            self.workspace.read(cx).room,
+            crate::workspace::Room::Workflows { .. }
+        );
+        let main = if in_workflows {
+            let view = self.workflow_view(window, cx);
+            match self.changes_pane(cx) {
+                Some(pane) => div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .child(div().flex_1().min_w_0().h_full().flex().child(view))
+                    .child(pane)
+                    .into_any_element(),
+                None => view,
+            }
+        } else if overview {
             let panel = project::AtriumPanel {
                 tab: self.atrium_tab,
                 cards: self.overview_cards,
@@ -1260,7 +1281,8 @@ impl Render for RootView {
             let ws = self.workspace.read(cx);
             let how = match ws.room {
                 crate::workspace::Room::Chats => motion::Enter::Fade,
-                crate::workspace::Room::Project { .. } => motion::Enter::Rise,
+                crate::workspace::Room::Project { .. }
+                | crate::workspace::Room::Workflows { .. } => motion::Enter::Rise,
             };
             motion::enter(
                 div().flex_1().min_w_0().h_full().flex().child(main),

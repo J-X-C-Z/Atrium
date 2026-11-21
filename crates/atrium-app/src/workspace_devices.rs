@@ -230,6 +230,28 @@ impl Workspace {
         self.devices.iter().find(|d| d.id == id)
     }
 
+    #[cfg(all(test, unix, feature = "workspace-ticker-test"))]
+    pub(super) fn attach_test_node(&mut self, address: &str, token: Option<String>) -> String {
+        let client = NodeClient::new(address, token);
+        let info = client.info().expect("test node answers");
+        let id = device_id(if info.device.name.is_empty() {
+            &info.device.hostname
+        } else {
+            &info.device.name
+        });
+        self.devices.push(Device {
+            id: id.clone(),
+            node: client,
+            info,
+            status: DeviceStatus::Online,
+            codex: None,
+            codex_status: AgentStatus::NotInstalled,
+            codex_link: None,
+            _codex_pump: None,
+        });
+        id
+    }
+
     /// Starts what a device offers that is not running yet.
     fn start_device(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(device) = self.devices.iter().find(|d| d.id == id) else {

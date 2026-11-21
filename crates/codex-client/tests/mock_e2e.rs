@@ -1,7 +1,7 @@
 //! The client against `mock-codex`: a whole turn with an approval, end to end
 //! through a real child process and the real translation layer.
 
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 use atrium_core::{AgentEvent, ApprovalDecision, EntryKind, Item, ItemStatus, Transcript};
 use codex_client::{
@@ -101,6 +101,61 @@ fn a_turn_with_an_approved_command_runs_to_completion() {
 
         let (_, history) = client.thread_resume(&thread.id).await.unwrap();
         assert_eq!(history.len(), 1);
+    });
+}
+
+#[test]
+fn a_read_snapshot_is_not_a_resume_and_rollout_files_survive_a_new_process() {
+    block_on(async {
+        let home = std::env::temp_dir().join(format!(
+            "mock-codex-session-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&home).unwrap();
+        let config = CodexConfig {
+            binary: Some(PathBuf::from(env!("CARGO_BIN_EXE_mock-codex"))),
+            env: vec![("CODEX_HOME".into(), home.display().to_string())],
+            ..Default::default()
+        };
+        let (first, events) = CodexClient::start(config.clone()).await.unwrap();
+        let thread = first.thread_start(StartThread::default()).await.unwrap();
+        drop(events);
+        drop(first);
+
+        let (second, _events) = CodexClient::start(config).await.unwrap();
+        let (_, history) = second.thread_read(&thread.id).await.unwrap();
+        assert_eq!(history.len(), 0);
+        let refused = second
+            .turn_start(
+                &thread.id,
+                TurnRequest {
+                    text: "send after read".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{refused:#}").contains("not loaded"),
+            "read must not resume: {refused:#}"
+        );
+        second.thread_resume(&thread.id).await.unwrap();
+        second
+            .turn_start(
+                &thread.id,
+                TurnRequest {
+                    text: "send after resume".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        drop(second);
+        let _ = fs::remove_dir_all(home);
     });
 }
 

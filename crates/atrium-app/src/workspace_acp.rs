@@ -647,6 +647,7 @@ impl Workspace {
                         }
                         let draft = std::mem::take(&mut ws.draft);
                         ws.transcripts.insert(session.clone(), draft);
+                        ws.loaded_threads.insert(session.clone());
                         if let Some(born) = ws.born.remove(DRAFT) {
                             ws.born.insert(session.clone(), born);
                         }
@@ -741,6 +742,7 @@ impl Workspace {
                 ws.loading.remove(&session);
                 match opened {
                     Ok(options) => {
+                        ws.loaded_threads.insert(session.clone());
                         ws.known_options.insert(meta.backend.clone(), options.clone());
                         ws.session_options.insert(session.clone(), options);
                         if !replays && let Some(transcript) = ws.transcripts.get_mut(&session) {

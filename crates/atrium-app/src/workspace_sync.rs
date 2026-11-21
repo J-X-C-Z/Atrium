@@ -14,8 +14,8 @@ use atrium_node::{EmbeddedNode, HostError, HostFuture, SyncHost, SyncState};
 use atrium_project::repo;
 use atrium_sync::{
     AnswerInput, ApprovalAnswer, DeviceDirectory, Lease, LeaseDecision, MovePackage, PeerClient,
-    SettingsView, ThreadAnnouncement, ThreadCache, ThreadSnapshot, TurnInput, lease_can_be_taken,
-    migrate_settings, thread_key,
+    PeerError, SettingsView, ThreadAnnouncement, ThreadCache, ThreadSnapshot, TurnInput,
+    lease_can_be_taken, migrate_settings, thread_key,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use gpui::Context;
@@ -38,6 +38,16 @@ pub struct SyncRuntime {
     pub polling: bool,
     pub project_ids: HashMap<PathBuf, String>,
     pub lease_renewed: HashMap<String, i64>,
+}
+
+pub(super) struct SyncStartup {
+    pub data: PathBuf,
+    pub port: u16,
+    pub install_id: String,
+    pub device_name: String,
+    pub loopback_only: bool,
+    pub save_settings: bool,
+    pub path: Option<String>,
 }
 
 struct AppliedMove {
@@ -247,16 +257,31 @@ impl Workspace {
         if !self.settings.sync_enabled() || std::env::var("ATRIUM_NO_SYNC").is_ok() {
             return;
         }
-        if self.settings.install_id.is_empty() {
-            self.settings.install_id = format!("install-{}", uuid::Uuid::new_v4().simple());
+        let startup = self.sync_startup();
+        self.start_sync(startup, cx);
+    }
+
+    fn sync_startup(&self) -> SyncStartup {
+        let from_env = std::env::var("ATRIUM_INSTALL_ID").ok();
+        let install_id = sync_install_id(&self.settings.install_id, from_env.as_deref());
+        SyncStartup {
+            data: sync_data_dir(),
+            port: sync_port(),
+            install_id,
+            device_name: sync_device_name(&self.settings.device_name),
+            loopback_only: std::env::var("ATRIUM_NODE_LOOPBACK_ONLY").is_ok(),
+            save_settings: true,
+            path: None,
         }
-        if self.settings.device_name.trim().is_empty() {
-            self.settings.device_name = atrium_node::config::hostname();
+    }
+
+    pub(super) fn start_sync(&mut self, startup: SyncStartup, cx: &mut Context<Self>) {
+        self.settings.install_id = startup.install_id.clone();
+        self.settings.device_name = startup.device_name.clone();
+        if startup.save_settings {
+            self.settings.save();
         }
-        self.settings.save();
-        let data = dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("Atrium");
+        let data = startup.data;
         let cache = match ThreadCache::open(data.join("sync/cache"), 500 * 1024 * 1024) {
             Ok(cache) => cache,
             Err(error) => {
@@ -268,12 +293,13 @@ impl Workspace {
         let host = Arc::new(SyncHostClient {
             commands: commands.clone(),
         });
-        let (ready, ready_rx) = tokio::sync::oneshot::channel();
-        let config = self.sync_config();
-        let install_id = self.settings.install_id.clone();
-        let device_name = self.settings.device_name.clone();
+        let (ready, mut ready_rx) = tokio::sync::oneshot::channel();
+        let config = self.sync_config(startup.port, startup.loopback_only);
+        let install_id = startup.install_id;
+        let device_name = startup.device_name;
+        let startup_path = startup.path;
         let sync_dir = data.join("sync");
-        std::thread::Builder::new()
+        let thread = std::thread::Builder::new()
             .name("atrium-sync".into())
             .spawn(move || {
                 let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -287,7 +313,10 @@ impl Workspace {
                     }
                 };
                 runtime.block_on(async move {
-                    let path = atrium_node::config::login_path().await;
+                    let path = match startup_path {
+                        Some(path) => path,
+                        None => atrium_node::config::login_path().await,
+                    };
                     let owner = atrium_node::auth::owner(&path).await;
                     let directory = DeviceDirectory {
                         install_id,
@@ -319,20 +348,39 @@ impl Workspace {
                     let _ = ready.send(Ok((state, node)));
                     std::future::pending::<()>().await;
                 });
-            })
-            .ok();
+            });
+        let _ = thread.ok();
         self._sync_commands = Some(cx.spawn(async move |this, cx| {
             let mut receiving = receiving;
-            while let Some(command) = receiving.recv().await {
-                let result = this.update(cx, |workspace, cx| workspace.sync_command(command, cx));
-                if result.is_err() {
-                    break;
+            loop {
+                match receiving.try_recv() {
+                    Ok(command) => {
+                        let result =
+                            this.update(cx, |workspace, cx| workspace.sync_command(command, cx));
+                        if result.is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(10))
+                            .await;
+                    }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
                 }
             }
         }));
         let _init = cx.spawn(async move |this, cx| {
-            let Ok(ready) = ready_rx.await else {
-                return;
+            let ready = loop {
+                match ready_rx.try_recv() {
+                    Ok(ready) => break ready,
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(10))
+                            .await;
+                    }
+                    Err(tokio::sync::oneshot::error::TryRecvError::Closed) => return,
+                }
             };
             let _ = this.update(cx, |workspace, cx| match ready {
                 Ok((state, node)) => {
@@ -365,20 +413,17 @@ impl Workspace {
         self._sync_init = Some(_init);
     }
 
-    fn sync_config(&self) -> atrium_node::config::Config {
+    fn sync_config(&self, port: u16, loopback_only: bool) -> atrium_node::config::Config {
         let mut roots = Vec::new();
         roots.extend(self.settings.recent_folders.iter().cloned());
         roots.extend(self.settings.projects.iter().cloned());
         roots.retain(|path| path.is_dir());
         roots.dedup();
         let mut config = atrium_node::config::Config {
-            port: std::env::var("ATRIUM_NODE_PORT")
-                .ok()
-                .and_then(|port| port.parse().ok())
-                .unwrap_or(7381),
+            port,
             name: self.settings.device_name.clone(),
             token: self.settings.node_token.clone().unwrap_or_default(),
-            loopback_only: std::env::var("ATRIUM_NODE_LOOPBACK_ONLY").is_ok(),
+            loopback_only,
             roots,
             ..Default::default()
         };
@@ -445,8 +490,35 @@ impl Workspace {
                     }
                 };
                 if self.thread_exists(&backend, &id) {
-                    self.answer(&id, request, decision, cx);
-                    let _ = reply.send(Ok(()));
+                    let by = answer
+                        .by
+                        .filter(|name| !name.trim().is_empty())
+                        .unwrap_or_else(|| "another computer".into());
+                    match self.submit_answer_from(
+                        &id,
+                        request.clone(),
+                        super::phone::Answer::Approval(decision),
+                        &by,
+                        cx,
+                    ) {
+                        Ok(task) => {
+                            task.detach();
+                            let _ = reply.send(Ok(()));
+                        }
+                        Err(atrium_phone::Error::Stale) => {
+                            let winner = self
+                                .answered_by(&id, &request)
+                                .unwrap_or("another computer")
+                                .to_string();
+                            let _ = reply
+                                .send(Err(HostError::Conflict(format!("answered on {winner}"))));
+                        }
+                        Err(_) => {
+                            let _ = reply.send(Err(HostError::BadRequest(
+                                "the approval is no longer pending".into(),
+                            )));
+                        }
+                    }
                 } else {
                     let _ = reply.send(Err(HostError::NotFound));
                 }
@@ -460,8 +532,32 @@ impl Workspace {
             } => {
                 if self.thread_exists(&backend, &id) {
                     let answers: Vec<(String, Vec<String>)> = input.answers.into_iter().collect();
-                    self.answer_questions(&id, request, answers, cx);
-                    let _ = reply.send(Ok(()));
+                    let by = self.settings.device_name.clone();
+                    match self.submit_answer_from(
+                        &id,
+                        request.clone(),
+                        super::phone::Answer::Questions(answers.into_iter().collect()),
+                        &by,
+                        cx,
+                    ) {
+                        Ok(task) => {
+                            task.detach();
+                            let _ = reply.send(Ok(()));
+                        }
+                        Err(atrium_phone::Error::Stale) => {
+                            let winner = self
+                                .answered_by(&id, &request)
+                                .unwrap_or("another computer")
+                                .to_string();
+                            let _ = reply
+                                .send(Err(HostError::Conflict(format!("answered on {winner}"))));
+                        }
+                        Err(_) => {
+                            let _ = reply.send(Err(HostError::BadRequest(
+                                "the question is no longer pending".into(),
+                            )));
+                        }
+                    }
                 } else {
                     let _ = reply.send(Err(HostError::NotFound));
                 }
@@ -626,27 +722,147 @@ impl Workspace {
         steer: bool,
         cx: &mut Context<Self>,
     ) -> Result<(), HostError> {
-        if !self.thread_exists(&backend, &id) {
+        let _thread = self
+            .threads
+            .iter()
+            .find(|thread| thread.id == id && thread.backend == backend)
+            .cloned()
+            .ok_or(HostError::NotFound)?;
+        if !crate::agents::is_codex(&backend) {
+            if steer {
+                return Err(HostError::Unavailable(
+                    "this agent cannot be steered remotely".into(),
+                ));
+            }
+            let composed = Composed::from_prompt(input.text, input.attachments);
+            if composed.text.is_empty() && composed.images.is_empty() {
+                return Err(HostError::BadRequest("empty turn".into()));
+            }
+            if self.transcripts.contains_key(&id) && !self.loaded_threads.contains(&id) {
+                self.transcripts.remove(&id);
+            }
+            if !self.submit_to_thread(id, composed, cx) {
+                return Err(HostError::Unavailable(
+                    "the other computer could not accept the turn".into(),
+                ));
+            }
+            return Ok(());
+        }
+        if !self.loaded_threads.contains(&id) {
+            self.sync_pending_turns
+                .entry(id.clone())
+                .or_default()
+                .push(super::SyncPendingTurn {
+                    backend,
+                    input,
+                    steer,
+                });
+            self.load_thread(id, cx);
+            return Ok(());
+        }
+        self.sync_deliver_owner_turn(
+            &id,
+            super::SyncPendingTurn {
+                backend,
+                input,
+                steer,
+            },
+            cx,
+        )
+    }
+
+    pub(super) fn sync_deliver_owner_turn(
+        &mut self,
+        id: &str,
+        turn: super::SyncPendingTurn,
+        cx: &mut Context<Self>,
+    ) -> Result<(), HostError> {
+        let super::SyncPendingTurn {
+            backend,
+            input,
+            steer,
+        } = turn;
+        if !self
+            .threads
+            .iter()
+            .any(|thread| thread.id == id && thread.backend == backend)
+        {
             return Err(HostError::NotFound);
-        }
-        if let Some(model) = input.model.clone() {
-            self.settings.model = Some(model);
-        }
-        if let Some(effort) = input.effort.clone() {
-            self.settings.effort = Some(effort);
-        }
-        self.view = View::Thread(id.clone());
-        self.nav += 1;
-        if !self.transcripts.contains_key(&id) {
-            self.load_thread(id.clone(), cx);
         }
         let composed = Composed::from_prompt(input.text, input.attachments);
         if composed.text.is_empty() && composed.images.is_empty() {
             return Err(HostError::BadRequest("empty turn".into()));
         }
-        let _ = steer;
-        self.send_turn(composed, None, false, cx);
+        let Some(client) = self.thread_codex(id) else {
+            return Err(HostError::Unavailable("Codex is not running".into()));
+        };
+        let active = self
+            .transcripts
+            .get(id)
+            .and_then(|transcript| transcript.active_turn())
+            .filter(|turn| !turn.is_empty())
+            .map(str::to_owned);
+        if steer && active.is_none() {
+            return Err(HostError::Conflict(
+                "there is no running turn to steer".into(),
+            ));
+        }
+        let steering_turn = active.clone();
+        let mode = match input.mode.as_deref() {
+            Some("read-only" | "read_only") => Some(codex_client::AccessMode::ReadOnly),
+            Some("auto") => Some(codex_client::AccessMode::Auto),
+            Some("full-access" | "full_access") => Some(codex_client::AccessMode::FullAccess),
+            _ => Some(self.settings.mode),
+        };
+        let request = codex_client::TurnRequest {
+            text: composed.text.clone(),
+            images: composed.images.clone(),
+            mentions: composed.mentions.clone(),
+            model: input.model,
+            effort: input.effort,
+            mode,
+            service_tier: None,
+            plan_mode: false,
+        };
+        let checkpoint = if active.is_some() {
+            gpui::Task::ready(())
+        } else {
+            self.checkpoint_next_turn(id, cx)
+        };
+        let thread_id = id.to_string();
+        if let Some(transcript) = self.transcripts.get_mut(&thread_id) {
+            let before = transcript.len();
+            let attachments = composed.attachments();
+            transcript.push_local_user(composed.text, attachments);
+            transcript.begin_pending_turn();
+            self.note_births(&thread_id, before);
+        }
+        self.turn_started
+            .insert(thread_id.clone(), std::time::Instant::now());
         cx.notify();
+        cx.spawn(async move |this, cx| {
+            checkpoint.await;
+            let sent = match steering_turn {
+                Some(turn) => client
+                    .turn_steer(&thread_id, &turn, request)
+                    .await
+                    .map(|_| ()),
+                None => client.turn_start(&thread_id, request).await.map(|_| ()),
+            };
+            if let Err(error) = sent {
+                let _ = this.update(cx, |workspace, cx| {
+                    if let Some(transcript) = workspace.transcripts.get_mut(&thread_id) {
+                        transcript.fail_pending_turn(crate::i18n::tf(
+                            "Could not send: {error}",
+                            &[("error", &format!("{error:#}"))],
+                        ));
+                    }
+                    workspace.turn_started.remove(&thread_id);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
         Ok(())
     }
 
@@ -660,8 +876,24 @@ impl Workspace {
             return Err(HostError::NotFound);
         }
         if crate::agents::is_codex(&backend) {
-            self.view = View::Thread(id.clone());
-            self.stop(cx);
+            let turn = self
+                .transcripts
+                .get(&id)
+                .and_then(|transcript| transcript.active_turn())
+                .filter(|turn| !turn.is_empty())
+                .map(str::to_owned);
+            let Some(turn) = turn else {
+                return Err(HostError::Conflict("there is no running turn".into()));
+            };
+            let client = self
+                .thread_codex(&id)
+                .ok_or_else(|| HostError::Unavailable("Codex is not running".into()))?;
+            cx.spawn(async move |_, _| {
+                if let Err(error) = client.turn_interrupt(&id, &turn).await {
+                    log::warn!("turn/interrupt failed: {error:#}");
+                }
+            })
+            .detach();
             return Ok(());
         }
         Err(HostError::Unavailable(
@@ -887,6 +1119,9 @@ impl Workspace {
         if self.sync.is_none() {
             return;
         }
+        if let Some(sync) = &mut self.sync {
+            sync.polling = false;
+        }
         self._sync_poll = Some(cx.spawn(async move |this, cx| {
             loop {
                 let Ok(Some((state, devices, me))) = this.update(cx, |workspace, _| {
@@ -912,9 +1147,10 @@ impl Workspace {
                     cx.background_executor().timer(Duration::from_secs(2)).await;
                     continue;
                 };
-                let rounds = cx
-                    .background_executor()
-                    .spawn(async move {
+                let (rounds_tx, rounds_rx) = std::sync::mpsc::channel();
+                std::thread::Builder::new()
+                    .name("atrium-sync-round".into())
+                    .spawn(move || {
                         let mut rounds = Vec::new();
                         for (device, peer) in devices {
                             let Ok(directory) = peer.directory() else {
@@ -932,12 +1168,29 @@ impl Workspace {
                                     continue;
                                 }
                             };
-                            let threads = peer.threads(None).unwrap_or_default();
+                            let threads = match peer.threads(None) {
+                                Ok(threads) => threads,
+                                Err(error) => {
+                                    log::info!("sync threads with {device}: {error}");
+                                    Vec::new()
+                                }
+                            };
                             rounds.push((device, directory.install_id, threads, merged.ok()));
                         }
-                        rounds
+                        let _ = rounds_tx.send(rounds);
                     })
-                    .await;
+                    .ok();
+                let rounds = loop {
+                    match rounds_rx.try_recv() {
+                        Ok(rounds) => break rounds,
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(20))
+                                .await;
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => break Vec::new(),
+                    }
+                };
                 let _ = this.update(cx, |workspace, cx| {
                     for (device, install, threads, applied) in rounds {
                         if applied.is_some() {
@@ -1076,9 +1329,10 @@ impl Workspace {
             let id_for_read = id.clone();
             let device_for_read = device_for_cache.clone();
             let cache_for_read = cache.clone();
-            let (answer, error) = cx
-                .background_executor()
-                .spawn(async move {
+            let (read_tx, read_rx) = std::sync::mpsc::channel();
+            std::thread::Builder::new()
+                .name("atrium-sync-read".into())
+                .spawn(move || {
                     let remote = peer.snapshot(&backend_for_read, &id_for_read);
                     let error = remote.as_ref().err().map(|error| error.to_string());
                     let entry = remote.as_ref().ok().map(|snapshot| {
@@ -1105,9 +1359,22 @@ impl Workspace {
                     } else {
                         None
                     };
-                    (entry.or(cached), error)
+                    let _ = read_tx.send((entry.or(cached), error));
                 })
-                .await;
+                .ok();
+            let (answer, error) = loop {
+                match read_rx.try_recv() {
+                    Ok(answer) => break answer,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(20))
+                            .await;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        break (None, Some("the sync reader stopped".into()));
+                    }
+                }
+            };
             let _ = this.update(cx, |workspace, cx| {
                 workspace.loading.remove(&id);
                 match answer {
@@ -1178,9 +1445,10 @@ impl Workspace {
                 let device_for_read = device.clone();
                 let backend_for_read = backend.clone();
                 let id_for_read = id.clone();
-                let snapshot = cx
-                    .background_executor()
-                    .spawn(async move {
+                let (snapshot_tx, snapshot_rx) = std::sync::mpsc::channel();
+                std::thread::Builder::new()
+                    .name("atrium-sync-watch".into())
+                    .spawn(move || {
                         let snapshot = peer.snapshot(&backend_for_read, &id_for_read).ok()?;
                         let _ = cache.put(
                             &device_for_read,
@@ -1194,9 +1462,21 @@ impl Workspace {
                                 fetched_at_ms: atrium_node::sync::now_ms(),
                             },
                         );
-                        Some(snapshot)
+                        let _ = snapshot_tx.send(Some(snapshot));
+                        Some(())
                     })
-                    .await;
+                    .ok();
+                let snapshot = loop {
+                    match snapshot_rx.try_recv() {
+                        Ok(snapshot) => break snapshot,
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(20))
+                                .await;
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => break None,
+                    }
+                };
                 let Some(snapshot) = snapshot else { continue };
                 let keep = this.update(cx, |workspace, cx| {
                     if workspace.view != View::Thread(id.clone()) {
@@ -1281,11 +1561,13 @@ impl Workspace {
         cx.notify();
         cx.spawn(async move |this, cx| {
             let device_for_send = device.clone();
+            let device_for_error = device_for_send.clone();
             let id_for_send = id.clone();
             let backend_for_send = backend.clone();
-            let outcome = cx
-                .background_executor()
-                .spawn(async move {
+            let (send_tx, send_rx) = std::sync::mpsc::channel();
+            std::thread::Builder::new()
+                .name("atrium-sync-turn".into())
+                .spawn(move || {
                     let mut remote_attachments = Vec::new();
                     for attachment in &local_attachments {
                         let path = PathBuf::from(attachment);
@@ -1301,9 +1583,10 @@ impl Workspace {
                         match uploaded {
                             Ok(path) => remote_attachments.push(path),
                             Err(error) => {
-                                return Err(format!(
+                                let _ = send_tx.send(Err(format!(
                                     "Could not upload {name} to {device_for_send}: {error}"
-                                ));
+                                )));
+                                return;
                             }
                         }
                     }
@@ -1314,10 +1597,27 @@ impl Workspace {
                         effort,
                         mode: None,
                     };
-                    peer.turn(&backend_for_send, &id_for_send, &input)
-                        .map_err(|error| format!("Could not send to {device_for_send}: {error}"))
+                    let _ =
+                        send_tx.send(peer.turn(&backend_for_send, &id_for_send, &input).map_err(
+                            |error| format!("Could not send to {device_for_send}: {error}"),
+                        ));
                 })
-                .await;
+                .ok();
+            let outcome = loop {
+                match send_rx.try_recv() {
+                    Ok(outcome) => break outcome,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(20))
+                            .await;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        break Err(format!(
+                            "Could not send to {device_for_error}: sender stopped"
+                        ));
+                    }
+                }
+            };
             match outcome {
                 Ok(()) => {
                     let _ = this.update(cx, |workspace, cx| {
@@ -1365,19 +1665,41 @@ impl Workspace {
             transcript.answer_approval(&request, decision_value);
         }
         let id = thread_id.to_string();
+        let by = self.settings.device_name.clone();
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    peer.approve(&backend, &id, &request, decision)
-                        .map_err(|error| error.to_string())
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::Builder::new()
+                .name("atrium-sync-approval".into())
+                .spawn(move || {
+                    let _ = tx.send(peer.approve(&backend, &id, &request, decision, Some(&by)));
                 })
-                .await;
+                .ok();
+            let result: Result<(), PeerError> = loop {
+                match rx.try_recv() {
+                    Ok(result) => break result,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(20))
+                            .await;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        break Err(PeerError::Transport("the answer sender stopped".into()));
+                    }
+                }
+            };
             if let Err(error) = result {
                 let _ = this.update(cx, |_, cx| {
-                    cx.emit(Notice::Error(format!(
-                        "Could not answer on {device}: {error}"
-                    )));
+                    if let Some(winner) = answered_on_device(&error) {
+                        cx.emit(Notice::Info(crate::i18n::tf(
+                            "Already answered on {device}.",
+                            &[("device", &winner)],
+                        )));
+                    } else {
+                        cx.emit(Notice::Error(crate::i18n::tf(
+                            "Could not answer on {device}: {error}",
+                            &[("device", &device), ("error", &peer_error_message(&error))],
+                        )));
+                    }
                     cx.notify();
                 });
             }
@@ -1401,13 +1723,29 @@ impl Workspace {
         let answers = answers.into_iter().collect();
         let id = thread_id.to_string();
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    peer.answer(&backend, &id, &request, &answers)
-                        .map_err(|error| error.to_string())
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::Builder::new()
+                .name("atrium-sync-answers".into())
+                .spawn(move || {
+                    let result = peer
+                        .answer(&backend, &id, &request, &answers)
+                        .map_err(|error| error.to_string());
+                    let _ = tx.send(result);
                 })
-                .await;
+                .ok();
+            let result: Result<(), String> = loop {
+                match rx.try_recv() {
+                    Ok(result) => break result,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(20))
+                            .await;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        break Err("the answer sender stopped".into());
+                    }
+                }
+            };
             if let Err(error) = result {
                 let _ = this.update(cx, |_, cx| {
                     cx.emit(Notice::Error(format!(
@@ -1426,13 +1764,29 @@ impl Workspace {
         };
         let id = thread_id.to_string();
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    peer.interrupt(&backend, &id)
-                        .map_err(|error| error.to_string())
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::Builder::new()
+                .name("atrium-sync-interrupt".into())
+                .spawn(move || {
+                    let result = peer
+                        .interrupt(&backend, &id)
+                        .map_err(|error| error.to_string());
+                    let _ = tx.send(result);
                 })
-                .await;
+                .ok();
+            let result: Result<(), String> = loop {
+                match rx.try_recv() {
+                    Ok(result) => break result,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(20))
+                            .await;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        break Err("the stop sender stopped".into());
+                    }
+                }
+            };
             if let Err(error) = result {
                 let _ = this.update(cx, |_, cx| {
                     cx.emit(Notice::Error(format!(
@@ -1524,6 +1878,7 @@ impl Workspace {
     ) -> Result<(), HostError> {
         self.threads.retain(|thread| thread.id != id);
         self.transcripts.remove(id);
+        self.loaded_threads.remove(id);
         self.turn_started.remove(id);
         self.loading.remove(id);
         if let Some(sync) = &mut self.sync {
@@ -1571,63 +1926,94 @@ impl Workspace {
         )));
         cx.spawn(async move |this, cx| {
             let backend_for_move = backend.clone();
-            let job = cx.background_executor().spawn(async move {
-                let package = peer
-                    .move_package(&backend_for_move, &id)
-                    .map_err(|error| format!("{error}"))?;
-                let identity = package
-                    .git_identity
-                    .clone()
-                    .ok_or_else(|| "the conversation's folder is not a git project".to_string())?;
-                let repo = candidates
-                    .iter()
-                    .find(|candidate| repo::identity(candidate).as_deref() == Some(&identity))
-                    .cloned()
-                    .ok_or_else(|| {
-                        "no checkout of this project on this computer; clone it first".to_string()
-                    })?;
-                let session = BASE64
-                    .decode(
-                        package
-                            .session_base64
+            let (move_tx, move_rx) = std::sync::mpsc::channel();
+            std::thread::Builder::new()
+                .name("atrium-sync-move".into())
+                .spawn(move || {
+                    let runtime = match tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        Ok(runtime) => runtime,
+                        Err(error) => {
+                            let _ = move_tx.send(Err(error.to_string()));
+                            return;
+                        }
+                    };
+                    let result = runtime.block_on(async move {
+                        let package = peer
+                            .move_package(&backend_for_move, &id)
+                            .map_err(|error| explain_move_error(&error))?;
+                        let identity = package.git_identity.clone().ok_or_else(|| {
+                            "the conversation's folder is not a git project".to_string()
+                        })?;
+                        let repo = candidates
+                            .iter()
+                            .find(|candidate| {
+                                repo::identity(candidate).as_deref() == Some(&identity)
+                            })
+                            .cloned()
+                            .ok_or_else(|| {
+                                "no checkout of this project on this computer; clone it first"
+                                    .to_string()
+                            })?;
+                        let session = BASE64
+                            .decode(
+                                package
+                                    .session_base64
+                                    .as_deref()
+                                    .ok_or_else(|| "the package has no session".to_string())?,
+                            )
+                            .map_err(|error| error.to_string())?;
+                        let relative = package
+                            .session_relative
                             .as_deref()
-                            .ok_or_else(|| "the package has no session".to_string())?,
-                    )
-                    .map_err(|error| error.to_string())?;
-                let relative = package
-                    .session_relative
-                    .as_deref()
-                    .ok_or_else(|| "the package has no session path".to_string())?;
-                write_session_file(&codex_home, relative, &session)?;
-                let bundle = BASE64
-                    .decode(
-                        package
-                            .git_bundle_base64
+                            .ok_or_else(|| "the package has no session path".to_string())?;
+                        write_session_file(&codex_home, relative, &session)?;
+                        let bundle = BASE64
+                            .decode(
+                                package
+                                    .git_bundle_base64
+                                    .as_deref()
+                                    .ok_or_else(|| "the package has no code".to_string())?,
+                            )
+                            .map_err(|error| error.to_string())?;
+                        let reference = package
+                            .git_ref
                             .as_deref()
-                            .ok_or_else(|| "the package has no code".to_string())?,
-                    )
-                    .map_err(|error| error.to_string())?;
-                let reference = package
-                    .git_ref
-                    .as_deref()
-                    .ok_or_else(|| "the package has no code ref".to_string())?;
-                let folder = repo::apply_move_bundle(
-                    &repo,
-                    &bundle,
-                    reference,
-                    &id,
-                    &super::chat_trees::worktrees_base(),
-                )
-                .map_err(|error| format!("{error:#}"))?;
-                // The owner must drop its writer before the target resumes.
-                peer.move_release(&backend_for_move, &id)
-                    .map_err(|error| format!("{error}"))?;
-                let resumed = local_client
-                    .thread_resume_in_folder(&id, &mcp, &folder)
-                    .await;
-                Ok::<_, String>((package, folder, resumed.is_ok()))
-            });
-            let result = job.await;
+                            .ok_or_else(|| "the package has no code ref".to_string())?;
+                        let folder = repo::apply_move_bundle(
+                            &repo,
+                            &bundle,
+                            reference,
+                            &id,
+                            &super::chat_trees::worktrees_base(),
+                        )
+                        .map_err(|error| format!("{error:#}"))?;
+                        // The owner must drop its writer before the target resumes.
+                        peer.move_release(&backend_for_move, &id)
+                            .map_err(|error| explain_move_error(&error))?;
+                        let resumed = local_client
+                            .thread_resume_in_folder(&id, &mcp, &folder)
+                            .await;
+                        Ok::<_, String>((package, folder, resumed.is_ok()))
+                    });
+                    let _ = move_tx.send(result);
+                })
+                .ok();
+            let result = loop {
+                match move_rx.try_recv() {
+                    Ok(result) => break result,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(20))
+                            .await;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        break Err("the move worker stopped".to_string());
+                    }
+                }
+            };
             let _ = this.update(cx, |workspace, cx| match result {
                 Ok((package, folder, resumed)) => {
                     workspace.finish_move(
@@ -1681,6 +2067,11 @@ impl Workspace {
             transcript.apply(&AgentEvent::UserInputRequested(request));
         }
         self.transcripts.insert(id.clone(), transcript);
+        if resumed {
+            self.loaded_threads.insert(id.clone());
+        } else {
+            self.loaded_threads.remove(&id);
+        }
         if let Some(sync) = &mut self.sync {
             sync.owners.insert(id.clone(), install_id.clone());
             sync.cursors.insert(id.clone(), 0);
@@ -1745,6 +2136,98 @@ fn remote_thread_meta(announcement: ThreadAnnouncement, device: &str) -> ThreadM
     meta
 }
 
+fn sync_data_dir() -> PathBuf {
+    sync_data_dir_choice(std::env::var_os("ATRIUM_DATA_DIR").map(PathBuf::from))
+}
+
+fn sync_data_dir_choice(value: Option<PathBuf>) -> PathBuf {
+    value.unwrap_or_else(|| {
+        dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("Atrium")
+    })
+}
+
+fn sync_port() -> u16 {
+    sync_port_choice(
+        std::env::var("ATRIUM_NODE_PORT")
+            .ok()
+            .and_then(|port| port.parse().ok()),
+    )
+}
+
+fn sync_port_choice(value: Option<u16>) -> u16 {
+    value.unwrap_or(7381)
+}
+
+fn sync_install_id(configured: &str, override_id: Option<&str>) -> String {
+    override_id
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            if configured.is_empty() {
+                format!("install-{}", uuid::Uuid::new_v4().simple())
+            } else {
+                configured.to_string()
+            }
+        })
+}
+
+fn sync_device_name(configured: &str) -> String {
+    if configured.trim().is_empty() {
+        atrium_node::config::hostname()
+    } else {
+        configured.to_string()
+    }
+}
+
+fn peer_error_message(error: &PeerError) -> String {
+    match error {
+        PeerError::Status { body, .. } => serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("message")
+                    .and_then(|message| message.as_str())
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| body.clone()),
+        other => other.to_string(),
+    }
+}
+
+fn answered_on_device(error: &PeerError) -> Option<String> {
+    let message = peer_error_message(error);
+    message
+        .strip_prefix("answered on ")
+        .map(str::trim)
+        .filter(|device| !device.is_empty())
+        .map(str::to_owned)
+}
+
+fn explain_move_error(error: &PeerError) -> String {
+    let message = peer_error_message(error);
+    let lower = message.to_ascii_lowercase();
+    let key = if lower.contains("no session file for this conversation") {
+        "The other computer could not find this conversation's Codex session file. Open the conversation there once, then try again."
+    } else if lower.contains("stop the running turn") {
+        "Stop the running turn before moving the conversation."
+    } else if lower.contains("not a git project") {
+        "This conversation's folder is not a Git project, so it cannot be moved."
+    } else if lower.contains("no checkout of this project") {
+        "This computer has no checkout of the conversation's project. Clone it here first."
+    } else if lower.contains("too large to move") {
+        "The conversation's session or working tree is larger than 32 MB."
+    } else if lower.contains("moving an acp conversation") {
+        "Moving an ACP conversation is not implemented yet."
+    } else if lower.contains("not found") {
+        "The other computer no longer has this conversation."
+    } else {
+        return message;
+    };
+    crate::i18n::t(key).to_string()
+}
+
 fn find_session_file(home: &Path, id: &str) -> Option<(String, Vec<u8>)> {
     let sessions = home.join("sessions");
     let mut found = Vec::new();
@@ -1795,3 +2278,7 @@ fn write_session_file(home: &Path, relative: &str, bytes: &[u8]) -> Result<(), S
     std::fs::write(&temp, bytes).map_err(|error| error.to_string())?;
     std::fs::rename(temp, target).map_err(|error| error.to_string())
 }
+
+#[cfg(all(test, unix, feature = "workspace-ticker-test"))]
+#[path = "workspace_sync_test.rs"]
+mod tests;

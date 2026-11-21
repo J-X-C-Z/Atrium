@@ -48,10 +48,15 @@ mod schedules;
 mod sync;
 #[path = "workspace_updates.rs"]
 mod updates;
+#[path = "workspace_workflows.rs"]
+mod workflows;
+#[path = "workspace_workflow_runner.rs"]
+mod workflow_runner;
 pub use acp::{AcpAgent, AgentStatus, CODEX};
 pub use devices::{Device, DeviceStatus};
 pub use projects::{Activity, ActivityKind, Room, StreamState, StreamView, activities};
 pub use sync::SyncRuntime;
+pub use workflows::{RunEntry, TemplateSource};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
@@ -136,6 +141,21 @@ pub enum Notice {
     Error(String),
 }
 
+/// A turn another Atrium sent while this owner was still resuming the thread.
+pub(super) struct SyncPendingTurn {
+    pub backend: String,
+    pub input: atrium_sync::TurnInput,
+    pub steer: bool,
+}
+
+pub(super) struct WorkflowReview {
+    pub started_ms: i64,
+    pub results: Vec<atrium_workflow::run::CheckResult>,
+    pub next: usize,
+    pub thread: Option<String>,
+    pub retried: bool,
+}
+
 pub struct Workspace {
     pub status: Status,
     client: Option<CodexClient>,
@@ -153,6 +173,9 @@ pub struct Workspace {
     /// Conversations whose suggested follow-ups the user dismissed or used.
     dismissed_next: std::collections::HashSet<String>,
     transcripts: HashMap<String, Transcript>,
+    /// Threads whose agent session is loaded here. A transcript may also be a
+    /// `thread/read` snapshot, which must never make the next turn skip resume.
+    loaded_threads: HashSet<String>,
     /// The draft's transcript, shown while its thread is being created.
     draft: Transcript,
     loading: HashSet<String>,
@@ -185,6 +208,16 @@ pub struct Workspace {
     pub open_steps: std::collections::HashSet<String>,
     /// A file a transcript row asked the side panel to show.
     pub preview_request: Option<std::path::PathBuf>,
+    /// Workflow runs as last read from their folders.
+    pub workflow_runs: Vec<RunEntry>,
+    /// A template picked in the sidebar, for the start form to take up.
+    pub pick_template: Option<String>,
+    /// Steps whose checks are running, so a tick does not start them twice.
+    pub(super) workflow_checking: HashSet<(PathBuf, String)>,
+    /// Reviews whose separate reviewer chat has started.
+    pub(super) workflow_reviews: HashMap<(PathBuf, String), WorkflowReview>,
+    pub(super) workflow_recovered: HashSet<PathBuf>,
+    _workflow_ticker: Option<Task<()>>,
     /// A newer Atrium, when one is out.
     pub update: Option<crate::updates::Update>,
     pub goals: HashMap<String, Goal>,
@@ -233,6 +266,10 @@ pub struct Workspace {
     _pump: Option<Task<()>>,
     /// Multi-device overlay, the embedded node and remote conversations.
     pub sync: Option<SyncRuntime>,
+    /// Owner-side remote turns waiting for their thread to finish resuming.
+    sync_pending_turns: HashMap<String, Vec<SyncPendingTurn>>,
+    /// Who claimed each approval or question first.
+    answered_by: HashMap<(String, String), String>,
     _sync_poll: Option<Task<()>>,
     _sync_commands: Option<Task<()>>,
     _sync_init: Option<Task<()>>,
@@ -254,6 +291,7 @@ impl Workspace {
         workspace.init_projects(cx);
         workspace.init_devices(cx);
         workspace.init_sync(cx);
+        workspace.init_workflow_runner(cx);
         workspace.sync_phone(cx);
         workspace.start_schedules(cx);
         workspace.start_update_checks(cx);
@@ -282,6 +320,7 @@ impl Workspace {
             answering: HashSet::new(),
             dismissed_next: Default::default(),
             transcripts: HashMap::new(),
+            loaded_threads: HashSet::new(),
             draft: Transcript::new(),
             loading: HashSet::new(),
             models: Vec::new(),
@@ -300,6 +339,12 @@ impl Workspace {
             unread: HashMap::new(),
             open_steps: Default::default(),
             preview_request: None,
+            workflow_runs: Vec::new(),
+            pick_template: None,
+            workflow_checking: HashSet::new(),
+            workflow_reviews: HashMap::new(),
+            workflow_recovered: HashSet::new(),
+            _workflow_ticker: None,
             update: None,
             goals: HashMap::new(),
             memory_off: HashSet::new(),
@@ -330,6 +375,8 @@ impl Workspace {
             _discovery: None,
             _pump: None,
             sync: None,
+            sync_pending_turns: HashMap::new(),
+            answered_by: HashMap::new(),
             _sync_poll: None,
             _sync_commands: None,
             _sync_init: None,
@@ -905,7 +952,12 @@ impl Workspace {
 
     /// Reads a thread's history into its transcript, without showing it.
     fn load_thread(&mut self, thread_id: String, cx: &mut Context<Self>) {
-        if self.transcripts.contains_key(&thread_id) || self.loading.contains(&thread_id) {
+        if self.loaded_threads.contains(&thread_id) || self.loading.contains(&thread_id) {
+            return;
+        }
+        // A follower's snapshot is the conversation; its owner keeps the
+        // writer lock, so there is nothing local to resume.
+        if self.transcripts.contains_key(&thread_id) && self.sync_is_remote(&thread_id) {
             return;
         }
         if self.sync_open_thread(&thread_id, cx) {
@@ -936,8 +988,20 @@ impl Workspace {
                 match resumed {
                     Ok((meta, turns)) => {
                         ws.upsert_thread(meta);
-                        ws.transcripts
-                            .insert(thread_id.clone(), Transcript::from_history(turns));
+                        ws.transcripts.insert(
+                            thread_id.clone(),
+                            Transcript::from_history(turns),
+                        );
+                        ws.loaded_threads.insert(thread_id.clone());
+                        let pending = ws.sync_pending_turns.remove(&thread_id).unwrap_or_default();
+                        for turn in pending {
+                            if let Err(error) = ws.sync_deliver_owner_turn(&thread_id, turn, cx) {
+                                cx.emit(Notice::Error(tf(
+                                    "Could not deliver a turn from another computer: {error}",
+                                    &[("error", &error.to_string())],
+                                )));
+                            }
+                        }
                         if mode.is_none() {
                             ws.load_goal(thread_id, cx);
                         } else if let Some(goal) = goal {
@@ -948,6 +1012,14 @@ impl Workspace {
                     }
                     Err(error) => {
                         ws.pilot_failure(&thread_id, true);
+                        if let Some(pending) = ws.sync_pending_turns.remove(&thread_id) {
+                            for _ in pending {
+                                cx.emit(Notice::Error(tf(
+                                    "Could not open this chat: {error}",
+                                    &[("error", &format!("{error:#}"))],
+                                )));
+                            }
+                        }
                         let mut transcript = Transcript::new();
                         transcript.fail_pending_turn(tf(
                             "Could not open this chat: {error}",
@@ -1666,6 +1738,7 @@ impl Workspace {
                                 // The draft becomes the thread's transcript.
                                 let draft = std::mem::take(&mut ws.draft);
                                 ws.transcripts.insert(id.clone(), draft);
+                                ws.loaded_threads.insert(id.clone());
                                 if let Some(born) = ws.born.remove(DRAFT) {
                                     ws.born.insert(id.clone(), born);
                                 }
@@ -1767,10 +1840,22 @@ impl Workspace {
             self.sync_remote_approval(thread_id, request_id, decision, cx);
             return;
         }
-        if let Ok(task) =
-            self.submit_answer(thread_id, request_id, phone::Answer::Approval(decision), cx)
-        {
-            task.detach();
+        match self.submit_answer(
+            thread_id,
+            request_id.clone(),
+            phone::Answer::Approval(decision),
+            cx,
+        ) {
+            Ok(task) => task.detach(),
+            Err(atrium_phone::Error::Stale) => {
+                if let Some(device) = self.answered_by(thread_id, &request_id) {
+                    cx.emit(Notice::Info(tf(
+                        "Already answered on {device}.",
+                        &[("device", &device)],
+                    )));
+                }
+            }
+            Err(_) => {}
         }
     }
 
@@ -1779,6 +1864,7 @@ impl Workspace {
             self.acp_archive(thread_id.clone(), cx);
             self.threads.retain(|t| t.id != thread_id);
             self.transcripts.remove(&thread_id);
+            self.loaded_threads.remove(&thread_id);
             self.settings.pinned.retain(|id| *id != thread_id);
             if self.view == View::Thread(thread_id) {
                 self.view = View::Draft;
@@ -1793,6 +1879,7 @@ impl Workspace {
         };
         self.threads.retain(|t| t.id != thread_id);
         self.transcripts.remove(&thread_id);
+        self.loaded_threads.remove(&thread_id);
         self.settings.pinned.retain(|id| *id != thread_id);
         if self.view == View::Thread(thread_id.clone()) {
             self.view = View::Draft;

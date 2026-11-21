@@ -17,6 +17,7 @@ atrium-phone = { path = "../atrium-phone" }
 atrium-project.workspace = true
 atrium-office.workspace = true
 atrium-preview.workspace = true
+atrium-workflow.workspace = true
 codex-client.workspace = true
 acp-client.workspace = true
 agent-rpc.workspace = true
@@ -39,4 +40,5 @@ ely-gpui-component.workspace = true
 workspace-ticker-test = ["gpui/test-support", "atrium-phone/test-support"]
 
 [dev-dependencies]
+tempfile = "3"
 ureq.workspace = true

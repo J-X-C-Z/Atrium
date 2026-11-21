@@ -138,6 +138,9 @@ pub struct TurnInput {
 pub struct ApprovalAnswer {
     /// `accept`, `accept_for_session` or `decline`.
     pub decision: String,
+    /// The device that answered, for "answered on" messages.
+    #[serde(default)]
+    pub by: Option<String>,
 }
 
 /// A follower's answers to an agent's questions.

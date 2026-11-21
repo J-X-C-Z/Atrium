@@ -91,6 +91,10 @@ pub struct Settings {
     pub no_update_check: bool,
     /// The interface's language.
     pub language: crate::i18n::Language,
+    /// Workflow run folders, newest first.
+    pub workflow_runs: Vec<PathBuf>,
+    /// Template versions whose folder commands the user has approved.
+    pub workflow_confirmed: std::collections::HashMap<String, u32>,
     /// Where new chats run on each device, by device id.
     pub device_folders: std::collections::HashMap<String, String>,
     /// Whether this install shares its overlay and conversations with the

@@ -134,6 +134,7 @@ impl PeerClient {
         id: &str,
         request: &serde_json::Value,
         decision: &str,
+        by: Option<&str>,
     ) -> Result<(), PeerError> {
         let request = match request {
             serde_json::Value::String(text) => text.clone(),
@@ -148,6 +149,7 @@ impl PeerClient {
             ),
             &ApprovalAnswer {
                 decision: decision.into(),
+                by: by.map(str::to_owned),
             },
         )
     }

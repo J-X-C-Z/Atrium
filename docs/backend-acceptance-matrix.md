@@ -130,3 +130,49 @@ Sites with an older fixed-name `AtriumNode` registration should uninstall it usi
 its original binary before installing the per-user task. Linux runs under a
 systemd user manager and requires an explicit administrator/user decision to
 enable lingering. The archive scripts use the current native build target.
+
+## Multi-device sync: two-machine acceptance
+
+These are the real-device items from
+[multi-device-sync-implementation.md](multi-device-sync-implementation.md#8-tests).
+They are tracked separately from the 20-package count above. Local loopback tests
+do not establish Tailscale identity, discovery, sleep/wake, or a real second
+computer.
+
+| # | Contract | Current state | Required evidence |
+|---|---|---|---|
+| 12 | Two computers under the same Tailscale owner: automatic discovery, a follower turn, move in both directions, and a laptop sleeping and waking | **Not run. Pending real two-device acceptance.** | Exact commit/build artifacts; both device and Tailscale host names; same-owner identity check; discovery latency; follower turn result; both move directions including session resume and working-tree equality; sleep/wake reconnect result; logs and screenshots or terminal captures; remaining exclusions |
+| 13 | A device under a different Tailscale owner: refused before pairing, accepted after the code is redeemed | **Not run. Pending real two-device acceptance.** | Exact commit/build artifacts; both identities; unauthenticated request result; pairing code redemption; authenticated discovery and follower-turn result; token persistence after restart; logs and terminal captures; negative-case evidence |
+
+### Isolated evidence, not real-device acceptance
+
+The current worktree has a loopback harness that starts two embedded Atrium
+nodes on one machine and uses `mock-codex`. It is intentionally listed
+separately because it does not exercise Tailscale or two operating-system
+sessions.
+
+| Evidence | Result | Scope |
+|---|---|---|
+| `cargo test -p atrium-app --features workspace-ticker-test 'workspace::sync::tests' -- --test-threads=1` | Passed, 10 tests | Two embedded nodes cover listing within the poll interval, `thread/read`, follower turns with identical item ids, approval first-answer races, offline cache catch-up, move in both directions with uncommitted files and rollout sessions, scheduler lease takeover, and the documented environment overrides. Mock agent only; no Tailscale, real Codex, or sleep/wake. |
+| `cargo test -p codex-client --test mock_e2e` | Passed, 5 tests | `thread/read` does not count as `thread/resume`; turn/start is refused until resume; rollout files survive a new mock process. |
+| `cargo test -p atrium-workflow` and `cargo test -p atrium-app --features workspace-ticker-test 'workspace::workflow' -- --test-threads=1` | Passed, 17 + 2 tests | Template/run state machine, command and PDF checks, reviewer verdict parsing, three-step runner completion, and run input storage. Not a real-provider run. |
+
+These same-machine results still do not establish the real-device items 12 and
+13 or the real-provider workflow item W1. This section does not change the
+historical **12/20** isolated-package count.
+
+## Workflow runner: real CUMCM acceptance
+
+The workflow brief requires one real end-to-end run on a past CUMCM problem
+with real Codex and Claude Code on a machine with TeX Live. This is a manual
+provider and typesetting acceptance; mock runner tests, command checks, or a
+compiling `xelatex` fixture do not substitute for it.
+
+| # | Contract | Current state | Required evidence |
+|---|---|---|---|
+| W1 | Built-in math-modeling workflow reaches its first stop from a real problem and data set, then completes after approval | **Not run. Pending real-provider acceptance.** | Exact commit/build; problem source and checksum; installed Codex, Claude Code and TeX versions; model and effort per step; elapsed time per step; tries per step; gate outcome; PDF compile result and page count; verifier verdict and reasons; final run folder/log location; anything that needed manual help |
+
+Record the run only after checking the real artifacts (source PDF/TeX, figures,
+and verifier output). Keep the run manifest and `.atrium/log.jsonl` path with
+the entry; do not mark the workflow backend accepted from template parsing or
+mock-only tests alone.
