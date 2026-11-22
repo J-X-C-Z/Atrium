@@ -41,6 +41,8 @@ pub struct WorkflowForm {
     pub note: Entity<TextInput>,
     /// The step whose details are open, by run folder.
     pub open: HashMap<PathBuf, String>,
+    /// The option picked at a deciding stop, by `<run dir>|<step>`.
+    pub picked: HashMap<String, String>,
 }
 
 impl WorkflowForm {
@@ -57,6 +59,7 @@ impl WorkflowForm {
                     .placeholder(t("What should change? The agent gets this with the step."))
             }),
             open: HashMap::new(),
+            picked: HashMap::new(),
         }
     }
 
@@ -234,6 +237,31 @@ pub fn sidebar_list(workspace: &Entity<Workspace>, cx: &App) -> AnyElement {
         );
     }
     column = column.child(heading("Templates"));
+    let author = workspace.clone();
+    let authoring = ws.authoring.as_ref().is_some_and(|a| a.base.is_none());
+    column = column.child(
+        div()
+            .id("wf-tpl-ai")
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1p5()
+            .rounded(theme.radius(Radius::Md))
+            .cursor_pointer()
+            .text_size(small)
+            .when(authoring, |d| d.bg(colors.active).text_color(colors.fg))
+            .when(!authoring, |d| {
+                d.text_color(colors.accent).hover(|d| d.bg(colors.hover))
+            })
+            .child(
+                Icon::new(IconName::Sparkles)
+                    .size(IconSize::Sm)
+                    .color(colors.accent),
+            )
+            .child(div().flex_1().min_w_0().truncate().child(t("New with AI…")))
+            .on_click(move |_, _, cx| author.update(cx, |ws, cx| ws.open_authoring(None, cx))),
+    );
     for (ix, entry) in ws.workflow_templates().into_iter().enumerate() {
         let open = workspace.clone();
         let id = entry.template.id.clone();
@@ -281,14 +309,17 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (run, picked) = {
+        let (run, picked, authoring) = {
             let ws = self.workspace.read(cx);
             let run = match &ws.room {
                 Room::Workflows { run } => run.clone(),
                 _ => None,
             };
-            (run, ws.pick_template.clone())
+            (run, ws.pick_template.clone(), ws.authoring.clone())
         };
+        if let Some(authoring) = authoring {
+            return self.author_view(authoring, cx);
+        }
         if let Some(id) = picked {
             self.workspace.update(cx, |ws, _| ws.pick_template = None);
             if self.workflow.template.as_deref() != Some(id.as_str()) {
@@ -323,7 +354,11 @@ impl RootView {
             ) && !self.workflow.texts.contains_key(&input.key)
             {
                 let long = input.kind == InputKind::Long;
-                let placeholder = input.help.clone();
+                // An empty field takes the default, so show it there.
+                let placeholder = match &input.default {
+                    Some(default) if !default.is_empty() => default.clone(),
+                    _ => input.help.clone(),
+                };
                 let field = cx.new(|cx| {
                     let field = TextInput::new(window, cx).placeholder(placeholder);
                     if long { field.multi_line(2, 6) } else { field }
@@ -441,6 +476,8 @@ impl RootView {
         let home = self.workspace.read(cx).workflow_home();
         let copy = self.workspace.clone();
         let copy_id = template.id.clone();
+        let change = self.workspace.clone();
+        let change_id = template.id.clone();
         let source = match &entry.source {
             TemplateSource::Builtin => t("Built in").to_string(),
             TemplateSource::User(path) => path.display().to_string(),
@@ -466,13 +503,21 @@ impl RootView {
             environment = environment.child(
                 div()
                     .text_size(tiny)
-                    .text_color(if need.found { colors.fg_muted } else { colors.danger })
-                    .child(format!(
-                        "{}: {} — {}",
-                        need.tool,
-                        if need.found { t("found") } else { t("missing") },
-                        need.hint
-                    )),
+                    .text_color(if need.found {
+                        colors.fg_muted
+                    } else {
+                        colors.danger
+                    })
+                    .child(if need.found {
+                        format!("{}: {}", crate::i18n::t_any(&need.tool), t("found"))
+                    } else {
+                        format!(
+                            "{}: {} — {}",
+                            crate::i18n::t_any(&need.tool),
+                            t("missing"),
+                            crate::i18n::t_any(&need.hint)
+                        )
+                    }),
             );
         }
         let confirm = self.workspace.clone();
@@ -544,9 +589,47 @@ impl RootView {
                                                     let _ = crate::opener::open_default(&path);
                                                 }
                                             }),
+                                    )
+                                    .child(
+                                        Button::new("wf-change-template", t("Change with AI"))
+                                            .variant(ButtonVariant::Ghost)
+                                            .size(ControlSize::Sm)
+                                            .icon(IconName::Sparkles)
+                                            .on_click(move |_, _, cx| {
+                                                let id = change_id.clone();
+                                                change.update(cx, |ws, cx| ws.open_authoring(Some(id), cx))
+                                            }),
                                     ),
                             ),
                     )
+                    .children(atrium_workflow_experience(&template.id).map(|count| {
+                        let id = template.id.clone();
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px_3()
+                            .py_2()
+                            .rounded(theme.radius(Radius::Md))
+                            .bg(colors.accent.opacity(0.08))
+                            .text_size(tiny)
+                            .text_color(colors.fg_muted)
+                            .child(Icon::new(IconName::BookOpen).size(IconSize::Xs).color(colors.accent))
+                            .child(div().flex_1().child(tf(
+                                "New runs start with the lessons you kept from {n} earlier runs.",
+                                &[("n", &count)],
+                            )))
+                            .child(
+                                Button::new("wf-lessons", t("Edit"))
+                                    .variant(ButtonVariant::Ghost)
+                                    .size(ControlSize::Sm)
+                                    .on_click(move |_, _, _| {
+                                        if let Some(path) = crate::workspace::experience_file(&id) {
+                                            let _ = crate::opener::open_default(&path);
+                                        }
+                                    }),
+                            )
+                    }))
                     .child(section(t("What to start from"), form, cx))
                     .child(section(t("Steps"), steps, cx))
                     .when(has_needs, |d| {
@@ -794,13 +877,14 @@ impl RootView {
                 .steps
                 .iter()
                 .find(|s| {
-                    matches!(
-                        s.status,
-                        StepStatus::Review
-                            | StepStatus::Failed
-                            | StepStatus::Running
-                            | StepStatus::Checking
-                    )
+                    !s.expanded
+                        && matches!(
+                            s.status,
+                            StepStatus::Review
+                                | StepStatus::Failed
+                                | StepStatus::Running
+                                | StepStatus::Checking
+                        )
                 })
                 .map(|s| s.id.clone())
         });
@@ -963,6 +1047,50 @@ impl RootView {
                 )
         });
 
+        let retro = dir.join("reports").join("RETRO.md");
+        let retro_card = retro.exists().then(|| {
+            let (w, d, root, path) = (ws.clone(), dir.clone(), cx.entity(), retro.clone());
+            div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .p_3()
+                .rounded(theme.radius(Radius::Lg))
+                .border_1()
+                .border_color(colors.border)
+                .bg(colors.surface)
+                .child(Icon::new(IconName::BookOpen).size(IconSize::Md).color(colors.accent))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(div().text_size(small).child(t("The retrospective")))
+                        .child(
+                            div()
+                                .text_size(tiny)
+                                .text_color(colors.fg_muted)
+                                .child(t("Keep its lessons worth keeping, and the next runs of this template start with them.")),
+                        ),
+                )
+                .child(
+                    Button::new("wf-retro-open", t("Preview"))
+                        .variant(ButtonVariant::Ghost)
+                        .size(ControlSize::Sm)
+                        .on_click(move |_, window, cx| {
+                            let path = path.clone();
+                            root.update(cx, |root, cx| root.open_preview(path, window, cx))
+                        }),
+                )
+                .child(
+                    Button::new("wf-retro-keep", t("Keep the lessons"))
+                        .size(ControlSize::Sm)
+                        .icon(IconName::Check)
+                        .on_click(move |_, _, cx| w.update(cx, |ws, cx| ws.keep_lessons(&d, cx))),
+                )
+        });
+
         div()
             .id("wf-run")
             .flex_1()
@@ -995,6 +1123,7 @@ impl RootView {
                         )
                     })
                     .children(paper_card)
+                    .children(retro_card)
                     .child(timeline),
             )
             .into_any_element()
@@ -1015,7 +1144,11 @@ impl RootView {
         let tiny = theme.text_size(TextSize::Xs);
         let run = &entry.run;
         let dir = entry.dir.clone();
-        let step = &run.template.steps[ix];
+        let Some(step) = run.spec(&state.id).cloned() else {
+            return div().into_any_element();
+        };
+        let step = &step;
+        let _ = ix;
         let tries = state.attempts.len();
         let took: i64 = state
             .attempts
@@ -1074,7 +1207,10 @@ impl RootView {
                                     } else {
                                         colors.fg
                                     })
-                                    .child(step.title.clone()),
+                                    .child(match &state.item {
+                                        Some(item) => item.title.clone(),
+                                        None => step.title.clone(),
+                                    }),
                             )
                             .child(
                                 div()
@@ -1093,7 +1229,16 @@ impl RootView {
                             .text_size(tiny)
                             .text_color(colors.fg_muted)
                             .truncate()
-                            .child(step.summary.clone()),
+                            .child(if state.expanded {
+                                tf(
+                                    "{n} sub-questions, each solved on its own",
+                                    &[("n", &run.items_of(&state.id).len())],
+                                )
+                            } else if state.is_item() {
+                                String::new()
+                            } else {
+                                step.summary.clone()
+                            }),
                     ),
             )
             .child(meta)
@@ -1109,12 +1254,14 @@ impl RootView {
                 })
             });
 
-        let details = open.then(|| self.step_details(entry, ix, state, cx));
+        // A repeating step does no work itself: its items carry the details.
+        let details = (open && !state.expanded).then(|| self.step_details(entry, ix, state, cx));
 
-        // A rail down the left joins the steps.
+        // A rail down the left joins the steps; sub-questions sit in.
         div()
             .flex()
             .gap_3()
+            .when(state.is_item(), |d| d.pl_6())
             .child(
                 div()
                     .flex_none()
@@ -1164,7 +1311,11 @@ impl RootView {
         let small = theme.text_size(TextSize::Sm);
         let run = &entry.run;
         let dir = entry.dir.clone();
-        let step = &run.template.steps[ix];
+        let Some(step) = run.spec(&state.id).cloned() else {
+            return div().into_any_element();
+        };
+        let step = &step;
+        let _ = ix;
         let mut column = div()
             .flex()
             .flex_col()
@@ -1221,7 +1372,8 @@ impl RootView {
         // The files it should leave, with the ones there to preview.
         let mut files = div().flex().flex_wrap().gap_1();
         let mut any = false;
-        for output in &step.outputs {
+        let outputs = run.outputs_of(&state.id);
+        for output in &outputs {
             for path in atrium_workflow::check::matches(&dir, output)
                 .into_iter()
                 .take(6)
@@ -1268,15 +1420,15 @@ impl RootView {
                 );
             }
         }
-        if !any && !step.outputs.is_empty() {
+        if !any && !outputs.is_empty() {
             files = files.child(
                 div()
                     .text_size(tiny)
                     .text_color(colors.fg_muted)
-                    .child(step.outputs.join("、")),
+                    .child(outputs.join("、")),
             );
         }
-        if !step.outputs.is_empty() {
+        if !outputs.is_empty() {
             column = column.child(label_block(t("Files"), files, cx));
         }
 
@@ -1332,6 +1484,39 @@ impl RootView {
             );
         }
 
+        // The options of a deciding stop, to pick from; a decision made.
+        if let Some(decide) = step.decide.as_ref()
+            && state.status == StepStatus::Review
+        {
+            column = column.child(self.options_block(entry, &state.id, &decide.question, cx));
+        }
+        if let Some(made) = run.decisions.iter().find(|d| d.step == state.id) {
+            let mut text = String::new();
+            if let Some(c) = &made.choice {
+                text.push_str(&tf("You chose {choice}", &[("choice", &c.title)]));
+            }
+            if !made.note.is_empty() {
+                if !text.is_empty() {
+                    text.push_str(if crate::i18n::chinese() { "；" } else { "; " });
+                }
+                text.push_str(&tf("your note: {note}", &[("note", &made.note)]));
+            }
+            column = column.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(small)
+                    .text_color(colors.fg)
+                    .child(
+                        Icon::new(IconName::CircleCheck)
+                            .size(IconSize::Sm)
+                            .color(colors.success),
+                    )
+                    .child(text),
+            );
+        }
+
         // Decisions.
         let id = state.id.clone();
         let mut actions = div().flex().items_center().gap_2().flex_wrap();
@@ -1341,7 +1526,13 @@ impl RootView {
             StepStatus::Review | StepStatus::Failed | StepStatus::Done
         );
         if state.status == StepStatus::Review {
-            let (w, d, i, r) = (self.workspace.clone(), dir.clone(), id.clone(), cx.entity());
+            let (w, d, i, r, n) = (
+                self.workspace.clone(),
+                dir.clone(),
+                id.clone(),
+                cx.entity(),
+                note.clone(),
+            );
             actions = actions.child(
                 Button::new(
                     SharedString::from(format!("wf-approve-{id}")),
@@ -1350,11 +1541,15 @@ impl RootView {
                 .size(ControlSize::Sm)
                 .icon(IconName::Check)
                 .on_click(move |_, _, cx| {
+                    let text = n.read(cx).text().to_string();
+                    let key = format!("{}|{i}", d.display());
                     // The next step that needs the user opens by itself.
-                    r.update(cx, |root, _| {
+                    let choice = r.update(cx, |root, _| {
                         root.workflow.open.remove(&d);
+                        root.workflow.picked.get(&key).cloned()
                     });
-                    w.update(cx, |ws, cx| ws.approve_step(&d, &i, cx))
+                    w.update(cx, |ws, cx| ws.approve_step(&d, &i, choice, &text, cx));
+                    n.update(cx, |input, cx| input.set_text("", cx));
                 }),
             );
         }
@@ -1413,6 +1608,126 @@ impl RootView {
         }
         column.into_any_element()
     }
+}
+
+impl RootView {
+    /// The options a deciding step wrote, as cards to pick one from.
+    fn options_block(
+        &self,
+        entry: &RunEntry,
+        id: &str,
+        question: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let colors = theme.colors.clone();
+        let small = theme.text_size(TextSize::Sm);
+        let tiny = theme.text_size(TextSize::Xs);
+        let key = format!("{}|{id}", entry.dir.display());
+        let picked = self.workflow.picked.get(&key).cloned();
+        let options = entry
+            .run
+            .options_file(id)
+            .and_then(|f| std::fs::read_to_string(entry.dir.join(f)).ok())
+            .map(|t| atrium_workflow::read_choices(&t))
+            .unwrap_or_default();
+        let mut list = div().flex().flex_col().gap_2();
+        if options.is_empty() {
+            list = list.child(div().text_size(tiny).text_color(colors.danger).child(t(
+                "The step wrote no options to pick from. Ask for changes to have it write them.",
+            )));
+        }
+        for option in options {
+            let on = picked.as_deref() == Some(option.id.as_str());
+            let root = cx.entity();
+            let (k, choice) = (key.clone(), option.id.clone());
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("wf-opt-{id}-{}", option.id)))
+                    .flex()
+                    .items_start()
+                    .gap_3()
+                    .p_3()
+                    .rounded(theme.radius(Radius::Md))
+                    .border_1()
+                    .border_color(if on { colors.accent } else { colors.border })
+                    .when(on, |d| d.bg(colors.accent.opacity(0.06)))
+                    .cursor_pointer()
+                    .hover(|d| d.border_color(colors.border_strong))
+                    .child(
+                        div()
+                            .mt(px(3.))
+                            .flex_none()
+                            .size(px(14.))
+                            .rounded_full()
+                            .border_1()
+                            .border_color(if on {
+                                colors.accent
+                            } else {
+                                colors.border_strong
+                            })
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .when(on, |d| {
+                                d.child(div().size(px(7.)).rounded_full().bg(colors.accent))
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .text_size(small)
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .child(option.title.clone()),
+                            )
+                            .when(!option.summary.is_empty(), |d| {
+                                d.child(
+                                    div()
+                                        .text_size(tiny)
+                                        .text_color(colors.fg_muted)
+                                        .whitespace_normal()
+                                        .child(option.summary.clone()),
+                                )
+                            }),
+                    )
+                    .on_click(move |_, _, cx| {
+                        let (k, choice) = (k.clone(), choice.clone());
+                        root.update(cx, |root, cx| {
+                            root.workflow.picked.insert(k, choice);
+                            cx.notify();
+                        })
+                    }),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .text_size(small)
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child(if question.is_empty() {
+                        t("Pick one").to_string()
+                    } else {
+                        question.to_string()
+                    }),
+            )
+            .child(list)
+            .into_any_element()
+    }
+}
+
+/// How many earlier runs left lessons for template `id`, when any did.
+fn atrium_workflow_experience(id: &str) -> Option<usize> {
+    let text = crate::workspace::experience(id)?;
+    Some(text.lines().filter(|l| l.starts_with("## ")).count().max(1))
 }
 
 /// Whether a runner drives runs; until it does, the run view says so.

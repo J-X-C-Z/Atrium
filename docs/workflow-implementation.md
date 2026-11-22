@@ -34,6 +34,24 @@ own words. A step can name a skill (`skill = "mathmodel-contest-suite:..."`).
 When that step's agent is Claude Code, the prompt tells it to use the
 skill if it is installed. That is the only coupling.
 
+Version 2 of the template also follows a second reference,
+[Odyphus/MathModel-Copilot](https://github.com/Odyphus/MathModel-Copilot).
+Its MIT license covers only what it inherited from upstream, so the same
+rule holds: take ideas, not text. What it added:
+
+- **The user decides.** A step lays out candidate routes and the user
+  picks one.
+- **Per sub-question loop.** Each sub-question is modeled, solved,
+  verified and checked for sensitivity on its own.
+- **Results move through states.** A result is written, then run, then
+  verified, and only verified ones reach the paper.
+- **Cross-stage back-check.** A fault goes back to the stage where it
+  started.
+- **Independent reviewer panel.** Several reviewers each read the paper
+  on their own.
+- **AI-use record.** What AI did is recorded, and the paper discloses it.
+- **Retrospective.** Lessons that carry over to the next contest.
+
 ## Status: what exists, what is yours
 
 **Built (in `crates/atrium-workflow`, tested):**
@@ -44,10 +62,30 @@ skill if it is installed. That is the only coupling.
   `when`), `gate`, `optional`, `fixes` (a reviewer sends faults back to the
   step it reviews), `when`, `attempts` and `timeout_min`. Steps may only
   need or fix steps before them, so there are no cycles.
-- `run::Run`: the state machine. Its calls are `new`, `ready`, `begin`,
-  `set_thread`, `turn_finished`, `checked` (returning `Outcome`),
-  `approve`, `redo`, `skip`, `pause`, `resume`, `stop` and `recover`. Its
-  JSON is the file format of `.atrium/run.json`.
+  - **`decide`**: the step writes an options file. The user must pick one
+    at its stop, and may add a note. Choices and notes go into every later
+    step's prompt.
+  - **`each`**: the step repeats once per item an earlier step listed, for
+    example once per sub-question. Its items are run steps
+    `<step>:<item>`, and `{{item.id}}` and `{{item.title}}` are filled
+    into the prompt, the outputs and the checks.
+  - **`fixes`** can be a list. A failing result's `send_back` (a step or
+    `step:item`) picks which step gets the faults; otherwise the first
+    step in the list does.
+  - **`verdict`**: a local check of a JSON file the step writes,
+    `{"pass", "issues": [{"step", "problem", "fix", "blocking"}]}`. Each
+    blocking issue becomes a failed result whose `send_back` is its step.
+- `run::Run`: the state machine. Its JSON is the file format of
+  `.atrium/run.json`. Its calls are:
+  - starting work: `new`, `ready`, `to_expand`, `expand`, `begin`,
+    `set_thread`;
+  - finishing it: `turn_finished`, then `checked` (returning `Outcome`);
+  - the user's decisions: `approve(id, choice, note)`, `redo`, `skip`;
+  - the run as a whole: `pause`, `resume`, `stop`, `recover`.
+
+  A run also keeps `decisions` (the user's picks and notes) and
+  `experience` (lessons kept from earlier runs, which go into every
+  prompt).
 - `check::local_results`: the checks that only read files (`exists`,
   `contains`, `absent`, plus every step's `outputs`). Private input values
   (names that must not appear) are matched but never echoed.
@@ -55,6 +93,16 @@ skill if it is installed. That is the only coupling.
   step with inputs filled in (never private ones), the files to leave, the
   checks in words, the reasons from the last try, and the skill hint.
 - `builtin::all()`: the math modeling template (`builtin/mathmodel.toml`).
+- `author`: writing templates with an agent. `GUIDE` is the format guide
+  the agent works from (a test keeps it naming every field); `brief` is the
+  authoring chat's first message; `inspect` parses a draft and `lint`s it
+  for what reads but will not work as meant (unknown agents or inputs,
+  `{{item.…}}` without `each`, an `each` list no earlier step writes, a
+  `decide` file not in `outputs`, steps with nothing to check, a run that
+  never stops). The app makes a draft folder (`FORMAT.md`, `example.toml`,
+  `template.toml`, `references/`) under `<config>/Atrium/workflows/drafts/`
+  and starts an ordinary chat in it; nothing here is yours to build. The
+  runner should refuse to start a template whose `inspect` has an error.
 
 **Built in the app (UI side):**
 
@@ -88,6 +136,10 @@ skill if it is installed. That is the only coupling.
    - handles `pause`, `resume`, `stop` and restart recovery. A step cut
      off mid-turn is retried without using an allowance; it does not yet
      re-attach the old turn.
+   - lays out repeating (`each`) steps once their list file is written,
+     and runs the items like any other step;
+   - reloads the run after each finished turn, so two steps finishing in
+     one tick do not overwrite each other's result.
 2. The **runner checks**:
    - `command` runs through `sh -c` (`cmd /C` on Windows), enforces the
      timeout, and keeps the tail of stderr/stdout on failure;
@@ -147,7 +199,12 @@ view and the stops) is built on the UI side against the API in section 5.
 One per open Atrium, ticking every run whose state is `Running` or
 `Waiting`. A tick does the following:
 
-1. For each step in `run.ready()`, up to **two steps at a time per run**:
+0. For each `(step, file)` in `run.to_expand()`, read `file`
+   (`atrium_workflow::read_choices`) and call `run.expand(step, items)`.
+   If the list is missing or empty, `expand` fails the step and the run
+   waits for the user. Say so in the step's result.
+1. For each step in `run.ready()`, up to **two steps at a time per run**
+   (the items of a repeating step are ready side by side):
    - Pick the agent: `Template::agent_of(step)`. If none is set, use the
      default chat agent. If that agent is not installed or not running,
      the step does not start. Instead the run gets a notice ("Claude Code
@@ -222,6 +279,24 @@ One per open Atrium, ticking every run whose state is `Running` or
     failure with detail "the reviewer did not give a verdict", and is
     retried once before it counts.
   - The reasons become the result's detail.
+  - An optional `"send_back_to"` in the verdict sets the result's
+    `send_back`.
+  - **A panel is just several `review` checks on one step.**
+    - Run them as **separate conversations that never see each other's
+      answers**, at the same time.
+    - Each gives its own result; any failure fails the step.
+
+## 3a. Experience
+
+- **Where lessons live:**
+  `<config>/Atrium/workflows/<template id>.experience.md`.
+- **Keeping lessons:** the run view's "Keep the lessons" button appends
+  the "建议保留的经验" section of a run's `reports/RETRO.md`. This is
+  built.
+- **Using them:** `start_run` copies the file into `run.experience`.
+  This is also built.
+- **Nothing to add in the runner:** the prompts already carry the
+  lessons.
 
 ## 4. The TeX environment
 
@@ -252,7 +327,7 @@ fn delete_template(&mut self, id: &str, cx);                                    
 fn workflow_runs(&self) -> Vec<RunEntry>;   // { dir, run: Run, live: HashMap<step, thread> }
 fn start_run(&mut self, template_id: &str, inputs: HashMap<String, String>,
              files: Vec<PathBuf>, skip: Vec<String>, dir: Option<PathBuf>, cx) -> Result<PathBuf, String>;
-fn approve_step(&mut self, dir: &Path, step: &str, cx);
+fn approve_step(&mut self, dir: &Path, step: &str, choice: Option<String>, note: &str, cx);
 fn redo_step(&mut self, dir: &Path, step: &str, note: &str, cx);
 fn skip_step(&mut self, dir: &Path, step: &str, cx);
 fn pause_run / resume_run / stop_run (&mut self, dir: &Path, cx);
@@ -278,7 +353,9 @@ Add to them as you change them.
 `mock-acp`):
 
 Current automated coverage: `the_runner_takes_three_steps_to_done` covers
-the three-step new-conversation path and terminal `Done` state. The
+the three-step new-conversation path and terminal `Done` state;
+`a_repeating_step_runs_once_per_listed_item` covers `each` expansion, two
+items running side by side, and `{{item.title}}` in their prompts. The
 remaining scenarios below are specifications for follow-up tests; they
 are not claimed as passed by this backend change.
 
@@ -305,6 +382,23 @@ are not claimed as passed by this backend change.
    - no prompt sent to the mock contains it (assert on the mock's request
      log);
    - an `absent` check finds it in a file.
+
+9. **Repeating step.**
+   - A step writes `reports/subproblems.json` with three items;
+   - the repeating step expands into three item steps, which start side by
+     side (up to the limit);
+   - the step after them starts only when all three pass.
+10. **Decision.**
+    - A deciding step stops;
+    - `approve` without a choice is refused;
+    - with a choice and a note, the next step's prompt (on the mock's
+      request log) holds both.
+11. **Verdict send-back.** A verifier writes `verify.json` naming
+    `solve:Q2`:
+    - only that item and the steps after it go again;
+    - Q1 keeps its result.
+12. **Panel.** Three `review` checks on one step run as three conversations
+    at once; one failing sends the step's `fixes` target back.
 
 **Once, by hand, recorded in `docs/backend-acceptance-matrix.md`:** run the
 built-in template on a real past CUMCM problem with real Codex and Claude

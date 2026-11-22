@@ -104,6 +104,13 @@ pub fn describe(check: &Check, lang: Lang) -> String {
             (None, None, true) => format!("{path} 是有效的 PDF"),
             (None, None, false) => format!("{path} is a valid PDF"),
         },
+        Check::Verdict { path } => {
+            if zh {
+                format!("{path} 的结论为通过")
+            } else {
+                format!("{path} says it passes")
+            }
+        }
         Check::Review { rubric, .. } => {
             let first = rubric.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
             if zh {
@@ -113,6 +120,63 @@ pub fn describe(check: &Check, lang: Lang) -> String {
             }
         }
     }
+}
+
+/// What a verdict file says: passed, or each issue with the step at fault.
+pub fn read_verdict(text: &str, lang: Lang) -> Vec<CheckResult> {
+    let zh = lang == Lang::Zh;
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else {
+        return vec![CheckResult::fail(
+            if zh { "验收结论" } else { "the verdict" },
+            if zh {
+                "不是有效的 JSON"
+            } else {
+                "not valid JSON"
+            },
+        )];
+    };
+    let issues = v["issues"].as_array().cloned().unwrap_or_default();
+    let mut out: Vec<CheckResult> = issues
+        .iter()
+        .filter(|i| i["blocking"].as_bool() != Some(false))
+        .map(|i| {
+            let s = |k: &str| i[k].as_str().unwrap_or("").trim().to_string();
+            let mut r = CheckResult::fail(
+                if s("problem").is_empty() {
+                    s("title")
+                } else {
+                    s("problem")
+                },
+                s("fix"),
+            );
+            r.send_back = Some(s("step")).filter(|x| !x.is_empty());
+            r
+        })
+        .collect();
+    let passed = v["pass"].as_bool().unwrap_or(false);
+    if out.is_empty() {
+        out.push(if passed {
+            CheckResult::pass(if zh {
+                "验收结论为通过"
+            } else {
+                "the verdict passes"
+            })
+        } else {
+            CheckResult::fail(
+                if zh {
+                    "验收结论为未通过"
+                } else {
+                    "the verdict does not pass"
+                },
+                if zh {
+                    "没有列出问题"
+                } else {
+                    "no issues listed"
+                },
+            )
+        });
+    }
+    out
 }
 
 /// Runs a check that only reads files; `None` for the runner's kinds.
@@ -129,6 +193,7 @@ pub fn run_local(
         what: what.clone(),
         passed,
         detail,
+        send_back: None,
     };
     Some(match check {
         Check::Exists { path, min } => {
@@ -235,6 +300,33 @@ pub fn run_local(
                 result(false, hits.join("; "))
             }
         }
+        Check::Verdict { path } => {
+            let Ok(text) = std::fs::read_to_string(dir.join(path)) else {
+                return Some(result(
+                    false,
+                    if zh {
+                        "文件不存在".into()
+                    } else {
+                        "no such file".into()
+                    },
+                ));
+            };
+            // Several results: the caller takes them through `run_local_all`.
+            let results = read_verdict(&text, lang);
+            let failed: Vec<&CheckResult> = results.iter().filter(|r| !r.passed).collect();
+            if failed.is_empty() {
+                result(true, String::new())
+            } else {
+                result(
+                    false,
+                    failed
+                        .iter()
+                        .map(|r| r.what.clone())
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                )
+            }
+        }
         _ => return None,
     })
 }
@@ -243,9 +335,6 @@ pub fn run_local(
 /// then its own file checks. The runner adds the results of the others,
 /// in [`Run::checks_of`] order.
 pub fn local_results(dir: &Path, run: &Run, id: &str, lang: Lang) -> Vec<CheckResult> {
-    let Some(step) = run.template.step(id) else {
-        return Vec::new();
-    };
     let private = |key: &str| {
         run.template
             .inputs
@@ -255,14 +344,20 @@ pub fn local_results(dir: &Path, run: &Run, id: &str, lang: Lang) -> Vec<CheckRe
             .flatten()
     };
     let mut out = Vec::new();
-    for output in &step.outputs {
+    for output in run.outputs_of(id) {
         let check = Check::Exists {
-            path: output.clone(),
+            path: output,
             min: None,
         };
         out.extend(run_local(dir, &check, &private, lang));
     }
     for check in run.checks_of(id) {
+        if let Check::Verdict { path } = &check
+            && let Ok(text) = std::fs::read_to_string(dir.join(path))
+        {
+            out.extend(read_verdict(&text, lang));
+            continue;
+        }
         out.extend(run_local(dir, &check, &private, lang));
     }
     out
@@ -326,6 +421,23 @@ mod tests {
             !r.detail.contains("张三"),
             "private values are never echoed"
         );
+    }
+
+    #[test]
+    fn a_verdict_names_the_step_at_fault() {
+        let r = read_verdict(
+            r#"{"pass": false, "issues": [
+                {"step": "solve:Q2", "problem": "Q2 的目标值与论文不一致", "fix": "以 results/Q2 为准"},
+                {"step": "writing", "problem": "摘要超过一页", "fix": "压缩问题重述", "blocking": true},
+                {"step": "writing", "problem": "图 3 配色", "blocking": false}
+            ]}"#,
+            Lang::Zh,
+        );
+        assert_eq!(r.len(), 2, "advice that does not block is left out");
+        assert_eq!(r[0].send_back.as_deref(), Some("solve:Q2"));
+        assert!(!r[0].passed);
+        assert!(read_verdict(r#"{"pass": true, "issues": []}"#, Lang::Zh)[0].passed);
+        assert!(!read_verdict("not json", Lang::Zh)[0].passed);
     }
 
     #[test]

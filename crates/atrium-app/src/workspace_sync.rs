@@ -1193,7 +1193,7 @@ impl Workspace {
                                 .await;
                         }
                         Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                            break (Vec::new(), Vec::new())
+                            break (Vec::new(), Vec::new());
                         }
                     }
                 };

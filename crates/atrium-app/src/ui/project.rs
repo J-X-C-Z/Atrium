@@ -399,7 +399,11 @@ pub fn render_overview(
                 .bg(colors.info.opacity(0.12))
                 .text_size(theme.text_size(TextSize::Xs))
                 .text_color(colors.info)
-                .child(Icon::new(IconName::Monitor).size(IconSize::Xs).color(colors.info))
+                .child(
+                    Icon::new(IconName::Monitor)
+                        .size(IconSize::Xs)
+                        .color(colors.info),
+                )
                 .child(tf(
                     "Scheduled on {device}; this computer only watches",
                     &[("device", &device)],

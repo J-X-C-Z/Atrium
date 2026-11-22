@@ -67,7 +67,10 @@ fn mock(
                 "thread/start" => {
                     next += 1;
                     let thread = format!("wf-thread-{next}");
-                    let cwd = request["params"]["cwd"].as_str().unwrap_or_default().to_string();
+                    let cwd = request["params"]["cwd"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string();
                     dirs.insert(thread.clone(), cwd.clone());
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -163,17 +166,81 @@ outputs = ["three.txt"]
 "#,
     )
     .unwrap();
-    let run = Run::new(template.clone(), HashMap::new(), &[], 1).unwrap();
-    super::super::workflows::save_run(&fixture.0, &run).unwrap();
+    let seen = drive(cx, &fixture.0, template);
+    let saved = super::super::workflows::load_run(&fixture.0).unwrap();
+    assert_eq!(saved.state, RunState::Done);
+    for file in ["one.txt", "two.txt", "three.txt"] {
+        assert!(fixture.0.join(file).exists(), "{file}");
+    }
+    let starts = seen
+        .iter()
+        .filter(|request| request["method"] == "thread/start")
+        .count();
+    assert_eq!(starts, 3, "each step gets a new conversation");
+}
+
+#[gpui::test(iterations = 1)]
+fn a_repeating_step_runs_once_per_listed_item(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = Fixture(std::env::temp_dir().join(uuid::Uuid::new_v4().to_string()));
+    fs::create_dir_all(fixture.0.join(".atrium")).unwrap();
     fs::write(
-        fixture.0.join(".atrium").join("workflow.toml"),
+        fixture.0.join("items.json"),
+        r#"[{"id": "a", "title": "First"}, {"id": "b", "title": "Second"}]"#,
+    )
+    .unwrap();
+    let template = Template::parse(
+        r#"
+id = "each"
+name = "Each"
+[[steps]]
+id = "one"
+title = "One"
+prompt = "STEP1 list"
+outputs = ["one.txt", "items.json"]
+[[steps]]
+id = "two"
+title = "Two"
+needs = ["one"]
+each = { from = "items.json" }
+prompt = "STEP2 {{item.title}}"
+outputs = ["two.txt"]
+"#,
+    )
+    .unwrap();
+    let seen = drive(cx, &fixture.0, template);
+    let saved = super::super::workflows::load_run(&fixture.0).unwrap();
+    assert_eq!(saved.state, RunState::Done);
+    let items: Vec<&str> = saved
+        .steps
+        .iter()
+        .filter(|step| step.is_item())
+        .map(|step| step.id.as_str())
+        .collect();
+    assert_eq!(items, ["two:a", "two:b"]);
+    let prompts: Vec<&str> = seen
+        .iter()
+        .filter(|request| request["method"] == "turn/start")
+        .filter_map(|request| request["params"]["input"][0]["text"].as_str())
+        .collect();
+    assert!(prompts.iter().any(|p| p.contains("STEP2 First")));
+    assert!(prompts.iter().any(|p| p.contains("STEP2 Second")));
+}
+
+/// Runs `template` in `dir` against the mock until it is done; returns the
+/// requests the mock saw.
+fn drive(cx: &mut TestAppContext, dir: &Path, template: Template) -> Vec<Value> {
+    let run = Run::new(template.clone(), HashMap::new(), &[], 1).unwrap();
+    super::super::workflows::save_run(dir, &run).unwrap();
+    fs::write(
+        dir.to_path_buf().join(".atrium").join("workflow.toml"),
         template.to_toml(),
     )
     .unwrap();
-    let (client, mut events, mock) = mock(fixture.0.clone());
+    let (client, mut events, mock) = mock(dir.to_path_buf().clone());
     let ws = cx.new(|cx| {
         let mut ws = Workspace::with_settings(crate::settings::Settings {
-            workflow_runs: vec![fixture.0.clone()],
+            workflow_runs: vec![dir.to_path_buf().clone()],
             ..Default::default()
         });
         ws.client = Some(client);
@@ -204,7 +271,7 @@ outputs = ["three.txt"]
         }
         thread::sleep(Duration::from_millis(5));
         if Instant::now() >= deadline {
-            let saved = super::super::workflows::load_run(&fixture.0).unwrap();
+            let saved = super::super::workflows::load_run(dir).unwrap();
             eprintln!(
                 "workflow state {:?}, steps {:?}",
                 saved.state,
@@ -248,17 +315,7 @@ outputs = ["three.txt"]
         cx.run_until_parked();
         thread::sleep(Duration::from_millis(5));
     }
-    let saved = super::super::workflows::load_run(&fixture.0).unwrap();
-    assert_eq!(saved.state, RunState::Done);
-    for file in ["one.txt", "two.txt", "three.txt"] {
-        assert!(fixture.0.join(file).exists(), "{file}");
-    }
     drop(ws);
     cx.run_until_parked();
-    let seen = mock.join().unwrap();
-    let starts = seen
-        .iter()
-        .filter(|request| request["method"] == "thread/start")
-        .count();
-    assert_eq!(starts, 3, "each step gets a new conversation");
+    mock.join().unwrap()
 }

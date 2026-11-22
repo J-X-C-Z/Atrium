@@ -50,16 +50,19 @@ mod sync;
 mod sync_view;
 #[path = "workspace_updates.rs"]
 mod updates;
-#[path = "workspace_workflows.rs"]
-mod workflows;
 #[path = "workspace_workflow_runner.rs"]
 mod workflow_runner;
+#[path = "workspace_workflows.rs"]
+mod workflows;
 pub use acp::{AcpAgent, AgentStatus, CODEX};
 pub use devices::{Device, DeviceStatus};
 pub use projects::{Activity, ActivityKind, Room, StreamState, StreamView, activities};
 pub use sync::SyncRuntime;
-pub use workflows::{RunEntry, TemplateSource};
+
 pub use sync_view::DeviceFilter;
+pub use workflows::{
+    Authoring, RunEntry, TemplateSource, draft_of, draft_report, experience, experience_file,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
@@ -209,16 +212,18 @@ pub struct Workspace {
     pub device_filter: DeviceFilter,
     /// The pairing code shown in Settings, and when it was made.
     pub pairing: Option<(String, Instant)>,
+    /// Workflow runs as last read from their folders.
+    pub workflow_runs: Vec<RunEntry>,
+    /// A template picked in the sidebar, for the start form to take up.
+    pub pick_template: Option<String>,
+    /// The "write a template with an agent" form, while it shows.
+    pub authoring: Option<Authoring>,
     /// Turns that ended in chats not open, by chat: the list shows the count.
     pub unread: HashMap<String, usize>,
     /// Steps in an open run whose full card is shown.
     pub open_steps: std::collections::HashSet<String>,
     /// A file a transcript row asked the side panel to show.
     pub preview_request: Option<std::path::PathBuf>,
-    /// Workflow runs as last read from their folders.
-    pub workflow_runs: Vec<RunEntry>,
-    /// A template picked in the sidebar, for the start form to take up.
-    pub pick_template: Option<String>,
     /// Steps whose checks are running, so a tick does not start them twice.
     pub(super) workflow_checking: HashSet<(PathBuf, String)>,
     /// Reviews whose separate reviewer chat has started.
@@ -346,10 +351,11 @@ impl Workspace {
             unread: HashMap::new(),
             device_filter: DeviceFilter::default(),
             pairing: None,
-            open_steps: Default::default(),
-            preview_request: None,
             workflow_runs: Vec::new(),
             pick_template: None,
+            authoring: None,
+            open_steps: Default::default(),
+            preview_request: None,
             workflow_checking: HashSet::new(),
             workflow_reviews: HashMap::new(),
             workflow_recovered: HashSet::new(),
@@ -997,10 +1003,8 @@ impl Workspace {
                 match resumed {
                     Ok((meta, turns)) => {
                         ws.upsert_thread(meta);
-                        ws.transcripts.insert(
-                            thread_id.clone(),
-                            Transcript::from_history(turns),
-                        );
+                        ws.transcripts
+                            .insert(thread_id.clone(), Transcript::from_history(turns));
                         ws.loaded_threads.insert(thread_id.clone());
                         let pending = ws.sync_pending_turns.remove(&thread_id).unwrap_or_default();
                         for turn in pending {

@@ -239,36 +239,36 @@ pub fn render(
                         "chats"
                     },
                 )
-                    .segment("chats", t("Chats"), Some(IconName::MessageSquare))
-                    .segment("projects", t("Projects"), Some(IconName::Layers))
-                    .segment("workflows", t("Workflows"), Some(IconName::Workflow))
-                    .size(ControlSize::Sm)
-                    .on_change(move |value, _, cx| {
-                        let room = value.as_ref();
-                        switch.update(cx, |ws, cx| {
-                            if room == "projects" {
-                                match ws
-                                    .settings
-                                    .active_project
-                                    .clone()
-                                    .or_else(|| ws.projects.first().map(|p| p.root.clone()))
-                                {
-                                    Some(root) => ws.enter_project(root, cx),
-                                    None => {
-                                        ws.room = crate::workspace::Room::Project {
-                                            root: std::path::PathBuf::new(),
-                                            stream: None,
-                                        };
-                                        cx.notify();
-                                    }
+                .segment("chats", t("Chats"), Some(IconName::MessageSquare))
+                .segment("projects", t("Projects"), Some(IconName::Layers))
+                .segment("workflows", t("Workflows"), Some(IconName::Workflow))
+                .size(ControlSize::Sm)
+                .on_change(move |value, _, cx| {
+                    let room = value.as_ref();
+                    switch.update(cx, |ws, cx| {
+                        if room == "projects" {
+                            match ws
+                                .settings
+                                .active_project
+                                .clone()
+                                .or_else(|| ws.projects.first().map(|p| p.root.clone()))
+                            {
+                                Some(root) => ws.enter_project(root, cx),
+                                None => {
+                                    ws.room = crate::workspace::Room::Project {
+                                        root: std::path::PathBuf::new(),
+                                        stream: None,
+                                    };
+                                    cx.notify();
                                 }
-                            } else if room == "workflows" {
-                                ws.enter_workflows(None, cx);
-                            } else {
-                                ws.enter_chats(cx);
                             }
-                        })
-                    }),
+                        } else if room == "workflows" {
+                            ws.enter_workflows(None, cx);
+                        } else {
+                            ws.enter_chats(cx);
+                        }
+                    })
+                }),
             )
         })
         .when(in_workflows, |sidebar| {
@@ -579,7 +579,12 @@ fn device_chips(workspace: &Entity<Workspace>, cx: &App) -> Option<AnyElement> {
     let current = ws.device_filter.clone();
     let mut chips: Vec<(SharedString, String, DeviceFilter, Option<bool>)> = vec![
         ("chip-all".into(), t("All").into(), DeviceFilter::All, None),
-        ("chip-here".into(), t("This computer").into(), DeviceFilter::Here, None),
+        (
+            "chip-here".into(),
+            t("This computer").into(),
+            DeviceFilter::Here,
+            None,
+        ),
     ];
     for device in devices {
         let online = ws.device_online(&device);
@@ -611,9 +616,15 @@ fn device_chips(workspace: &Entity<Workspace>, cx: &App) -> Option<AnyElement> {
                 .cursor_pointer()
                 .text_size(theme.text_size(TextSize::Xs))
                 .border_1()
-                .border_color(if on { colors.border_strong } else { colors.border })
+                .border_color(if on {
+                    colors.border_strong
+                } else {
+                    colors.border
+                })
                 .when(on, |c| c.bg(colors.active).text_color(colors.fg))
-                .when(!on, |c| c.text_color(colors.fg_muted).hover(|c| c.bg(colors.hover)))
+                .when(!on, |c| {
+                    c.text_color(colors.fg_muted).hover(|c| c.bg(colors.hover))
+                })
                 .children(online.map(|online| {
                     div().size(px(6.)).rounded_full().bg(if online {
                         colors.success

@@ -194,8 +194,7 @@ fn header(
                 MenuItem::new(t("Move to this computer"))
                     .icon(IconName::Monitor)
                     .on_click(move |_, cx| {
-                        workspace
-                            .update(cx, |ws, cx| ws.move_to_this_computer(id.clone(), cx));
+                        workspace.update(cx, |ws, cx| ws.move_to_this_computer(id.clone(), cx));
                     }),
             );
         }

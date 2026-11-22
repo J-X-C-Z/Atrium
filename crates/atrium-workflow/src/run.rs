@@ -2,12 +2,16 @@
 //! checks said, and what the user decided at each stop. Pure state: the
 //! runner calls these as agents start and finish and checks come back, and
 //! saves the run to `.atrium/run.json` after each change.
+//!
+//! A run's steps are the template's, in order, plus one step per item for a
+//! step that repeats (`each`): `<step>:<item>`, placed right after it. The
+//! repeating step itself does no work; it is done when all its items are.
 
 use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Template, condition_holds};
+use crate::{Check, Choice, Step, Template, condition_holds};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -27,7 +31,7 @@ pub enum RunState {
 #[serde(rename_all = "snake_case")]
 pub enum StepStatus {
     Pending,
-    /// An agent works on it.
+    /// An agent works on it; for a repeating step, its items are under way.
     Running,
     /// The agent's turn ended; the checks run.
     Checking,
@@ -48,6 +52,29 @@ pub struct CheckResult {
     /// Why it failed, for the agent's next try and for the user.
     #[serde(default)]
     pub detail: String,
+    /// A reviewer's word on which earlier step is at fault.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_back: Option<String>,
+}
+
+impl CheckResult {
+    pub fn pass(what: impl Into<String>) -> Self {
+        Self {
+            what: what.into(),
+            passed: true,
+            detail: String::new(),
+            send_back: None,
+        }
+    }
+
+    pub fn fail(what: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            what: what.into(),
+            passed: false,
+            detail: detail.into(),
+            send_back: None,
+        }
+    }
 }
 
 /// One go at a step by an agent.
@@ -73,7 +100,12 @@ impl Attempt {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StepRun {
+    /// The template step's id, or `<step>:<item>` for one item of a
+    /// repeating step.
     pub id: String,
+    /// The item, for one item of a repeating step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<Choice>,
     pub status: StepStatus,
     #[serde(default)]
     pub attempts: Vec<Attempt>,
@@ -84,9 +116,33 @@ pub struct StepRun {
     /// the user gave it a fresh start.
     #[serde(default)]
     pub budget_from: usize,
+    /// For a repeating step: its items have been laid out.
+    #[serde(default)]
+    pub expanded: bool,
 }
 
 impl StepRun {
+    fn new(id: String, item: Option<Choice>, status: StepStatus) -> Self {
+        Self {
+            id,
+            item,
+            status,
+            attempts: Vec::new(),
+            feedback: Vec::new(),
+            budget_from: 0,
+            expanded: false,
+        }
+    }
+
+    /// The template step this is, or is an item of.
+    pub fn spec(&self) -> &str {
+        self.id.split(':').next().unwrap_or(&self.id)
+    }
+
+    pub fn is_item(&self) -> bool {
+        self.item.is_some()
+    }
+
     fn tries(&self) -> usize {
         self.attempts.len().saturating_sub(self.budget_from)
     }
@@ -100,6 +156,17 @@ impl StepRun {
     }
 }
 
+/// What the user decided at a stop: the option picked, and a note.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Decision {
+    pub step: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choice: Option<Choice>,
+    #[serde(default)]
+    pub note: String,
+    pub at_ms: i64,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Run {
     /// The template as it was at the start, so later edits do not change
@@ -110,6 +177,13 @@ pub struct Run {
     pub inputs: HashMap<String, String>,
     pub state: RunState,
     pub steps: Vec<StepRun>,
+    /// What the user decided at stops, in order.
+    #[serde(default)]
+    pub decisions: Vec<Decision>,
+    /// Lessons the user kept from earlier runs of this template, given to
+    /// every step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experience: Option<String>,
     pub created_ms: i64,
     pub updated_ms: i64,
 }
@@ -128,6 +202,10 @@ pub enum RunError {
     MissingInput(String),
     #[error("step {0} cannot be skipped: it is not optional")]
     NotOptional(String),
+    #[error("step {0} asks you to pick an option first")]
+    ChoiceNeeded(String),
+    #[error("step {0} has no items to repeat over")]
+    NoItems(String),
 }
 
 /// What [`Run::checked`] did with a step's results.
@@ -138,8 +216,8 @@ pub enum Outcome {
     Review,
     /// Failed; another try starts with the reasons.
     Retry,
-    /// Failed in the step it reviews: that step goes again with the
-    /// reasons, then this one checks again.
+    /// Failed in a step it reviews: that step goes again with the reasons,
+    /// then this one checks again.
     SentBack {
         to: String,
     },
@@ -182,23 +260,23 @@ impl Run {
             }
             let skipped =
                 skip.contains(&step.id) || !condition_holds(step.when.as_deref(), &values);
-            steps.push(StepRun {
-                id: step.id.clone(),
-                status: if skipped {
+            steps.push(StepRun::new(
+                step.id.clone(),
+                None,
+                if skipped {
                     StepStatus::Skipped
                 } else {
                     StepStatus::Pending
                 },
-                attempts: Vec::new(),
-                feedback: Vec::new(),
-                budget_from: 0,
-            });
+            ));
         }
         Ok(Self {
             template,
             inputs: values,
             state: RunState::Running,
             steps,
+            decisions: Vec::new(),
+            experience: None,
             created_ms: now_ms,
             updated_ms: now_ms,
         })
@@ -219,18 +297,75 @@ impl Run {
             .ok_or_else(|| RunError::NoStep(id.to_string()))
     }
 
-    /// The checks step `id` runs for this run's inputs.
-    pub fn checks_of(&self, id: &str) -> Vec<crate::Check> {
+    /// The template step a run step is, or is an item of.
+    pub fn spec(&self, id: &str) -> Option<&Step> {
+        let step = self.step(id)?;
+        self.template.step(step.spec())
+    }
+
+    fn spec_at(&self, ix: usize) -> &Step {
         self.template
-            .step(id)
-            .map(|s| {
-                s.checks
-                    .iter()
-                    .filter(|c| condition_holds(c.when.as_deref(), &self.inputs))
-                    .map(|c| c.check.clone())
-                    .collect()
-            })
+            .step(self.steps[ix].spec())
+            .expect("every run step has its template step")
+    }
+
+    /// Ids of the template steps `id` needs.
+    fn needs(&self, id: &str) -> Vec<String> {
+        let spec = id.split(':').next().unwrap_or(id);
+        self.template
+            .steps
+            .iter()
+            .position(|s| s.id == spec)
+            .map(|t| self.template.needs_of(t))
             .unwrap_or_default()
+    }
+
+    /// `{{item.id}}` and `{{item.title}}` of a step's item filled into `text`.
+    pub fn fill_item(&self, id: &str, text: &str) -> String {
+        match self.step(id).and_then(|s| s.item.as_ref()) {
+            Some(item) => text
+                .replace("{{item.id}}", &item.id)
+                .replace("{{item.title}}", &item.title),
+            None => text.to_string(),
+        }
+    }
+
+    /// The checks step `id` runs for this run's inputs (and item).
+    pub fn checks_of(&self, id: &str) -> Vec<Check> {
+        let Some(spec) = self.spec(id) else {
+            return Vec::new();
+        };
+        spec.checks
+            .iter()
+            .filter(|c| condition_holds(c.when.as_deref(), &self.inputs))
+            .map(|c| {
+                let text = serde_json::to_string(&c.check).unwrap_or_default();
+                serde_json::from_str(&self.fill_item(id, &text)).unwrap_or_else(|_| c.check.clone())
+            })
+            .collect()
+    }
+
+    /// The files step `id` must leave, with its item filled in.
+    pub fn outputs_of(&self, id: &str) -> Vec<String> {
+        self.spec(id)
+            .map(|s| s.outputs.iter().map(|o| self.fill_item(id, o)).collect())
+            .unwrap_or_default()
+    }
+
+    /// The step's title, with its item's.
+    pub fn title_of(&self, id: &str) -> String {
+        let Some(step) = self.step(id) else {
+            return id.to_string();
+        };
+        let title = self
+            .template
+            .step(step.spec())
+            .map(|s| s.title.clone())
+            .unwrap_or_default();
+        match &step.item {
+            Some(item) => format!("{} · {title}", item.title),
+            None => title,
+        }
     }
 
     pub fn step(&self, id: &str) -> Option<&StepRun> {
@@ -250,31 +385,150 @@ impl Run {
         }
     }
 
-    /// Steps that can start now: pending, with everything they need done
-    /// or skipped, while the run runs.
+    fn finished_specs(&self) -> HashSet<String> {
+        self.steps
+            .iter()
+            .filter(|s| !s.is_item() && matches!(s.status, StepStatus::Done | StepStatus::Skipped))
+            .map(|s| s.id.clone())
+            .collect()
+    }
+
+    fn needs_met(&self, id: &str, finished: &HashSet<String>) -> bool {
+        self.needs(id).iter().all(|n| finished.contains(n))
+    }
+
+    /// Steps an agent can start now: pending, with everything they need
+    /// done or skipped, while the run runs. A repeating step is never in
+    /// it: see [`Run::to_expand`].
     pub fn ready(&self) -> Vec<String> {
         if self.state != RunState::Running {
             return Vec::new();
         }
-        let finished: HashSet<&str> = self
-            .steps
-            .iter()
-            .filter(|s| matches!(s.status, StepStatus::Done | StepStatus::Skipped))
-            .map(|s| s.id.as_str())
-            .collect();
+        let finished = self.finished_specs();
         self.steps
             .iter()
-            .enumerate()
-            .filter(|(ix, s)| {
+            .filter(|s| {
+                let laid_out = !s.is_item() || self.step(s.spec()).is_some_and(|p| p.expanded);
                 s.status == StepStatus::Pending
-                    && self
-                        .template
-                        .needs_of(*ix)
-                        .iter()
-                        .all(|n| finished.contains(n.as_str()))
+                    && laid_out
+                    && !(s.item.is_none() && self.spec_at_id(&s.id).each.is_some())
+                    && self.needs_met(&s.id, &finished)
             })
-            .map(|(_, s)| s.id.clone())
+            .map(|s| s.id.clone())
             .collect()
+    }
+
+    fn spec_at_id(&self, id: &str) -> &Step {
+        let ix = self.steps.iter().position(|s| s.id == id).unwrap_or(0);
+        self.spec_at(ix)
+    }
+
+    /// Repeating steps whose needs are met and whose items are not laid
+    /// out yet: the runner reads each one's list and calls [`Run::expand`].
+    pub fn to_expand(&self) -> Vec<(String, String)> {
+        if self.state != RunState::Running {
+            return Vec::new();
+        }
+        let finished = self.finished_specs();
+        self.steps
+            .iter()
+            .filter(|s| s.item.is_none() && s.status == StepStatus::Pending && !s.expanded)
+            .filter_map(|s| {
+                let each = self.spec_at_id(&s.id).each.as_ref()?;
+                self.needs_met(&s.id, &finished)
+                    .then(|| (s.id.clone(), each.from.clone()))
+            })
+            .collect()
+    }
+
+    /// Lays out one step per item after repeating step `id`. Items it had
+    /// before are kept (with their tries) when their id is still listed.
+    pub fn expand(&mut self, id: &str, items: Vec<Choice>, now_ms: i64) -> Result<(), RunError> {
+        let ix = self.ix(id)?;
+        let max = self.spec_at(ix).each.as_ref().map_or(8, |e| e.max);
+        let items: Vec<Choice> = items.into_iter().take(max).collect();
+        if items.is_empty() {
+            let from = self
+                .spec_at(ix)
+                .each
+                .as_ref()
+                .map(|e| e.from.clone())
+                .unwrap_or_default();
+            self.steps[ix].status = StepStatus::Failed;
+            self.steps[ix].attempts.push(Attempt {
+                agent: None,
+                thread: None,
+                started_ms: now_ms,
+                finished_ms: Some(now_ms),
+                feedback: Vec::new(),
+                checks: vec![CheckResult::fail(from, "no items listed")],
+            });
+            self.state = RunState::Waiting;
+            return Err(RunError::NoItems(id.to_string()));
+        }
+        let prefix = format!("{id}:");
+        let old: Vec<StepRun> = self
+            .steps
+            .iter()
+            .filter(|s| s.id.starts_with(&prefix))
+            .cloned()
+            .collect();
+        self.steps.retain(|s| !s.id.starts_with(&prefix));
+        let at = self.ix(id)? + 1;
+        let children: Vec<StepRun> = items
+            .into_iter()
+            .map(|item| {
+                let child_id = format!("{id}:{}", item.id);
+                match old.iter().find(|o| o.id == child_id) {
+                    Some(kept) => StepRun {
+                        item: Some(item),
+                        ..kept.clone()
+                    },
+                    None => StepRun::new(child_id, Some(item), StepStatus::Pending),
+                }
+            })
+            .collect();
+        self.steps.splice(at..at, children);
+        let parent = &mut self.steps[at - 1];
+        parent.expanded = true;
+        parent.status = StepStatus::Running;
+        self.updated_ms = now_ms;
+        self.roll_up();
+        Ok(())
+    }
+
+    /// The items of repeating step `id`.
+    pub fn items_of(&self, id: &str) -> Vec<&StepRun> {
+        let prefix = format!("{id}:");
+        self.steps
+            .iter()
+            .filter(|s| s.id.starts_with(&prefix))
+            .collect()
+    }
+
+    /// A repeating step is done when all its items are.
+    fn roll_up(&mut self) {
+        let parents: Vec<String> = self
+            .steps
+            .iter()
+            .filter(|s| s.expanded && s.item.is_none())
+            .map(|s| s.id.clone())
+            .collect();
+        for parent in parents {
+            let items: Vec<StepStatus> = self.items_of(&parent).iter().map(|s| s.status).collect();
+            let ix = self.steps.iter().position(|s| s.id == parent).unwrap();
+            if self.steps[ix].status == StepStatus::Skipped {
+                continue;
+            }
+            self.steps[ix].status = if items
+                .iter()
+                .all(|s| matches!(s, StepStatus::Done | StepStatus::Skipped))
+            {
+                StepStatus::Done
+            } else {
+                StepStatus::Running
+            };
+        }
     }
 
     /// An agent starts on `id`; the notes gathered for it go with this try.
@@ -313,6 +567,12 @@ impl Run {
         Ok(())
     }
 
+    /// Whether a step stops for the user once it passes.
+    fn stops(&self, ix: usize) -> bool {
+        let spec = self.spec_at(ix);
+        spec.gate || spec.decide.is_some()
+    }
+
     /// The checks on `id` came back.
     pub fn checked(
         &mut self,
@@ -334,6 +594,10 @@ impl Run {
                 }
             })
             .collect();
+        let named: Option<String> = results
+            .iter()
+            .filter(|r| !r.passed)
+            .find_map(|r| r.send_back.clone());
         {
             let step = &mut self.steps[ix];
             if let Some(a) = step.attempts.last_mut() {
@@ -342,9 +606,9 @@ impl Run {
             }
         }
         self.updated_ms = now_ms;
-        let spec = self.template.steps[ix].clone();
+        let spec = self.spec_at(ix).clone();
         if passed {
-            if spec.gate {
+            if self.stops(ix) {
                 self.steps[ix].status = StepStatus::Review;
                 self.state = RunState::Waiting;
                 return Ok(Outcome::Review);
@@ -359,67 +623,108 @@ impl Run {
             self.state = RunState::Waiting;
             return Ok(Outcome::Failed);
         }
-        match &spec.fixes {
-            Some(target) => {
-                let target = target.clone();
-                self.send_back(&target, faults, ix)?;
-                Ok(Outcome::SentBack { to: target })
-            }
-            None => {
-                let step = &mut self.steps[ix];
-                step.feedback = faults;
-                step.status = StepStatus::Pending;
-                Ok(Outcome::Retry)
-            }
+        if spec.fixes.is_empty() {
+            let step = &mut self.steps[ix];
+            step.feedback = faults;
+            step.status = StepStatus::Pending;
+            return Ok(Outcome::Retry);
         }
+        let target = named
+            .filter(|n| {
+                let named_spec = n.split(':').next().unwrap_or(n);
+                spec.fixes.iter().any(|f| f == named_spec) && self.step(n).is_some()
+            })
+            .unwrap_or_else(|| spec.fixes[0].clone());
+        self.send_back(&target, faults, ix)?;
+        Ok(Outcome::SentBack { to: target })
     }
 
-    /// Reopens `target` with `faults` to fix, and everything after it that
-    /// depends on it, up to and including the reviewer `from`.
+    /// Reopens `target` with `faults` to fix, and every step that depends
+    /// on it, down to and including the reviewer `from`. A repeating step's
+    /// items each get the faults.
     fn send_back(
         &mut self,
         target: &str,
         faults: Vec<String>,
         from: usize,
     ) -> Result<(), RunError> {
-        let t = self.ix(target)?;
-        let reopened = self.dependents(t);
-        for &ix in &reopened {
-            if ix == t || ix == from {
-                continue;
+        let from_id = self.steps[from].id.clone();
+        let reopened = self.reopen(target);
+        let receivers: Vec<usize> = {
+            let items: Vec<usize> = self
+                .steps
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| s.id.starts_with(&format!("{target}:")))
+                .map(|(i, _)| i)
+                .collect();
+            if items.is_empty() {
+                vec![self.ix(target)?]
+            } else {
+                items
             }
-            if self.steps[ix].status != StepStatus::Skipped {
-                self.steps[ix].status = StepStatus::Pending;
-            }
+        };
+        for i in receivers {
+            let step = &mut self.steps[i];
+            step.feedback.extend(faults.iter().cloned());
+            // Fixing is a new round for the target, not a failed try of it.
+            step.budget_from = step.attempts.len();
         }
-        let step = &mut self.steps[t];
-        step.feedback.extend(faults);
-        step.status = StepStatus::Pending;
-        // Fixing is a new round for the target, not a failed try of it.
-        step.budget_from = step.attempts.len();
-        self.steps[from].status = StepStatus::Pending;
+        if !reopened.contains(&from_id) {
+            let f = self.ix(&from_id)?;
+            self.steps[f].status = StepStatus::Pending;
+        }
         Ok(())
     }
 
-    /// `ix` and every step that needs it, directly or not.
-    fn dependents(&self, ix: usize) -> Vec<usize> {
-        let mut out = vec![ix];
-        let mut ids: HashSet<String> = [self.steps[ix].id.clone()].into();
-        for later in ix + 1..self.steps.len() {
-            if self
-                .template
-                .needs_of(later)
-                .iter()
-                .any(|n| ids.contains(n))
-            {
-                ids.insert(self.steps[later].id.clone());
-                out.push(later);
+    /// Sets `id` and everything that depends on it, directly or not, back
+    /// to pending. A repeating step reopened lays its items out again from
+    /// its list (keeping the history of items still listed); one item
+    /// reopened goes again on its own. Returns the ids reopened.
+    fn reopen(&mut self, id: &str) -> Vec<String> {
+        let spec = id.split(':').next().unwrap_or(id).to_string();
+        let item_only = id.contains(':');
+        let mut affected: HashSet<String> = [spec.clone()].into();
+        loop {
+            let before = affected.len();
+            for (ix, t) in self.template.steps.iter().enumerate() {
+                if !affected.contains(&t.id)
+                    && self
+                        .template
+                        .needs_of(ix)
+                        .iter()
+                        .any(|n| affected.contains(n))
+                {
+                    affected.insert(t.id.clone());
+                }
             }
+            if affected.len() == before {
+                break;
+            }
+        }
+        if item_only {
+            affected.remove(&spec);
+        }
+        let mut out = Vec::new();
+        for s in &mut self.steps {
+            if s.status == StepStatus::Skipped {
+                continue;
+            }
+            if s.id == id || affected.contains(s.spec()) {
+                s.status = StepStatus::Pending;
+                s.expanded = false;
+                out.push(s.id.clone());
+            }
+        }
+        if item_only && let Some(p) = self.steps.iter_mut().find(|s| s.id == spec) {
+            // The repeating step waits on the item again.
+            p.status = StepStatus::Running;
         }
         out
     }
 
     fn finish_if_done(&mut self) {
+        self.roll_up();
         if self
             .steps
             .iter()
@@ -437,10 +742,38 @@ impl Run {
             .any(|s| matches!(s.status, StepStatus::Review | StepStatus::Failed))
     }
 
-    /// The user looked at a stop and lets the run go on.
-    pub fn approve(&mut self, id: &str, now_ms: i64) -> Result<(), RunError> {
+    /// The options a deciding step offers, as the runner or the UI read
+    /// them from its options file.
+    pub fn options_file(&self, id: &str) -> Option<String> {
+        self.spec(id)
+            .and_then(|s| s.decide.as_ref())
+            .map(|d| self.fill_item(id, &d.options))
+    }
+
+    /// The user looked at a stop and lets the run go on, with the option
+    /// they picked (required where the step offers options) and a note,
+    /// which every later step's prompt carries.
+    pub fn approve(
+        &mut self,
+        id: &str,
+        choice: Option<Choice>,
+        note: &str,
+        now_ms: i64,
+    ) -> Result<(), RunError> {
         let ix = self.ix(id)?;
         self.expect(ix, &[StepStatus::Review], "waiting for you")?;
+        if self.spec_at(ix).decide.is_some() && choice.is_none() {
+            return Err(RunError::ChoiceNeeded(id.to_string()));
+        }
+        if choice.is_some() || !note.trim().is_empty() {
+            self.decisions.retain(|d| d.step != id);
+            self.decisions.push(Decision {
+                step: id.to_string(),
+                choice,
+                note: note.trim().to_string(),
+                at_ms: now_ms,
+            });
+        }
         self.steps[ix].status = StepStatus::Done;
         self.updated_ms = now_ms;
         if self.state == RunState::Waiting && !self.anything_waits() {
@@ -452,7 +785,7 @@ impl Run {
 
     /// The user asks for changes to a step that stopped, failed, or is
     /// already done: it goes again with `note`, and so does every step
-    /// after it that used its work.
+    /// after it that used its work. A decision made at it is undone.
     pub fn redo(&mut self, id: &str, note: &str, now_ms: i64) -> Result<(), RunError> {
         let ix = self.ix(id)?;
         self.expect(
@@ -460,11 +793,9 @@ impl Run {
             &[StepStatus::Review, StepStatus::Failed, StepStatus::Done],
             "stopped, failed or done",
         )?;
-        for later in self.dependents(ix) {
-            if self.steps[later].status != StepStatus::Skipped {
-                self.steps[later].status = StepStatus::Pending;
-            }
-        }
+        let reopened = self.reopen(id);
+        self.decisions.retain(|d| !reopened.contains(&d.step));
+        let ix = self.ix(id)?;
         let step = &mut self.steps[ix];
         if !note.trim().is_empty() {
             step.feedback.push(note.trim().to_string());
@@ -477,10 +808,11 @@ impl Run {
         Ok(())
     }
 
-    /// The user skips an optional step that failed or has not started.
+    /// The user skips an optional step (or one item of a repeating step)
+    /// that failed or has not started.
     pub fn skip(&mut self, id: &str, now_ms: i64) -> Result<(), RunError> {
         let ix = self.ix(id)?;
-        if !self.template.steps[ix].optional {
+        if !self.spec_at(ix).optional && !self.steps[ix].is_item() {
             return Err(RunError::NotOptional(id.to_string()));
         }
         self.expect(
@@ -526,6 +858,9 @@ impl Run {
     /// their try again, without it counting against them.
     pub fn recover(&mut self, now_ms: i64) {
         for step in &mut self.steps {
+            if step.expanded {
+                continue;
+            }
             if matches!(step.status, StepStatus::Running | StepStatus::Checking) {
                 if let Some(a) = step.attempts.last()
                     && a.finished_ms.is_none()
@@ -539,12 +874,13 @@ impl Run {
         }
     }
 
-    /// Steps done, and steps in all (skipped ones left out).
+    /// Steps done, and steps in all: items count, the repeating steps that
+    /// hold them and skipped steps do not.
     pub fn progress(&self) -> (usize, usize) {
         let counted: Vec<_> = self
             .steps
             .iter()
-            .filter(|s| s.status != StepStatus::Skipped)
+            .filter(|s| s.status != StepStatus::Skipped && !s.expanded)
             .collect();
         (
             counted
@@ -553,6 +889,18 @@ impl Run {
                 .count(),
             counted.len(),
         )
+    }
+
+    /// Decisions made at steps before `id`, for its prompt.
+    pub fn decisions_before(&self, id: &str) -> Vec<&Decision> {
+        let Some(pos) = self.steps.iter().position(|s| s.id == id) else {
+            return Vec::new();
+        };
+        let before: HashSet<&str> = self.steps[..pos].iter().map(|s| s.id.as_str()).collect();
+        self.decisions
+            .iter()
+            .filter(|d| before.contains(d.step.as_str()))
+            .collect()
     }
 }
 
@@ -610,19 +958,11 @@ attempts = 3
     }
 
     fn pass() -> Vec<CheckResult> {
-        vec![CheckResult {
-            what: "ok".into(),
-            passed: true,
-            detail: String::new(),
-        }]
+        vec![CheckResult::pass("ok")]
     }
 
     fn fail(why: &str) -> Vec<CheckResult> {
-        vec![CheckResult {
-            what: "paper.pdf exists".into(),
-            passed: false,
-            detail: why.into(),
-        }]
+        vec![CheckResult::fail("paper.pdf exists", why)]
     }
 
     fn go(run: &mut Run, id: &str, results: Vec<CheckResult>) -> Outcome {
@@ -660,7 +1000,7 @@ attempts = 3
         assert_eq!(go(&mut run, "plan", pass()), Outcome::Review);
         assert_eq!(run.state, RunState::Waiting);
         assert!(run.ready().is_empty());
-        run.approve("plan", 4).unwrap();
+        run.approve("plan", None, "", 4).unwrap();
         assert_eq!(run.state, RunState::Running);
         assert_eq!(run.ready(), vec!["write"]);
     }
@@ -669,7 +1009,7 @@ attempts = 3
     fn a_failed_try_goes_again_with_its_reasons_until_out_of_tries() {
         let mut run = Run::new(template(), inputs(), &[], 0).unwrap();
         go(&mut run, "plan", pass());
-        run.approve("plan", 4).unwrap();
+        run.approve("plan", None, "", 4).unwrap();
         assert_eq!(go(&mut run, "write", fail("missing")), Outcome::Retry);
         assert_eq!(
             run.step("write").unwrap().feedback,
@@ -696,7 +1036,7 @@ attempts = 3
     fn a_reviewer_sends_faults_back_to_the_step_it_reviews() {
         let mut run = Run::new(template(), inputs(), &["figures".into()], 0).unwrap();
         go(&mut run, "plan", pass());
-        run.approve("plan", 4).unwrap();
+        run.approve("plan", None, "", 4).unwrap();
         go(&mut run, "write", pass());
         assert_eq!(
             go(&mut run, "verify", fail("page 31")),
@@ -715,7 +1055,7 @@ attempts = 3
     fn redoing_a_done_step_reopens_what_used_it() {
         let mut run = Run::new(template(), inputs(), &["figures".into()], 0).unwrap();
         go(&mut run, "plan", pass());
-        run.approve("plan", 4).unwrap();
+        run.approve("plan", None, "", 4).unwrap();
         go(&mut run, "write", pass());
         go(&mut run, "verify", pass());
         assert_eq!(run.state, RunState::Done);
@@ -739,6 +1079,195 @@ attempts = 3
         let plan = run.step("plan").unwrap();
         assert_eq!(plan.status, StepStatus::Pending);
         assert!(plan.attempts.is_empty());
+        let saved = Run::from_json(&run.to_json()).unwrap();
+        assert_eq!(saved, run);
+    }
+
+    fn contest() -> Template {
+        Template::parse(
+            r#"
+id = "c"
+name = "C"
+[[steps]]
+id = "analysis"
+title = "Analysis"
+prompt = "a"
+outputs = ["reports/subproblems.json"]
+[[steps]]
+id = "choose"
+title = "Choose models"
+prompt = "c"
+decide = { options = "reports/options.json", question = "Which route?" }
+[[steps]]
+id = "solve"
+title = "Solve"
+prompt = "Solve {{item.title}}."
+outputs = ["results/{{item.id}}/summary.md"]
+each = { from = "reports/subproblems.json" }
+[[steps]]
+id = "write"
+title = "Write"
+prompt = "w"
+[[steps]]
+id = "verify"
+title = "Verify"
+prompt = "v"
+fixes = ["analysis", "solve", "write"]
+attempts = 3
+"#,
+        )
+        .unwrap()
+    }
+
+    fn items() -> Vec<Choice> {
+        crate::read_choices(r#"[{"id":"Q1","title":"问题一"},{"id":"Q2","title":"问题二"}]"#)
+    }
+
+    fn through_choice(run: &mut Run) {
+        go(run, "analysis", pass());
+        assert_eq!(go(run, "choose", pass()), Outcome::Review);
+        assert!(matches!(
+            run.approve("choose", None, "", 4),
+            Err(RunError::ChoiceNeeded(_))
+        ));
+        let pick = Choice {
+            id: "B".into(),
+            title: "排队论 + 仿真".into(),
+            summary: String::new(),
+        };
+        run.approve("choose", Some(pick), "先做问题一", 4).unwrap();
+    }
+
+    #[test]
+    fn a_choice_is_required_and_reaches_later_steps() {
+        let mut run = Run::new(contest(), HashMap::new(), &[], 0).unwrap();
+        through_choice(&mut run);
+        let later = run.decisions_before("write");
+        assert_eq!(later.len(), 1);
+        assert_eq!(later[0].choice.as_ref().unwrap().title, "排队论 + 仿真");
+        assert_eq!(later[0].note, "先做问题一");
+        assert!(run.decisions_before("choose").is_empty(), "not its own");
+        run.redo("choose", "", 5).unwrap();
+        assert!(
+            run.decisions.is_empty(),
+            "redoing a stop undoes its decision"
+        );
+    }
+
+    #[test]
+    fn a_repeating_step_runs_once_per_item_and_the_rest_wait() {
+        let mut run = Run::new(contest(), HashMap::new(), &[], 0).unwrap();
+        through_choice(&mut run);
+        assert!(
+            run.ready().is_empty(),
+            "the repeating step itself does no work"
+        );
+        assert_eq!(
+            run.to_expand(),
+            vec![("solve".to_string(), "reports/subproblems.json".to_string())]
+        );
+        run.expand("solve", items(), 5).unwrap();
+        assert_eq!(
+            run.ready(),
+            vec!["solve:Q1", "solve:Q2"],
+            "items run side by side"
+        );
+        assert_eq!(run.title_of("solve:Q2"), "问题二 · Solve");
+        assert_eq!(run.outputs_of("solve:Q1"), vec!["results/Q1/summary.md"]);
+        assert_eq!(
+            run.progress(),
+            (2, 6),
+            "items count, the repeating step does not"
+        );
+        go(&mut run, "solve:Q1", pass());
+        assert!(
+            !run.ready().contains(&"write".to_string()),
+            "write waits for every item"
+        );
+        go(&mut run, "solve:Q2", pass());
+        assert_eq!(run.step("solve").unwrap().status, StepStatus::Done);
+        assert_eq!(run.ready(), vec!["write"]);
+    }
+
+    #[test]
+    fn an_empty_list_stops_for_the_user() {
+        let mut run = Run::new(contest(), HashMap::new(), &[], 0).unwrap();
+        through_choice(&mut run);
+        assert!(matches!(
+            run.expand("solve", vec![], 5),
+            Err(RunError::NoItems(_))
+        ));
+        assert_eq!(run.step("solve").unwrap().status, StepStatus::Failed);
+        assert_eq!(run.state, RunState::Waiting);
+    }
+
+    #[test]
+    fn a_reviewer_sends_back_to_the_step_it_names() {
+        let mut run = Run::new(contest(), HashMap::new(), &[], 0).unwrap();
+        through_choice(&mut run);
+        run.expand("solve", items(), 5).unwrap();
+        go(&mut run, "solve:Q1", pass());
+        go(&mut run, "solve:Q2", pass());
+        go(&mut run, "write", pass());
+        run.begin("verify", None, 6).unwrap();
+        run.turn_finished("verify", 7).unwrap();
+        let mut fault = CheckResult::fail("问题二的结果和论文不一致", "Q2 的目标值写错");
+        fault.send_back = Some("solve:Q2".into());
+        assert_eq!(
+            run.checked("verify", vec![fault], 8).unwrap(),
+            Outcome::SentBack {
+                to: "solve:Q2".into()
+            }
+        );
+        assert_eq!(
+            run.step("solve:Q1").unwrap().status,
+            StepStatus::Done,
+            "Q1 stands"
+        );
+        assert_eq!(run.step("solve:Q2").unwrap().status, StepStatus::Pending);
+        assert_eq!(
+            run.step("write").unwrap().status,
+            StepStatus::Pending,
+            "what used Q2 goes again"
+        );
+        assert_eq!(run.ready(), vec!["solve:Q2"]);
+        assert!(run.step("solve:Q2").unwrap().feedback[0].contains("目标值"));
+        go(&mut run, "solve:Q2", pass());
+        go(&mut run, "write", pass());
+        assert_eq!(go(&mut run, "verify", pass()), Outcome::Done);
+        assert_eq!(run.state, RunState::Done);
+    }
+
+    #[test]
+    fn going_back_before_a_repeating_step_lays_its_items_out_again() {
+        let mut run = Run::new(contest(), HashMap::new(), &[], 0).unwrap();
+        through_choice(&mut run);
+        run.expand("solve", items(), 5).unwrap();
+        go(&mut run, "solve:Q1", pass());
+        run.redo("analysis", "第三问漏了", 6).unwrap();
+        assert!(!run.step("solve").unwrap().expanded);
+        assert!(run.ready().contains(&"analysis".to_string()));
+        assert!(
+            !run.ready().iter().any(|s| s.starts_with("solve:")),
+            "items wait for the new list"
+        );
+        let three = crate::read_choices(r#"["问题一","问题二","问题三"]"#);
+        go(&mut run, "analysis", pass());
+        go(&mut run, "choose", pass());
+        run.approve("choose", Some(three[0].clone()), "", 7)
+            .unwrap();
+        run.expand(
+            "solve",
+            crate::read_choices(r#"[{"id":"Q1","title":"问题一"},{"id":"Q2","title":"问题二"},{"id":"Q3","title":"问题三"}]"#),
+            8,
+        )
+        .unwrap();
+        assert_eq!(run.items_of("solve").len(), 3);
+        assert_eq!(
+            run.step("solve:Q1").unwrap().attempts.len(),
+            1,
+            "Q1 keeps its history"
+        );
         let saved = Run::from_json(&run.to_json()).unwrap();
         assert_eq!(saved, run);
     }

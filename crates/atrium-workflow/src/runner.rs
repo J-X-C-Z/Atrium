@@ -46,12 +46,12 @@ pub fn environment_needs(template: &Template) -> Vec<Need> {
             tool,
         })
         .collect();
-    if template_needs_chinese(template) {
+    // A Chinese font only matters for the typeset result.
+    if !needs.is_empty() && template_needs_chinese(template) {
         needs.push(Need {
             tool: "Chinese font".into(),
             found: has_chinese_font(),
-            hint: "Install a Chinese font such as Noto Sans CJK SC or Source Han Sans SC."
-                .into(),
+            hint: "Install a Chinese font such as Noto Sans CJK SC or Source Han Sans SC.".into(),
         });
     }
     needs
@@ -169,6 +169,7 @@ pub fn command(dir: &Path, run: &str, cwd: Option<&str>, timeout_min: u32) -> Ch
             what,
             passed: true,
             detail: String::new(),
+            send_back: None,
         }
     } else if timed_out {
         failed(
@@ -204,6 +205,7 @@ fn failed(what: String, detail: String) -> CheckResult {
         what,
         passed: false,
         detail,
+        send_back: None,
     }
 }
 
@@ -235,6 +237,7 @@ pub fn pdf_pages(dir: &Path, path: &str, max: Option<u32>, min: Option<u32>) -> 
         } else {
             format!("has {count} pages")
         },
+        send_back: None,
     }
 }
 
@@ -260,14 +263,27 @@ fn count_pages(bytes: &[u8]) -> Option<u32> {
 }
 
 /// Ask a reviewer for a JSON verdict and read the last verdict in its answer.
-pub fn review_prompt(rubric: &str, files: &[String]) -> String {
+/// `fixes` are the earlier steps the reviewer may name as the cause.
+pub fn review_prompt(rubric: &str, files: &[String], fixes: &[String]) -> String {
     let files = files
         .iter()
         .map(|f| format!("- `{f}`"))
         .collect::<Vec<_>>()
         .join("\n");
+    let blame = if fixes.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " If it fails because of an earlier step, add \"step\": one of {}.",
+            fixes
+                .iter()
+                .map(|f| format!("\"{f}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
     format!(
-        "You are reviewing a workflow step. Read the files below against the rubric. Do not change anything.\n\nRubric:\n{rubric}\n\nFiles:\n{files}\n\nAnswer with one JSON object and nothing after it: {{\"pass\": true or false, \"reasons\": [\"...\"]}}."
+        "You are reviewing a workflow step. Read the files below against the rubric. Do not change anything.\n\nRubric:\n{rubric}\n\nFiles:\n{files}\n\nAnswer with one JSON object and nothing after it: {{\"pass\": true or false, \"reasons\": [\"...\"]}}.{blame}"
     )
 }
 
@@ -276,6 +292,9 @@ pub struct Verdict {
     pub pass: bool,
     #[serde(default)]
     pub reasons: Vec<String>,
+    /// The earlier step at fault, when the reviewer names one.
+    #[serde(default, alias = "send_back", skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
 }
 
 pub fn review_verdict(answer: &str) -> Option<Verdict> {

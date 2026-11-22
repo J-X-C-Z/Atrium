@@ -19,7 +19,7 @@ use codex_client::{AccessMode, StartThread, TurnRequest};
 use gpui::Context;
 
 use super::{
-    Notice, Workspace, WorkflowReview,
+    Notice, WorkflowReview, Workspace,
     workflows::{append_log, load_run, save_run},
 };
 use crate::agents;
@@ -33,9 +33,7 @@ impl Workspace {
                 if result.is_err() {
                     break;
                 }
-                cx.background_executor()
-                    .timer(Duration::from_secs(1))
-                    .await;
+                cx.background_executor().timer(Duration::from_secs(1)).await;
             }
         }));
     }
@@ -61,6 +59,7 @@ impl Workspace {
             if run.state == RunState::Running {
                 self.workflow_assign_threads(&dir, &mut run);
                 self.workflow_finish_turns(&dir, &mut run, cx);
+                self.workflow_expand(&dir, &mut run, cx);
                 self.workflow_start_ready(&dir, &mut run, cx);
             }
             self.workflow_poll_review(&dir, &mut run, cx);
@@ -89,7 +88,9 @@ impl Workspace {
                 .filter(|thread| !assigned.contains(&thread.id))
                 .filter(|thread| agents::split_backend(&thread.backend).0 == backend)
                 .filter(|thread| Path::new(&thread.cwd) == dir)
-                .filter(|thread| thread.created_at.saturating_mul(1000) + 1000 >= attempt.started_ms)
+                .filter(|thread| {
+                    thread.created_at.saturating_mul(1000) + 1000 >= attempt.started_ms
+                })
                 .max_by_key(|thread| thread.created_at)
                 .map(|thread| thread.id.clone());
             if let Some(thread) = found {
@@ -115,9 +116,17 @@ impl Workspace {
             .steps
             .iter()
             .filter(|step| step.status == StepStatus::Running)
-            .filter_map(|step| step.thread().map(|thread| (step.id.clone(), thread.to_string())))
+            .filter_map(|step| {
+                step.thread()
+                    .map(|thread| (step.id.clone(), thread.to_string()))
+            })
             .collect();
         for (step, thread) in running {
+            // Checks finishing a step save the run from disk; start from
+            // that, or this save would undo them.
+            if let Some(fresh) = load_run(dir) {
+                *run = fresh;
+            }
             let Some(transcript) = self.transcripts.get(&thread) else {
                 continue;
             };
@@ -127,10 +136,14 @@ impl Workspace {
             {
                 continue;
             }
-            let stopped = transcript.entries().iter().rev().find_map(|entry| match &entry.kind {
-                EntryKind::Error(message) => Some(message.clone()),
-                _ => None,
-            });
+            let stopped = transcript
+                .entries()
+                .iter()
+                .rev()
+                .find_map(|entry| match &entry.kind {
+                    EntryKind::Error(message) => Some(message.clone()),
+                    _ => None,
+                });
             if let Err(error) = run.turn_finished(&step, super::workflows::now_ms()) {
                 log::warn!("workflow {} turn: {error}", dir.display());
                 continue;
@@ -148,11 +161,42 @@ impl Workspace {
                         what: format!("the agent finished {step}"),
                         passed: false,
                         detail: format!("the agent stopped: {error}"),
+                        send_back: None,
                     }],
                     cx,
                 );
             } else {
                 self.workflow_finish_checks(dir, &step, cx);
+            }
+        }
+        if let Some(fresh) = load_run(dir) {
+            *run = fresh;
+        }
+    }
+
+    /// Lays out the items of repeating steps whose list is now written.
+    fn workflow_expand(
+        &mut self,
+        dir: &Path,
+        run: &mut atrium_workflow::run::Run,
+        cx: &mut Context<Self>,
+    ) {
+        for (id, from) in run.to_expand() {
+            let text = std::fs::read_to_string(dir.join(&from)).unwrap_or_default();
+            let items = atrium_workflow::read_choices(&text);
+            let count = items.len();
+            let now = super::workflows::now_ms();
+            let result = run.expand(&id, items, now);
+            let _ = save_run(dir, run);
+            append_log(
+                dir,
+                serde_json::json!({"at": now, "event": "expanded", "step": id, "items": count}),
+            );
+            if result.is_err() {
+                cx.emit(Notice::Error(crate::i18n::tf(
+                    "{step} has nothing to go through: {file} lists no items.",
+                    &[("step", &run.title_of(&id)), ("file", &from)],
+                )));
             }
         }
     }
@@ -173,7 +217,7 @@ impl Workspace {
         }
         let ready = run.ready();
         for id in ready.into_iter().take(2 - running) {
-            let Some(spec) = run.template.step(&id).cloned() else {
+            let Some(spec) = run.spec(&id).cloned() else {
                 continue;
             };
             let backend = run
@@ -182,15 +226,13 @@ impl Workspace {
                 .or_else(|| self.settings.default_agent.clone())
                 .unwrap_or_else(|| self.draft_backend.clone());
             if !self.backend_ready(&backend) {
-                cx.emit(Notice::Error(
-                    crate::i18n::tf(
-                        "{agent} is not installed or not running; {step} cannot start.",
-                        &[
-                            ("agent", &agents::backend_label(&backend)),
-                            ("step", &spec.title),
-                        ],
-                    ),
-                ));
+                cx.emit(Notice::Error(crate::i18n::tf(
+                    "{agent} is not installed or not running; {step} cannot start.",
+                    &[
+                        ("agent", &agents::backend_label(&backend)),
+                        ("step", &spec.title),
+                    ],
+                )));
                 continue;
             }
             let now = super::workflows::now_ms();
@@ -232,7 +274,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if !agents::is_codex(&backend) {
-            self.start_chat_in(text, backend, cwd, cx);
+            self.start_chat_in(text, backend, cwd, false, cx);
             return;
         }
         let Some(client) = self.codex_for(&backend) else {
@@ -259,8 +301,7 @@ impl Workspace {
                             .find(|entry| entry.dir == dir)
                             .and_then(|entry| {
                                 entry.run.steps.iter().find(|step| {
-                                    step.status == StepStatus::Running
-                                        && step.thread().is_none()
+                                    step.status == StepStatus::Running && step.thread().is_none()
                                 })
                             })
                             .map(|step| step.id.clone());
@@ -312,7 +353,11 @@ impl Workspace {
                         .iter()
                         .find(|entry| entry.dir == dir)
                         .and_then(|entry| {
-                            entry.run.steps.iter().find(|step| step.thread() == Some(&thread))
+                            entry
+                                .run
+                                .steps
+                                .iter()
+                                .find(|step| step.thread() == Some(&thread))
                         })
                         .map(|step| step.id.clone());
                     if let Some(step) = step {
@@ -332,7 +377,10 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let Some(mut run) = load_run(dir) else { return };
-        if run.step(step).is_some_and(|s| s.status == StepStatus::Running) {
+        if run
+            .step(step)
+            .is_some_and(|s| s.status == StepStatus::Running)
+        {
             let _ = run.turn_finished(step, super::workflows::now_ms());
         }
         let _ = run.checked(
@@ -341,6 +389,7 @@ impl Workspace {
                 what: format!("the agent starts {step}"),
                 passed: false,
                 detail: format!("the agent stopped: {error}"),
+                send_back: None,
             }],
             super::workflows::now_ms(),
         );
@@ -366,7 +415,8 @@ impl Workspace {
             return;
         }
         let Some(run) = load_run(dir) else {
-            self.workflow_checking.remove(&(dir.to_path_buf(), step.to_string()));
+            self.workflow_checking
+                .remove(&(dir.to_path_buf(), step.to_string()));
             return;
         };
         let lang = if crate::i18n::chinese() {
@@ -397,7 +447,14 @@ impl Workspace {
             return;
         };
         let check = checks[ix].clone();
-        let check_what = describe(&check, if crate::i18n::chinese() { Lang::Zh } else { Lang::En });
+        let check_what = describe(
+            &check,
+            if crate::i18n::chinese() {
+                Lang::Zh
+            } else {
+                Lang::En
+            },
+        );
         match check {
             Check::Command {
                 run: command,
@@ -417,7 +474,10 @@ impl Workspace {
                         .await;
                     let _ = this.update(cx, |ws, cx| {
                         let mut results = results;
-                        results.push(result);
+                        results.push(CheckResult {
+                            what: check_what,
+                            ..result
+                        });
                         ws.workflow_check_from(&dir, &step, results, ix + 1, cx);
                     });
                 })
@@ -425,7 +485,10 @@ impl Workspace {
             }
             Check::PdfPages { path, max, min } => {
                 let mut results = results;
-                results.push(runner::pdf_pages(dir, &path, max, min));
+                results.push(CheckResult {
+                    what: check_what,
+                    ..runner::pdf_pages(dir, &path, max, min)
+                });
                 self.workflow_check_from(dir, step, results, ix + 1, cx);
             }
             Check::Review {
@@ -434,11 +497,7 @@ impl Workspace {
                 agent,
             } => {
                 let backend = agent
-                    .or_else(|| {
-                        run.template
-                            .step(step)
-                            .and_then(|s| run.template.agent_of(s))
-                    })
+                    .or_else(|| run.spec(step).and_then(|s| run.template.agent_of(s)))
                     .or_else(|| self.settings.default_agent.clone())
                     .unwrap_or_else(|| self.draft_backend.clone());
                 if !self.backend_ready(&backend) {
@@ -447,13 +506,14 @@ impl Workspace {
                         what: check_what,
                         passed: false,
                         detail: format!("{} is not running", agents::backend_label(&backend)),
+                        send_back: None,
                     });
                     self.workflow_check_from(dir, step, results, ix + 1, cx);
                     return;
                 }
-                let prompt = runner::review_prompt(&rubric, &files);
+                let prompt = runner::review_prompt(&rubric, &files, &fixes_of(&run, step));
                 let started_ms = super::workflows::now_ms();
-                self.start_chat_in(prompt, backend, dir.to_path_buf(), cx);
+                self.start_chat_in(prompt, backend, dir.to_path_buf(), false, cx);
                 self.workflow_reviews.insert(
                     (dir.to_path_buf(), step.to_string()),
                     WorkflowReview {
@@ -542,15 +602,11 @@ impl Workspace {
                 }) = check
                 {
                     let backend = agent
-                        .or_else(|| {
-                            run.template
-                                .step(&step)
-                                .and_then(|s| run.template.agent_of(s))
-                        })
+                        .or_else(|| run.spec(&step).and_then(|s| run.template.agent_of(s)))
                         .or_else(|| self.settings.default_agent.clone())
                         .unwrap_or_else(|| self.draft_backend.clone());
-                    let prompt = runner::review_prompt(&rubric, &files);
-                    self.start_chat_in(prompt, backend, dir.to_path_buf(), cx);
+                    let prompt = runner::review_prompt(&rubric, &files, &fixes_of(run, &step));
+                    self.start_chat_in(prompt, backend, dir.to_path_buf(), false, cx);
                 }
                 continue;
             }
@@ -573,11 +629,13 @@ impl Workspace {
                     what,
                     passed: verdict.pass,
                     detail: verdict.reasons.join("; "),
+                    send_back: verdict.step.filter(|s| !s.is_empty()),
                 },
                 None => CheckResult {
                     what,
                     passed: false,
                     detail: "the reviewer did not give a verdict".into(),
+                    send_back: None,
                 },
             });
             self.workflow_check_from(dir, &step, review.results, review.next, cx);
@@ -618,7 +676,8 @@ impl Workspace {
         } else if let Err(error) = outcome {
             cx.emit(Notice::Error(error.to_string()));
         }
-        self.workflow_checking.remove(&(dir.to_path_buf(), step.to_string()));
+        self.workflow_checking
+            .remove(&(dir.to_path_buf(), step.to_string()));
     }
 
     pub(super) fn workflow_interrupt_thread(&mut self, thread: &str, cx: &mut Context<Self>) {
@@ -650,3 +709,8 @@ impl Workspace {
 #[cfg(all(test, unix, feature = "workspace-ticker-test"))]
 #[path = "workspace_workflow_runner_test.rs"]
 mod tests;
+
+/// The earlier steps a reviewer of `step` may send it back to.
+fn fixes_of(run: &atrium_workflow::run::Run, step: &str) -> Vec<String> {
+    run.spec(step).map(|s| s.fixes.clone()).unwrap_or_default()
+}
