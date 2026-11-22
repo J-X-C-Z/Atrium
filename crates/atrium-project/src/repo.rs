@@ -16,6 +16,15 @@ fn command(program: &str, dir: &Path) -> Command {
         cmd.env_remove(key);
     }
     cmd.env("LC_ALL", "C").env("GIT_TERMINAL_PROMPT", "0");
+    #[cfg(test)]
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1")
+        .env_remove("GIT_CONFIG_SYSTEM")
+        .env_remove("GIT_CONFIG_COUNT")
+        .env_remove("GIT_CONFIG_PARAMETERS")
+        .env(
+            "GIT_CONFIG_GLOBAL",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+        );
     cmd
 }
 
@@ -739,6 +748,7 @@ mod tests {
             vec!["config", "user.email", "t@example.com"],
             vec!["config", "user.name", "T"],
             vec!["config", "commit.gpgsign", "false"],
+            vec!["config", "core.autocrlf", "false"],
         ] {
             git(&dir, &args).unwrap();
         }
