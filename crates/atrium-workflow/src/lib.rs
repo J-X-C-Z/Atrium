@@ -28,6 +28,7 @@ pub mod builtin;
 pub mod check;
 pub mod render;
 pub mod run;
+pub mod runner;
 
 use std::collections::{HashMap, HashSet};
 

@@ -26,6 +26,7 @@ use crate::i18n::{t, tf};
 pub enum TemplateSource {
     Builtin,
     User(PathBuf),
+    Folder(PathBuf),
 }
 
 #[derive(Clone, Debug)]
@@ -58,7 +59,7 @@ impl RunEntry {
     }
 }
 
-fn now_ms() -> i64 {
+pub(super) fn now_ms() -> i64 {
     jiff::Timestamp::now().as_millisecond()
 }
 
@@ -216,8 +217,23 @@ pub fn load_run(dir: &Path) -> Option<Run> {
     Run::from_json(&std::fs::read_to_string(run_file(dir)).ok()?).ok()
 }
 
-fn save_run(dir: &Path, run: &Run) -> std::io::Result<()> {
+pub(super) fn save_run(dir: &Path, run: &Run) -> std::io::Result<()> {
     write_atomic(&run_file(dir), &run.to_json())
+}
+
+pub(super) fn append_log(dir: &Path, event: serde_json::Value) {
+    use std::io::Write as _;
+    let path = dir.join(".atrium").join("log.jsonl");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{event}");
+    }
 }
 
 /// A folder name that is free under `parent`.
@@ -297,29 +313,61 @@ impl Workspace {
                 source: TemplateSource::Builtin,
             })
             .collect();
-        let Some(dir) = user_dir() else { return out };
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            return out;
-        };
-        let mut files: Vec<PathBuf> = entries
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|e| e == "toml"))
+        if let Some(dir) = user_dir()
+            && let Ok(entries) = std::fs::read_dir(&dir)
+        {
+            let mut files: Vec<PathBuf> = entries
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|e| e == "toml"))
+                .collect();
+            files.sort();
+            for path in files {
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                match Template::parse(&text) {
+                    Ok(template) => {
+                        out.retain(|e| e.template.id != template.id);
+                        out.push(TemplateEntry {
+                            template,
+                            source: TemplateSource::User(path),
+                        });
+                    }
+                    Err(error) => log::warn!("workflow template {}: {error}", path.display()),
+                }
+            }
+        }
+        let folders: Vec<PathBuf> = self
+            .settings
+            .recent_folders
+            .iter()
+            .chain(&self.settings.projects)
+            .map(|folder| folder.join(".atrium").join("workflows"))
+            .filter(|dir| dir.is_dir())
             .collect();
-        files.sort();
-        for path in files {
-            let Ok(text) = std::fs::read_to_string(&path) else {
+        for dir in folders {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
                 continue;
             };
-            match Template::parse(&text) {
-                Ok(template) => {
-                    out.retain(|e| e.template.id != template.id);
-                    out.push(TemplateEntry {
-                        template,
-                        source: TemplateSource::User(path),
-                    });
-                }
-                Err(error) => log::warn!("workflow template {}: {error}", path.display()),
+            let mut files: Vec<PathBuf> = entries
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|e| e == "toml"))
+                .collect();
+            files.sort();
+            for path in files {
+                let Some(template) = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|text| Template::parse(&text).ok())
+                else {
+                    continue;
+                };
+                out.retain(|entry| entry.template.id != template.id);
+                out.push(TemplateEntry {
+                    template,
+                    source: TemplateSource::Folder(path),
+                });
             }
         }
         out
@@ -420,6 +468,21 @@ impl Workspace {
             .into_iter()
             .find(|e| e.template.id == template_id)?;
         let template = entry.template;
+        let has_commands = template.steps.iter().any(|step| {
+            step.checks
+                .iter()
+                .any(|check| matches!(&check.check, atrium_workflow::Check::Command { .. }))
+        });
+        if has_commands
+            && matches!(&entry.source, TemplateSource::Folder(_))
+            && self.settings.workflow_confirmed.get(&template.id) != Some(&template.version)
+        {
+            cx.emit(Notice::Error(tf(
+                "Review this template's commands and confirm it before starting {name}.",
+                &[("name", &template.name)],
+            )));
+            return None;
+        }
         // A dry run first, so a missing answer says so before any folder exists.
         let mut check = values.clone();
         for (key, list) in &files {
@@ -455,6 +518,15 @@ impl Workspace {
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
             run.experience = experience(&template.id);
             save_run(&dir, &run)?;
+            append_log(
+                &dir,
+                serde_json::json!({
+                    "at": run.created_ms,
+                    "event": "run_started",
+                    "template": template.id,
+                    "version": template.version
+                }),
+            );
             Ok(run)
         })();
         match made {
@@ -498,6 +570,10 @@ impl Workspace {
             cx.emit(Notice::Error(error.to_string()));
             return;
         }
+        append_log(
+            dir,
+            serde_json::json!({"at": now_ms(), "event": "run_changed", "state": run.state}),
+        );
         self.refresh_workflows();
         cx.notify();
     }
@@ -557,10 +633,22 @@ impl Workspace {
     }
 
     pub fn stop_run(&mut self, dir: &Path, cx: &mut Context<Self>) {
+        let threads: Vec<String> = load_run(dir)
+            .map(|run| {
+                run.steps
+                    .iter()
+                    .filter(|step| step.status == atrium_workflow::run::StepStatus::Running)
+                    .filter_map(|step| step.thread().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
         self.change_run(dir, cx, |run, now| {
             run.stop(now);
             Ok(())
         });
+        for thread in threads {
+            self.workflow_interrupt_thread(&thread, cx);
+        }
     }
 
     /// Keeps a finished run's retrospective lessons for the next runs of
@@ -628,7 +716,7 @@ impl Workspace {
                 .find(|e| e.template.id == id)
         });
         let base_text = base.as_ref().map(|e| match &e.source {
-            TemplateSource::User(path) => {
+            TemplateSource::User(path) | TemplateSource::Folder(path) => {
                 std::fs::read_to_string(path).unwrap_or_else(|_| e.template.to_toml())
             }
             TemplateSource::Builtin => builtin::SOURCES
@@ -716,6 +804,19 @@ impl Workspace {
             self.room = Room::Workflows { run: None };
         }
         cx.notify();
+    }
+
+    /// Records that the user has seen a folder template's commands.
+    pub fn confirm_workflow_template(&mut self, id: &str, version: u32, cx: &mut Context<Self>) {
+        self.settings
+            .workflow_confirmed
+            .insert(id.to_string(), version);
+        self.settings.save();
+        cx.notify();
+    }
+
+    pub fn workflow_environment(&self, template: &Template) -> Vec<atrium_workflow::runner::Need> {
+        atrium_workflow::runner::environment_needs(template)
     }
 }
 

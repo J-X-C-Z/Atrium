@@ -122,19 +122,50 @@ rule holds: take ideas, not text. What it added:
   - The run view is a timeline of steps. For each step it shows its
     checks, its files (opened in the preview panel), the exact prompt, its
     conversation, and the buttons approve, ask for changes, retry and skip.
-- `ui::workflow::RUNNER_READY` is `false` until the runner lands. While
-  it is false, the run view says so. Set it to `true` in your PR.
+- `ui::workflow::RUNNER_READY` is `true`: the Workflows room is wired to
+  the runner.
+
+**Built (backend runner):**
+
+1. The **runner** in `workspace_workflow_runner.rs`:
+   - ticks `Running` and `Waiting` runs, starts at most two ready steps
+     per run, and creates a new conversation for every try;
+   - uses the step's agent and effort, with access mode `auto` for Codex;
+   - detects turn completion, runs the checks and calls `Run::checked`;
+   - follows retry, fixer and gate outcomes, and saves every change;
+   - handles `pause`, `resume`, `stop` and restart recovery. A step cut
+     off mid-turn is retried without using an allowance; it does not yet
+     re-attach the old turn.
+   - lays out repeating (`each`) steps once their list file is written,
+     and runs the items like any other step;
+   - reloads the run after each finished turn, so two steps finishing in
+     one tick do not overwrite each other's result.
+2. The **runner checks**:
+   - `command` runs through `sh -c` (`cmd /C` on Windows), enforces the
+     timeout, and keeps the tail of stderr/stdout on failure;
+   - `pdf_pages` reads the PDF trailer's page count, with a page-object
+     fallback;
+   - `review` starts a separate read-only reviewer conversation, asks for
+     `{"pass": …, "reasons": […]}` and uses the last JSON verdict. A
+     missing verdict is retried once in a fresh reviewer conversation;
+     a second missing verdict fails with "the reviewer did not give a
+     verdict".
+3. **Storage**: folder templates in `<folder>/.atrium/workflows/` override
+   user templates with the same id; folder templates with commands need
+   one confirmation per template version. Runs append events to
+   `.atrium/log.jsonl`.
+4. **The TeX environment**: `workflow_environment()` reports missing
+   `xelatex`, `latexmk`, `typst` and Chinese fonts, including the usual
+   MacTeX/TeX Live locations.
 
 **Yours:**
 
-1. The **runner**: it drives runs, starts agents, waits, checks and
-   saves.
-2. The **runner's checks**: `command`, `pdf_pages` and `review`.
-3. **Storage**: the app already reads and writes templates and runs
-   (above). Add folder templates (`<folder>/.atrium/workflows/`), with the
-   command confirmation in section 3, and the `.atrium/log.jsonl` event
-   log.
-4. **The TeX environment**: detect it and say what is missing.
+1. Run the built-in template once by hand on a real past CUMCM problem
+   with real Codex and Claude Code and a TeX Live installation. Record the
+   timings, tries, PDF result and verifier findings in the backend
+   acceptance matrix. This has not been done yet.
+2. Close the remaining runner limit stated above: re-attach a
+   still-running turn after restart.
 
 The UI (the Workflows room, the template editor, the start dialog, the run
 view and the stops) is built on the UI side against the API in section 5.
@@ -320,6 +351,13 @@ Add to them as you change them.
 
 **Runner tests** (in the app crate's test helpers, with `mock-codex` and
 `mock-acp`):
+
+Current automated coverage: `the_runner_takes_three_steps_to_done` covers
+the three-step new-conversation path and terminal `Done` state;
+`a_repeating_step_runs_once_per_listed_item` covers `each` expansion, two
+items running side by side, and `{{item.title}}` in their prompts. The
+remaining scenarios below are specifications for follow-up tests; they
+are not claimed as passed by this backend change.
 
 1. A three-step template whose steps write a file through the mock's
    `edit` path:

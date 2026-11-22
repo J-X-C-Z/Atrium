@@ -121,7 +121,7 @@ pub fn render(
     let conversations: Vec<Conversation> = ws
         .threads
         .iter()
-        .filter(|thread| !project_threads.contains(&thread.id))
+        .filter(|thread| !project_threads.contains(&thread.id) && ws.chat_shown(&thread.id))
         .map(|thread| Conversation {
             key: thread.id.clone().into(),
             // Other agents' chats say whose they are.
@@ -244,12 +244,9 @@ pub fn render(
                 .segment("workflows", t("Workflows"), Some(IconName::Workflow))
                 .size(ControlSize::Sm)
                 .on_change(move |value, _, cx| {
-                    let projects = value.as_ref() == "projects";
-                    let workflows = value.as_ref() == "workflows";
+                    let room = value.as_ref();
                     switch.update(cx, |ws, cx| {
-                        if workflows {
-                            ws.enter_workflows(None, cx);
-                        } else if projects {
+                        if room == "projects" {
                             match ws
                                 .settings
                                 .active_project
@@ -265,12 +262,45 @@ pub fn render(
                                     cx.notify();
                                 }
                             }
+                        } else if room == "workflows" {
+                            ws.enter_workflows(None, cx);
                         } else {
                             ws.enter_chats(cx);
                         }
                     })
                 }),
             )
+        })
+        .when(in_workflows, |sidebar| {
+            let start = workspace.clone();
+            sidebar
+                .child(
+                    div().flex_none().px_3().pb_2().child(
+                        Button::new("new-workflow", t("Start a workflow"))
+                            .icon(IconName::Workflow)
+                            .variant(ButtonVariant::Outline)
+                            .full_width()
+                            .on_click(move |_, _, cx| {
+                                start.update(cx, |ws, cx| ws.enter_workflows(None, cx))
+                            }),
+                    ),
+                )
+                .child(super::motion::enter(
+                    div().flex_1().min_h_0().flex().flex_col().child(
+                        div()
+                            .id("workflow-scroll")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .px_2()
+                            .pb_2()
+                            .child(super::workflow::sidebar_list(workspace, cx)),
+                    ),
+                    "sidebar-workflows",
+                    0,
+                    super::motion::Enter::Slide,
+                    cx,
+                ))
         })
         .when(in_project, |sidebar| {
             let add = workspace.clone();
@@ -303,31 +333,6 @@ pub fn render(
                     cx,
                 ))
         })
-        .when(in_workflows, |sidebar| {
-            let fresh = workspace.clone();
-            sidebar
-                .child(
-                    div().flex_none().px_3().pb_2().child(
-                        Button::new("new-run", t("New run"))
-                            .icon(IconName::Plus)
-                            .variant(ButtonVariant::Outline)
-                            .full_width()
-                            .on_click(move |_, _, cx| {
-                                fresh.update(cx, |ws, cx| ws.enter_workflows(None, cx))
-                            }),
-                    ),
-                )
-                .child(
-                    div()
-                        .id("workflow-scroll")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .px_2()
-                        .pb_2()
-                        .child(super::workflow::sidebar_list(workspace, cx)),
-                )
-        })
         .when(!in_project && !in_workflows, |sidebar| {
             sidebar
                 .child(
@@ -343,6 +348,7 @@ pub fn render(
                         .pb_2()
                         .child(SearchInput::new("search", search).size(ControlSize::Sm)),
                 )
+                .children(device_chips(workspace, cx))
                 .child(super::motion::enter(
                     div().flex_1().min_h_0().flex().flex_col().child(
                         div()
@@ -557,4 +563,80 @@ pub fn render(
                 ),
         )
         .into_any_element()
+}
+
+/// Chips over the chat list to show one device's chats, when chats from
+/// other devices are in it. Each device's dot says whether it is online.
+fn device_chips(workspace: &Entity<Workspace>, cx: &App) -> Option<AnyElement> {
+    use crate::workspace::DeviceFilter;
+    let ws = workspace.read(cx);
+    let devices = ws.chat_devices();
+    if devices.is_empty() {
+        return None;
+    }
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let current = ws.device_filter.clone();
+    let mut chips: Vec<(SharedString, String, DeviceFilter, Option<bool>)> = vec![
+        ("chip-all".into(), t("All").into(), DeviceFilter::All, None),
+        (
+            "chip-here".into(),
+            t("This computer").into(),
+            DeviceFilter::Here,
+            None,
+        ),
+    ];
+    for device in devices {
+        let online = ws.device_online(&device);
+        chips.push((
+            format!("chip-{device}").into(),
+            device.clone(),
+            DeviceFilter::Device(device),
+            Some(online),
+        ));
+    }
+    let row = div()
+        .flex_none()
+        .flex()
+        .flex_wrap()
+        .gap_1()
+        .px_3()
+        .pb_2()
+        .children(chips.into_iter().map(|(id, label, filter, online)| {
+            let on = filter == current;
+            let pick = workspace.clone();
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .py_0p5()
+                .rounded_full()
+                .cursor_pointer()
+                .text_size(theme.text_size(TextSize::Xs))
+                .border_1()
+                .border_color(if on {
+                    colors.border_strong
+                } else {
+                    colors.border
+                })
+                .when(on, |c| c.bg(colors.active).text_color(colors.fg))
+                .when(!on, |c| {
+                    c.text_color(colors.fg_muted).hover(|c| c.bg(colors.hover))
+                })
+                .children(online.map(|online| {
+                    div().size(px(6.)).rounded_full().bg(if online {
+                        colors.success
+                    } else {
+                        colors.fg_subtle
+                    })
+                }))
+                .child(label)
+                .on_click(move |_, _, cx| {
+                    let filter = filter.clone();
+                    pick.update(cx, |ws, cx| ws.set_device_filter(filter, cx))
+                })
+        }));
+    Some(row.into_any_element())
 }

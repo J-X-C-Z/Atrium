@@ -291,6 +291,7 @@ impl Workspace {
             state.needs_resume = false;
             state.clock.resuming();
             self.transcripts.remove(thread);
+            self.loaded_threads.remove(thread);
             self.load_thread(thread.to_owned(), cx);
             return;
         }

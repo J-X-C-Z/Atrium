@@ -354,7 +354,11 @@ impl RootView {
             ) && !self.workflow.texts.contains_key(&input.key)
             {
                 let long = input.kind == InputKind::Long;
-                let placeholder = input.help.clone();
+                // An empty field takes the default, so show it there.
+                let placeholder = match &input.default {
+                    Some(default) if !default.is_empty() => default.clone(),
+                    _ => input.help.clone(),
+                };
                 let field = cx.new(|cx| {
                     let field = TextInput::new(window, cx).placeholder(placeholder);
                     if long { field.multi_line(2, 6) } else { field }
@@ -477,7 +481,48 @@ impl RootView {
         let source = match &entry.source {
             TemplateSource::Builtin => t("Built in").to_string(),
             TemplateSource::User(path) => path.display().to_string(),
+            TemplateSource::Folder(path) => path.display().to_string(),
         };
+        let is_folder = matches!(entry.source, TemplateSource::Folder(_));
+        let has_commands = template.steps.iter().any(|step| {
+            step.checks
+                .iter()
+                .any(|check| matches!(&check.check, atrium_workflow::Check::Command { .. }))
+        });
+        let confirmed = self
+            .workspace
+            .read(cx)
+            .settings
+            .workflow_confirmed
+            .get(&template.id)
+            == Some(&template.version);
+        let needs = self.workspace.read(cx).workflow_environment(&template);
+        let has_needs = !needs.is_empty();
+        let mut environment = div().flex().flex_col().gap_1();
+        for need in needs {
+            environment = environment.child(
+                div()
+                    .text_size(tiny)
+                    .text_color(if need.found {
+                        colors.fg_muted
+                    } else {
+                        colors.danger
+                    })
+                    .child(if need.found {
+                        format!("{}: {}", crate::i18n::t_any(&need.tool), t("found"))
+                    } else {
+                        format!(
+                            "{}: {} — {}",
+                            crate::i18n::t_any(&need.tool),
+                            t("missing"),
+                            crate::i18n::t_any(&need.hint)
+                        )
+                    }),
+            );
+        }
+        let confirm = self.workspace.clone();
+        let confirm_id = template.id.clone();
+        let confirm_version = template.version;
 
         div()
             .id("wf-start")
@@ -587,6 +632,23 @@ impl RootView {
                     }))
                     .child(section(t("What to start from"), form, cx))
                     .child(section(t("Steps"), steps, cx))
+                    .when(has_needs, |d| {
+                        d.child(section(t("Environment"), environment, cx))
+                    })
+                    .when(is_folder && has_commands && !confirmed, |d| {
+                        let confirm = confirm.clone();
+                        let id = confirm_id.clone();
+                        d.child(
+                            Button::new("wf-confirm-commands", t("Confirm this template's commands"))
+                                .variant(ButtonVariant::Outline)
+                                .on_click(move |_, _, cx| {
+                                    let id = id.clone();
+                                    confirm.update(cx, |ws, cx| {
+                                        ws.confirm_workflow_template(&id, confirm_version, cx)
+                                    });
+                                }),
+                        )
+                    })
                     .child(
                         div()
                             .flex()
@@ -1669,7 +1731,7 @@ fn atrium_workflow_experience(id: &str) -> Option<usize> {
 }
 
 /// Whether a runner drives runs; until it does, the run view says so.
-pub const RUNNER_READY: bool = false;
+pub const RUNNER_READY: bool = true;
 
 fn section(title: &'static str, body: impl IntoElement, cx: &App) -> AnyElement {
     let theme = cx.theme();

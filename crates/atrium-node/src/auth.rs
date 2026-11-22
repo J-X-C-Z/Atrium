@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::{config::Config, sync::SyncState};
 use axum::{
     Json,
     extract::{ConnectInfo, Request, State},
@@ -18,16 +18,34 @@ use tokio::sync::Mutex;
 pub struct Auth {
     pub config: Arc<Config>,
     pub path: String,
+    pairing: Option<Arc<SyncState>>,
     cache: Mutex<HashMap<SocketAddr, (Instant, bool)>>,
 }
 impl Auth {
-    pub fn new(config: Arc<Config>, path: String) -> Self {
+    pub fn new(config: Arc<Config>, path: String, pairing: Option<Arc<SyncState>>) -> Self {
         Self {
             config,
             path,
+            pairing,
             cache: Mutex::new(HashMap::new()),
         }
     }
+}
+
+/// The Tailscale login that owns this device, when it can be read.
+pub async fn owner(path: &str) -> String {
+    let Some(status) = ts(path, &["status", "--json"]).await else {
+        return String::new();
+    };
+    let uid = status["Self"]["UserID"]
+        .as_u64()
+        .map(|value| value.to_string())
+        .or_else(|| status["Self"]["UserID"].as_str().map(str::to_owned))
+        .unwrap_or_default();
+    status["User"][&uid]["LoginName"]
+        .as_str()
+        .unwrap_or("")
+        .to_string()
 }
 pub fn tailnet_ip(ip: IpAddr) -> bool {
     match ip {
@@ -101,20 +119,39 @@ pub async fn middleware(
     req: Request,
     next: Next,
 ) -> Response {
-    if !auth.config.token.is_empty() {
-        let expected = format!("Bearer {}", auth.config.token);
-        let got = req
-            .headers()
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        if !constant_eq(got.as_bytes(), expected.as_bytes()) {
+    let join = req.uri().path() == "/v1/sync/pair/join";
+    let got = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let bearer = got.strip_prefix("Bearer ").unwrap_or("");
+    let config_token = !auth.config.token.is_empty()
+        && constant_eq(
+            got.as_bytes(),
+            format!("Bearer {}", auth.config.token).as_bytes(),
+        );
+    let paired = !bearer.is_empty()
+        && auth
+            .pairing
+            .as_ref()
+            .is_some_and(|sync| sync.accepts_token(bearer));
+    if !join {
+        if !bearer.is_empty() && !config_token && !paired {
+            return error(StatusCode::UNAUTHORIZED, "unauthorized");
+        }
+        if !auth.config.token.is_empty() && !config_token && !paired {
             return error(StatusCode::UNAUTHORIZED, "unauthorized");
         }
     }
     // Browser pages must not use a local user's ambient loopback access.
     if req.headers().contains_key("origin") {
         return error(StatusCode::FORBIDDEN, "not_allowed");
+    }
+    // The pairing code is the credential for this one route. It must be
+    // reachable by a device that is not yet one of the owner's devices.
+    if join {
+        return next.run(req).await;
     }
     if peer.ip().is_loopback() {
         let host = req
@@ -138,7 +175,7 @@ pub async fn middleware(
             .map(|(_, yes)| *yes)
     };
     if let Some(yes) = cached {
-        return if yes {
+        return if yes || paired {
             next.run(req).await
         } else {
             error(StatusCode::FORBIDDEN, "not_allowed")
@@ -158,7 +195,7 @@ pub async fn middleware(
             cache.insert(peer, (Instant::now(), yes));
         }
     }
-    if yes {
+    if yes || paired {
         next.run(req).await
     } else {
         error(StatusCode::FORBIDDEN, "not_allowed")

@@ -221,6 +221,11 @@ impl NodeClient {
         }
     }
 
+    /// The bearer token this client sends, when one is configured.
+    pub fn token(&self) -> Option<String> {
+        self.token.clone()
+    }
+
     fn request(&self, method: &str, path: &str) -> ureq::Request {
         let request = self.agent.request(method, &format!("{}{path}", self.base));
         match &self.token {

@@ -27,6 +27,9 @@ pub struct ExtrasInputs {
     pub schedule_time: Entity<TextInput>,
     pub schedule_prompt: Entity<TextInput>,
     pub schedule_days: crate::schedule::Days,
+    pub device_name: Entity<TextInput>,
+    pub pair_address: Entity<TextInput>,
+    pub pair_code: Entity<TextInput>,
 }
 
 impl ExtrasInputs {
@@ -47,6 +50,13 @@ impl ExtrasInputs {
                 TextInput::new(window, cx).placeholder(t("Name, such as Morning CI check"))
             }),
             schedule_time: cx.new(|cx| TextInput::new(window, cx).placeholder("09:00")),
+            device_name: cx.new(|cx| {
+                TextInput::new(window, cx).placeholder(t("Name, such as studio or laptop"))
+            }),
+            pair_address: cx.new(|cx| {
+                TextInput::new(window, cx).placeholder(t("Its address, such as 100.64.0.2:7381"))
+            }),
+            pair_code: cx.new(|cx| TextInput::new(window, cx).placeholder(t("Code"))),
             schedule_prompt: cx.new(|cx| {
                 TextInput::new(window, cx).multi_line(2, 5).placeholder(t(
                     "What to ask, such as: Check last night's CI runs and summarise the failures",

@@ -44,13 +44,22 @@ mod preview;
 mod projects;
 #[path = "workspace_schedules.rs"]
 mod schedules;
+#[path = "workspace_sync.rs"]
+mod sync;
+#[path = "workspace_sync_view.rs"]
+mod sync_view;
 #[path = "workspace_updates.rs"]
 mod updates;
+#[path = "workspace_workflow_runner.rs"]
+mod workflow_runner;
 #[path = "workspace_workflows.rs"]
 mod workflows;
 pub use acp::{AcpAgent, AgentStatus, CODEX};
 pub use devices::{Device, DeviceStatus};
 pub use projects::{Activity, ActivityKind, Room, StreamState, StreamView, activities};
+pub use sync::SyncRuntime;
+
+pub use sync_view::DeviceFilter;
 pub use workflows::{
     Authoring, RunEntry, TemplateSource, draft_of, draft_report, experience, experience_file,
 };
@@ -138,6 +147,21 @@ pub enum Notice {
     Error(String),
 }
 
+/// A turn another Atrium sent while this owner was still resuming the thread.
+pub(super) struct SyncPendingTurn {
+    pub backend: String,
+    pub input: atrium_sync::TurnInput,
+    pub steer: bool,
+}
+
+pub(super) struct WorkflowReview {
+    pub started_ms: i64,
+    pub results: Vec<atrium_workflow::run::CheckResult>,
+    pub next: usize,
+    pub thread: Option<String>,
+    pub retried: bool,
+}
+
 pub struct Workspace {
     pub status: Status,
     client: Option<CodexClient>,
@@ -155,6 +179,9 @@ pub struct Workspace {
     /// Conversations whose suggested follow-ups the user dismissed or used.
     dismissed_next: std::collections::HashSet<String>,
     transcripts: HashMap<String, Transcript>,
+    /// Threads whose agent session is loaded here. A transcript may also be a
+    /// `thread/read` snapshot, which must never make the next turn skip resume.
+    loaded_threads: HashSet<String>,
     /// The draft's transcript, shown while its thread is being created.
     draft: Transcript,
     loading: HashSet<String>,
@@ -181,6 +208,10 @@ pub struct Workspace {
     pub doc_reports: HashMap<String, Vec<(std::path::PathBuf, String)>>,
     /// Folded runs of steps the user opened or closed, by their first item.
     pub step_folds: HashMap<String, bool>,
+    /// Which device's chats the list shows.
+    pub device_filter: DeviceFilter,
+    /// The pairing code shown in Settings, and when it was made.
+    pub pairing: Option<(String, Instant)>,
     /// Workflow runs as last read from their folders.
     pub workflow_runs: Vec<RunEntry>,
     /// A template picked in the sidebar, for the start form to take up.
@@ -193,6 +224,12 @@ pub struct Workspace {
     pub open_steps: std::collections::HashSet<String>,
     /// A file a transcript row asked the side panel to show.
     pub preview_request: Option<std::path::PathBuf>,
+    /// Steps whose checks are running, so a tick does not start them twice.
+    pub(super) workflow_checking: HashSet<(PathBuf, String)>,
+    /// Reviews whose separate reviewer chat has started.
+    pub(super) workflow_reviews: HashMap<(PathBuf, String), WorkflowReview>,
+    pub(super) workflow_recovered: HashSet<PathBuf>,
+    _workflow_ticker: Option<Task<()>>,
     /// A newer Atrium, when one is out.
     pub update: Option<crate::updates::Update>,
     pub goals: HashMap<String, Goal>,
@@ -239,6 +276,15 @@ pub struct Workspace {
     pub tailnet: Option<Result<usize, String>>,
     _discovery: Option<Task<()>>,
     _pump: Option<Task<()>>,
+    /// Multi-device overlay, the embedded node and remote conversations.
+    pub sync: Option<SyncRuntime>,
+    /// Owner-side remote turns waiting for their thread to finish resuming.
+    sync_pending_turns: HashMap<String, Vec<SyncPendingTurn>>,
+    /// Who claimed each approval or question first.
+    answered_by: HashMap<(String, String), String>,
+    _sync_poll: Option<Task<()>>,
+    _sync_commands: Option<Task<()>>,
+    _sync_init: Option<Task<()>>,
 }
 
 impl EventEmitter<Notice> for Workspace {}
@@ -256,6 +302,8 @@ impl Workspace {
         workspace.init_agents(cx);
         workspace.init_projects(cx);
         workspace.init_devices(cx);
+        workspace.init_sync(cx);
+        workspace.init_workflow_runner(cx);
         workspace.sync_phone(cx);
         workspace.start_schedules(cx);
         workspace.start_update_checks(cx);
@@ -284,6 +332,7 @@ impl Workspace {
             answering: HashSet::new(),
             dismissed_next: Default::default(),
             transcripts: HashMap::new(),
+            loaded_threads: HashSet::new(),
             draft: Transcript::new(),
             loading: HashSet::new(),
             models: Vec::new(),
@@ -300,11 +349,17 @@ impl Workspace {
             doc_reports: HashMap::new(),
             step_folds: HashMap::new(),
             unread: HashMap::new(),
+            device_filter: DeviceFilter::default(),
+            pairing: None,
             workflow_runs: Vec::new(),
             pick_template: None,
             authoring: None,
             open_steps: Default::default(),
             preview_request: None,
+            workflow_checking: HashSet::new(),
+            workflow_reviews: HashMap::new(),
+            workflow_recovered: HashSet::new(),
+            _workflow_ticker: None,
             update: None,
             goals: HashMap::new(),
             memory_off: HashSet::new(),
@@ -334,6 +389,12 @@ impl Workspace {
             tailnet: None,
             _discovery: None,
             _pump: None,
+            sync: None,
+            sync_pending_turns: HashMap::new(),
+            answered_by: HashMap::new(),
+            _sync_poll: None,
+            _sync_commands: None,
+            _sync_init: None,
         }
     }
 
@@ -849,6 +910,12 @@ impl Workspace {
 
     /// Whether the shown chat's agent can take a message.
     pub fn is_ready(&self) -> bool {
+        // Another device's conversation goes to its owner, which runs the agent.
+        if let View::Thread(id) = &self.view
+            && self.sync_is_remote(id)
+        {
+            return self.sync_owner_online(id);
+        }
         self.view_agent_ready()
     }
 
@@ -900,7 +967,15 @@ impl Workspace {
 
     /// Reads a thread's history into its transcript, without showing it.
     fn load_thread(&mut self, thread_id: String, cx: &mut Context<Self>) {
-        if self.transcripts.contains_key(&thread_id) || self.loading.contains(&thread_id) {
+        if self.loaded_threads.contains(&thread_id) || self.loading.contains(&thread_id) {
+            return;
+        }
+        // A follower's snapshot is the conversation; its owner keeps the
+        // writer lock, so there is nothing local to resume.
+        if self.transcripts.contains_key(&thread_id) && self.sync_is_remote(&thread_id) {
+            return;
+        }
+        if self.sync_open_thread(&thread_id, cx) {
             return;
         }
         if !crate::agents::is_codex(self.backend_of(&thread_id)) {
@@ -930,6 +1005,16 @@ impl Workspace {
                         ws.upsert_thread(meta);
                         ws.transcripts
                             .insert(thread_id.clone(), Transcript::from_history(turns));
+                        ws.loaded_threads.insert(thread_id.clone());
+                        let pending = ws.sync_pending_turns.remove(&thread_id).unwrap_or_default();
+                        for turn in pending {
+                            if let Err(error) = ws.sync_deliver_owner_turn(&thread_id, turn, cx) {
+                                cx.emit(Notice::Error(tf(
+                                    "Could not deliver a turn from another computer: {error}",
+                                    &[("error", &error.to_string())],
+                                )));
+                            }
+                        }
                         if mode.is_none() {
                             ws.load_goal(thread_id, cx);
                         } else if let Some(goal) = goal {
@@ -940,6 +1025,14 @@ impl Workspace {
                     }
                     Err(error) => {
                         ws.pilot_failure(&thread_id, true);
+                        if let Some(pending) = ws.sync_pending_turns.remove(&thread_id) {
+                            for _ in pending {
+                                cx.emit(Notice::Error(tf(
+                                    "Could not open this chat: {error}",
+                                    &[("error", &format!("{error:#}"))],
+                                )));
+                            }
+                        }
                         let mut transcript = Transcript::new();
                         transcript.fail_pending_turn(tf(
                             "Could not open this chat: {error}",
@@ -1370,6 +1463,10 @@ impl Workspace {
         answers: Answers,
         cx: &mut Context<Self>,
     ) {
+        if self.sync_is_remote(thread_id) {
+            self.sync_remote_answers(thread_id, request_id, answers, cx);
+            return;
+        }
         if let Ok(task) =
             self.submit_answer(thread_id, request_id, phone::Answer::Questions(answers), cx)
         {
@@ -1513,6 +1610,11 @@ impl Workspace {
         } else {
             composed
         };
+        if let View::Thread(thread_id) = self.view.clone()
+            && self.sync_send_remote(&thread_id, &composed, cx)
+        {
+            return NoticeSendResult::NoDispatch;
+        }
         if !self.is_codex_view() {
             return self.acp_send(composed, target, cx);
         }
@@ -1649,6 +1751,7 @@ impl Workspace {
                                 // The draft becomes the thread's transcript.
                                 let draft = std::mem::take(&mut ws.draft);
                                 ws.transcripts.insert(id.clone(), draft);
+                                ws.loaded_threads.insert(id.clone());
                                 if let Some(born) = ws.born.remove(DRAFT) {
                                     ws.born.insert(id.clone(), born);
                                 }
@@ -1711,6 +1814,10 @@ impl Workspace {
         let View::Thread(thread_id) = self.view.clone() else {
             return;
         };
+        if self.sync_is_remote(&thread_id) {
+            self.sync_remote_interrupt(&thread_id, cx);
+            return;
+        }
         if !crate::agents::is_codex(self.backend_of(&thread_id)) {
             self.acp_stop(&thread_id);
             return;
@@ -1742,10 +1849,26 @@ impl Workspace {
         decision: ApprovalDecision,
         cx: &mut Context<Self>,
     ) {
-        if let Ok(task) =
-            self.submit_answer(thread_id, request_id, phone::Answer::Approval(decision), cx)
-        {
-            task.detach();
+        if self.sync_is_remote(thread_id) {
+            self.sync_remote_approval(thread_id, request_id, decision, cx);
+            return;
+        }
+        match self.submit_answer(
+            thread_id,
+            request_id.clone(),
+            phone::Answer::Approval(decision),
+            cx,
+        ) {
+            Ok(task) => task.detach(),
+            Err(atrium_phone::Error::Stale) => {
+                if let Some(device) = self.answered_by(thread_id, &request_id) {
+                    cx.emit(Notice::Info(tf(
+                        "Already answered on {device}.",
+                        &[("device", &device)],
+                    )));
+                }
+            }
+            Err(_) => {}
         }
     }
 
@@ -1754,6 +1877,7 @@ impl Workspace {
             self.acp_archive(thread_id.clone(), cx);
             self.threads.retain(|t| t.id != thread_id);
             self.transcripts.remove(&thread_id);
+            self.loaded_threads.remove(&thread_id);
             self.settings.pinned.retain(|id| *id != thread_id);
             if self.view == View::Thread(thread_id) {
                 self.view = View::Draft;
@@ -1768,6 +1892,7 @@ impl Workspace {
         };
         self.threads.retain(|t| t.id != thread_id);
         self.transcripts.remove(&thread_id);
+        self.loaded_threads.remove(&thread_id);
         self.settings.pinned.retain(|id| *id != thread_id);
         if self.view == View::Thread(thread_id.clone()) {
             self.view = View::Draft;
@@ -1792,15 +1917,25 @@ impl Workspace {
 
     pub fn rename(&mut self, thread_id: String, name: String, cx: &mut Context<Self>) {
         let name = name.trim().to_string();
-        let Some(client) = self.thread_codex(&thread_id) else {
-            return;
-        };
         if name.is_empty() {
             return;
         }
+        if self.sync_is_remote(&thread_id) {
+            if let Some(thread) = self.threads.iter_mut().find(|t| t.id == thread_id) {
+                thread.name = Some(name.clone());
+            }
+            self.sync_set_thread_field(&thread_id, "title", serde_json::json!(name));
+            self.settings.save();
+            cx.notify();
+            return;
+        }
+        let Some(client) = self.thread_codex(&thread_id) else {
+            return;
+        };
         if let Some(thread) = self.threads.iter_mut().find(|t| t.id == thread_id) {
             thread.name = Some(name.clone());
         }
+        self.sync_set_thread_field(&thread_id, "title", serde_json::json!(name));
         cx.notify();
         cx.spawn(async move |this, cx| {
             if let Err(error) = client.thread_set_name(&thread_id, &name).await {
@@ -1818,6 +1953,8 @@ impl Workspace {
     pub fn toggle_pin(&mut self, thread_id: &str, cx: &mut Context<Self>) {
         self.settings.toggle_pin(thread_id);
         self.settings.save();
+        let pinned = self.settings.is_pinned(thread_id);
+        self.sync_set_thread_field(thread_id, "pinned", serde_json::json!(pinned));
         cx.notify();
     }
 

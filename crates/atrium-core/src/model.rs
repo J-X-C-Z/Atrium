@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 pub type RequestId = serde_json::Value;
 
 /// A conversation as listed in the sidebar.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ThreadMeta {
     pub id: String,
     /// Which agent the thread belongs to, such as `codex` or `claude`.
@@ -50,7 +50,8 @@ pub enum TurnStatus {
 }
 
 /// Where one item of a turn stands.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ItemStatus {
     InProgress,
     Completed,
@@ -58,14 +59,15 @@ pub enum ItemStatus {
     Declined,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ChangeKind {
     Add,
     Delete,
     Update { move_to: Option<String> },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileChange {
     pub path: String,
     pub kind: ChangeKind,
@@ -158,7 +160,8 @@ pub struct Cost {
 }
 
 /// One thing that happened in a turn, normalized across backends.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Item {
     User {
         id: String,
@@ -416,7 +419,7 @@ pub fn plan_label(plan: &str) -> String {
 }
 
 /// One question the agent asks, with the choices it offers.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Question {
     pub id: String,
     pub header: String,

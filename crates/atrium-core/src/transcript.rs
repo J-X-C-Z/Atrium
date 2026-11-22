@@ -99,6 +99,33 @@ impl Transcript {
         transcript
     }
 
+    /// A transcript rebuilt from a remote snapshot, whose item ids are
+    /// stable and whose turn boundaries the follower does not need for
+    /// reading. Live turns replace the synthetic grouping as events arrive.
+    pub fn from_items(items: impl IntoIterator<Item = Item>) -> Self {
+        let mut transcript = Self::new();
+        for item in items {
+            transcript.upsert_item("remote", item, false);
+        }
+        transcript.seeded = transcript.entries.len();
+        transcript
+    }
+
+    /// Merges a remote snapshot by item id. Later snapshots never duplicate
+    /// an item that was already seen live or in an earlier snapshot.
+    pub fn apply_items(&mut self, items: impl IntoIterator<Item = Item>) {
+        for item in items {
+            self.upsert_item("remote", item, false);
+        }
+    }
+
+    /// Applies a remote snapshot and its owner-reported running state, so a
+    /// follower's pending turn ends when the owner's turn does.
+    pub fn apply_snapshot(&mut self, items: impl IntoIterator<Item = Item>, running: bool) {
+        self.apply_items(items);
+        self.active_turn = running.then(|| "remote".to_string());
+    }
+
     /// How many leading rows came from stored history. Views animate only the rest.
     pub fn seeded(&self) -> usize {
         self.seeded

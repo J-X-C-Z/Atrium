@@ -59,6 +59,75 @@ pub fn root(dir: &Path) -> Option<PathBuf> {
     (!line.is_empty()).then(|| PathBuf::from(line))
 }
 
+/// A project identity that survives clones on different machines.
+///
+/// It is the normalized `origin` URL plus the path inside the repository;
+/// when there is no remote, the root commit is used instead. The id is a
+/// short hash so it can be an overlay key.
+pub fn identity(dir: &Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+
+    let root = root(dir)?;
+    let relative = dir
+        .canonicalize()
+        .ok()
+        .and_then(|dir| {
+            root.canonicalize()
+                .ok()
+                .and_then(|root| dir.strip_prefix(root).ok().map(Path::to_path_buf))
+        })
+        .unwrap_or_default();
+    let relative = relative
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    let origin = git(&root, &["remote", "get-url", "origin"])
+        .ok()
+        .map(|url| normalize_origin(url.trim()));
+    let base = match origin {
+        Some(origin) if !origin.is_empty() => origin,
+        _ => git(&root, &["rev-list", "--max-parents=0", "HEAD"])
+            .ok()?
+            .lines()
+            .next()?
+            .trim()
+            .to_string(),
+    };
+    let digest = Sha256::digest(format!("{base}|{relative}").as_bytes());
+    Some(
+        digest
+            .iter()
+            .take(8)
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+    )
+}
+
+fn normalize_origin(url: &str) -> String {
+    let mut url = url.trim().trim_end_matches('/').to_string();
+    if let Some(rest) = url.strip_suffix(".git") {
+        url = rest.to_string();
+    }
+    if let Some(rest) = url.strip_prefix("git@")
+        && let Some((host, path)) = rest.split_once(':')
+    {
+        url = format!("{host}/{path}");
+    }
+    for prefix in ["https://", "http://", "ssh://", "git://"] {
+        if let Some(rest) = url.strip_prefix(prefix) {
+            url = rest.to_string();
+            break;
+        }
+    }
+    if let Some((user, rest)) = url.split_once('@')
+        && !user.contains('/')
+    {
+        url = rest.to_string();
+    }
+    url.to_ascii_lowercase()
+}
+
 fn has_head(root: &Path) -> bool {
     git(root, &["rev-parse", "--verify", "-q", "HEAD"]).is_ok()
 }
@@ -96,7 +165,13 @@ pub fn status(dir: &Path) -> Result<Status> {
     let root = root(dir).context("not a git repository")?;
     let out = git(
         &root,
-        &["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"],
+        &[
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            "-z",
+            "--untracked-files=all",
+        ],
     )?;
     let mut status = Status {
         root: root.clone(),
@@ -148,11 +223,22 @@ pub fn status(dir: &Path) -> Result<Status> {
 pub fn diff(root: &Path, change: &Change) -> Result<String> {
     if change.state == ChangeState::Untracked || !has_head(root) {
         let out = command("git", root)
-            .args(["diff", "--no-color", "--no-index", "--", "/dev/null", &change.path])
+            .args([
+                "diff",
+                "--no-color",
+                "--no-index",
+                "--",
+                "/dev/null",
+                &change.path,
+            ])
             .output()
             .context("running git")?;
         // `--no-index` exits 1 when the files differ.
-        ensure!(out.status.code() != Some(2), "git diff: {}", first_error(&out).unwrap_or_default());
+        ensure!(
+            out.status.code() != Some(2),
+            "git diff: {}",
+            first_error(&out).unwrap_or_default()
+        );
         return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
     }
     git(root, &["diff", "--no-color", "HEAD", "--", &change.path])
@@ -214,7 +300,12 @@ pub fn revert_hunk(root: &Path, change: &Change, index: usize) -> Result<()> {
     fs::write(&file, patch)?;
     let result = git(
         root,
-        &["apply", "-R", "--whitespace=nowarn", &file.to_string_lossy()],
+        &[
+            "apply",
+            "-R",
+            "--whitespace=nowarn",
+            &file.to_string_lossy(),
+        ],
     );
     let _ = fs::remove_dir_all(&dir);
     result.map(drop)
@@ -245,7 +336,9 @@ pub fn commit_all(root: &Path, message: &str) -> Result<String> {
     let result = git(root, &["commit", "-q", "-F", &file.to_string_lossy()]);
     let _ = fs::remove_dir_all(&dir);
     result?;
-    Ok(git(root, &["rev-parse", "--short", "HEAD"])?.trim().to_string())
+    Ok(git(root, &["rev-parse", "--short", "HEAD"])?
+        .trim()
+        .to_string())
 }
 
 /// Pushes the current branch, setting its upstream the first time.
@@ -287,7 +380,13 @@ pub fn create_pr(root: &Path) -> Result<String> {
 fn checkpoint_ref(thread: &str, turn: usize) -> String {
     let safe: String = thread
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     format!("refs/atrium/checkpoints/{safe}/{turn}")
 }
@@ -328,8 +427,87 @@ pub fn checkpoint(dir: &Path, thread: &str, turn: usize) -> Result<()> {
         .output()
         .context("running git")?;
     let commit = checked(commit, "git commit-tree")?;
-    git(&root, &["update-ref", &checkpoint_ref(thread, turn), commit.trim()])?;
+    git(
+        &root,
+        &["update-ref", &checkpoint_ref(thread, turn), commit.trim()],
+    )?;
     Ok(())
+}
+
+fn move_ref(thread: &str) -> String {
+    let safe: String = thread
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("refs/atrium/move/{safe}")
+}
+
+/// Packs the current working tree and its history as a git bundle that can
+/// be fetched on another computer. Returns `(bytes, ref, commit, identity)`.
+pub fn move_bundle(dir: &Path, thread: &str) -> Result<(Vec<u8>, String, String, String)> {
+    let root = root(dir).context("not a git repository")?;
+    ensure!(has_head(&root), "the repository has no commits yet");
+    let tree = snapshot_tree(&root)?;
+    let message = format!("Atrium move: {thread}");
+    let head = git(&root, &["rev-parse", "HEAD"])?;
+    let commit = command("git", &root)
+        .args(["commit-tree", &tree, "-m", &message, "-p", head.trim()])
+        .env("GIT_AUTHOR_NAME", "Atrium")
+        .env("GIT_AUTHOR_EMAIL", "atrium@localhost")
+        .env("GIT_COMMITTER_NAME", "Atrium")
+        .env("GIT_COMMITTER_EMAIL", "atrium@localhost")
+        .output()
+        .context("running git")?;
+    let commit = checked(commit, "git commit-tree")?.trim().to_string();
+    let reference = move_ref(thread);
+    git(&root, &["update-ref", &reference, &commit])?;
+    let temp = tempdir()?;
+    let bundle = temp.join("move.bundle");
+    git(
+        &root,
+        &[
+            "bundle",
+            "create",
+            "-q",
+            &bundle.to_string_lossy(),
+            &reference,
+        ],
+    )?;
+    let bytes = fs::read(&bundle)?;
+    let project = identity(&root).context("could not identify the project")?;
+    Ok((bytes, reference, commit, project))
+}
+
+/// Fetches a move bundle and creates a chat worktree at its commit.
+pub fn apply_move_bundle(
+    repo_dir: &Path,
+    bundle: &[u8],
+    reference: &str,
+    thread: &str,
+    base: &Path,
+) -> Result<PathBuf> {
+    let root = root(repo_dir).context("not a git repository")?;
+    let temp = tempdir()?;
+    let path = temp.join("move.bundle");
+    fs::write(&path, bundle)?;
+    let local = move_ref(thread);
+    git(
+        &root,
+        &[
+            "fetch",
+            "-q",
+            &path.to_string_lossy(),
+            &format!("+{reference}:{local}"),
+        ],
+    )?;
+    let commit = git(&root, &["rev-parse", &local])?;
+    add_worktree_from(&root, base, thread, commit.trim())
 }
 
 /// The turns of `thread` that have a checkpoint.
@@ -357,7 +535,10 @@ pub fn rename_checkpoints(dir: &Path, from: &str, to: &str) -> Result<()> {
     for turn in checkpoints(&root, from) {
         let old = checkpoint_ref(from, turn);
         let commit = git(&root, &["rev-parse", &old])?;
-        git(&root, &["update-ref", &checkpoint_ref(to, turn), commit.trim()])?;
+        git(
+            &root,
+            &["update-ref", &checkpoint_ref(to, turn), commit.trim()],
+        )?;
         git(&root, &["update-ref", "-d", &old])?;
     }
     Ok(())
@@ -369,15 +550,24 @@ pub fn rename_checkpoints(dir: &Path, from: &str, to: &str) -> Result<()> {
 /// `undo_turn`, so the restore can itself be undone.
 pub fn restore(dir: &Path, thread: &str, turn: usize, undo_turn: usize) -> Result<()> {
     let root = root(dir).context("not a git repository")?;
-    let target = git(&root, &["rev-parse", &format!("{}^{{tree}}", checkpoint_ref(thread, turn))])
-        .context("no checkpoint for that turn")?;
+    let target = git(
+        &root,
+        &[
+            "rev-parse",
+            &format!("{}^{{tree}}", checkpoint_ref(thread, turn)),
+        ],
+    )
+    .context("no checkpoint for that turn")?;
     let target = target.trim().to_string();
     checkpoint(&root, thread, undo_turn)?;
     let now = snapshot_tree(&root)?;
     if now == target {
         return Ok(());
     }
-    let changed = git(&root, &["diff", "--name-status", "--no-renames", "-z", &target, &now])?;
+    let changed = git(
+        &root,
+        &["diff", "--name-status", "--no-renames", "-z", &target, &now],
+    )?;
     let mut fields = changed.split('\0').filter(|f| !f.is_empty());
     let mut put_back = Vec::new();
     while let (Some(state), Some(path)) = (fields.next(), fields.next()) {
@@ -407,29 +597,57 @@ pub fn restore(dir: &Path, thread: &str, turn: usize, undo_turn: usize) -> Resul
 /// A new worktree of the repository `dir` is in, on a new branch
 /// `atrium/<name>` from the current `HEAD`, under `base`. Returns its folder.
 pub fn add_worktree(dir: &Path, base: &Path, name: &str) -> Result<PathBuf> {
+    add_worktree_from(dir, base, name, "HEAD")
+}
+
+/// A worktree at `start` instead of the current `HEAD`.
+pub fn add_worktree_from(dir: &Path, base: &Path, name: &str, start: &str) -> Result<PathBuf> {
     let root = root(dir).context("not a git repository")?;
     ensure!(has_head(&root), "the repository has no commits yet");
     let slug: String = name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect::<String>()
         .split('-')
         .filter(|s| !s.is_empty())
         .take(6)
         .collect::<Vec<_>>()
         .join("-");
-    let slug = if slug.is_empty() { "chat".to_string() } else { slug };
+    let slug = if slug.is_empty() {
+        "chat".to_string()
+    } else {
+        slug
+    };
     let repo = root
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "repo".into());
     let mut n = 0;
     let (folder, branch) = loop {
-        let tail = if n == 0 { slug.clone() } else { format!("{slug}-{n}") };
+        let tail = if n == 0 {
+            slug.clone()
+        } else {
+            format!("{slug}-{n}")
+        };
         let folder = base.join(&repo).join(&tail);
         let branch = format!("atrium/{tail}");
         let taken = folder.exists()
-            || git(&root, &["rev-parse", "-q", "--verify", &format!("refs/heads/{branch}")]).is_ok();
+            || git(
+                &root,
+                &[
+                    "rev-parse",
+                    "-q",
+                    "--verify",
+                    &format!("refs/heads/{branch}"),
+                ],
+            )
+            .is_ok();
         if !taken {
             break (folder, branch);
         }
@@ -441,7 +659,15 @@ pub fn add_worktree(dir: &Path, base: &Path, name: &str) -> Result<PathBuf> {
     fs::create_dir_all(folder.parent().unwrap_or(base))?;
     git(
         &root,
-        &["worktree", "add", "-q", "-b", &branch, &folder.to_string_lossy(), "HEAD"],
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            &branch,
+            &folder.to_string_lossy(),
+            start,
+        ],
     )?;
     Ok(folder)
 }
@@ -450,7 +676,11 @@ pub fn add_worktree(dir: &Path, base: &Path, name: &str) -> Result<PathBuf> {
 /// a linked worktree rather than the main one.
 pub fn main_checkout(dir: &Path) -> Option<PathBuf> {
     let top = root(dir)?;
-    let common = git(&top, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).ok()?;
+    let common = git(
+        &top,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )
+    .ok()?;
     let common = PathBuf::from(common.trim());
     let main = common.parent()?.to_path_buf();
     (fs::canonicalize(&main).ok()? != fs::canonicalize(&top).ok()?).then_some(main)
@@ -462,8 +692,14 @@ pub fn merge_worktree(dir: &Path) -> Result<String> {
     let top = root(dir).context("not a git repository")?;
     let main = main_checkout(&top).context("this folder is not a separate worktree")?;
     let changes = status(&top)?.changes;
-    ensure!(changes.is_empty(), "commit or undo this worktree's changes first");
-    ensure!(status(&main)?.changes.is_empty(), "the main checkout has uncommitted changes");
+    ensure!(
+        changes.is_empty(),
+        "commit or undo this worktree's changes first"
+    );
+    ensure!(
+        status(&main)?.changes.is_empty(),
+        "the main checkout has uncommitted changes"
+    );
     let branch = git(&top, &["rev-parse", "--abbrev-ref", "HEAD"])?;
     let into = git(&main, &["rev-parse", "--abbrev-ref", "HEAD"])?;
     let out = command("git", &main)
@@ -485,7 +721,10 @@ pub fn merge_worktree(dir: &Path) -> Result<String> {
 pub fn remove_worktree(dir: &Path) -> Result<()> {
     let top = root(dir).context("not a git repository")?;
     let main = main_checkout(&top).context("this folder is not a separate worktree")?;
-    git(&main, &["worktree", "remove", "--force", &top.to_string_lossy()])?;
+    git(
+        &main,
+        &["worktree", "remove", "--force", &top.to_string_lossy()],
+    )?;
     Ok(())
 }
 
@@ -503,7 +742,11 @@ mod tests {
         ] {
             git(&dir, &args).unwrap();
         }
-        fs::write(dir.join("a.txt"), "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\ntwelve\n").unwrap();
+        fs::write(
+            dir.join("a.txt"),
+            "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\ntwelve\n",
+        )
+        .unwrap();
         fs::write(dir.join("b.txt"), "b\n").unwrap();
         fs::write(dir.join(".gitignore"), "target/\n").unwrap();
         git(&dir, &["add", "-A"]).unwrap();
@@ -513,6 +756,42 @@ mod tests {
 
     fn change<'a>(s: &'a Status, path: &str) -> &'a Change {
         s.changes.iter().find(|c| c.path == path).unwrap()
+    }
+
+    #[test]
+    fn identity_is_stable_and_ignores_the_checkout_path() {
+        let dir = repo();
+        let first = identity(&dir).unwrap();
+        assert_eq!(identity(&dir).unwrap(), first);
+        assert_eq!(first.len(), 16);
+        let nested = dir.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        assert_ne!(identity(&nested).unwrap(), first);
+    }
+
+    #[test]
+    fn remote_urls_normalize_the_same_way() {
+        assert_eq!(
+            normalize_origin("git@GitHub.com:owner/repo.git"),
+            "github.com/owner/repo"
+        );
+        assert_eq!(
+            normalize_origin("https://github.com/owner/repo/"),
+            "github.com/owner/repo"
+        );
+    }
+
+    #[test]
+    fn a_move_bundle_carries_uncommitted_files_into_a_worktree() {
+        let dir = repo();
+        fs::write(dir.join("a.txt"), "moved\n").unwrap();
+        fs::write(dir.join("new.txt"), "new\n").unwrap();
+        let (bundle, reference, _commit, _identity) = move_bundle(&dir, "t-move").unwrap();
+        assert!(!bundle.is_empty());
+        let base = tempdir().unwrap();
+        let tree = apply_move_bundle(&dir, &bundle, &reference, "t-move", &base).unwrap();
+        assert_eq!(fs::read_to_string(tree.join("a.txt")).unwrap(), "moved\n");
+        assert_eq!(fs::read_to_string(tree.join("new.txt")).unwrap(), "new\n");
     }
 
     #[test]
@@ -547,7 +826,11 @@ mod tests {
         let now = fs::read_to_string(dir.join("a.txt")).unwrap();
         assert!(now.starts_with("ONE\n") && now.ends_with("twelve\n"));
         revert_file(&dir, &a).unwrap();
-        assert!(fs::read_to_string(dir.join("a.txt")).unwrap().starts_with("one\n"));
+        assert!(
+            fs::read_to_string(dir.join("a.txt"))
+                .unwrap()
+                .starts_with("one\n")
+        );
         revert_file(&dir, change(&s, "new.txt")).unwrap();
         assert!(!dir.join("new.txt").exists());
         assert!(status(&dir).unwrap().changes.is_empty());
@@ -582,12 +865,20 @@ mod tests {
         assert_eq!(checkpoints(&dir, "thread/2"), vec![0]);
         assert_eq!(checkpoints(&dir, "thread/1"), vec![0]);
         restore(&dir, "thread/1", 0, 1).unwrap();
-        assert!(fs::read_to_string(dir.join("a.txt")).unwrap().starts_with("one\n"));
+        assert!(
+            fs::read_to_string(dir.join("a.txt"))
+                .unwrap()
+                .starts_with("one\n")
+        );
         assert_eq!(fs::read_to_string(dir.join("b.txt")).unwrap(), "staged\n");
         assert!(!dir.join("made.txt").exists());
         assert!(dir.join("target/build").exists());
         // The index the user staged is untouched by checkpoints.
-        assert!(git(&dir, &["diff", "--cached", "--name-only"]).unwrap().contains("b.txt"));
+        assert!(
+            git(&dir, &["diff", "--cached", "--name-only"])
+                .unwrap()
+                .contains("b.txt")
+        );
         // And the restore can be undone.
         restore(&dir, "thread/1", 1, 2).unwrap();
         assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "agent\n");
@@ -604,10 +895,16 @@ mod tests {
         assert!(main_checkout(&tree).is_some());
         assert!(main_checkout(&dir).is_none());
         fs::write(tree.join("b.txt"), "from tree\n").unwrap();
-        assert!(merge_worktree(&tree).is_err(), "uncommitted work blocks the merge");
+        assert!(
+            merge_worktree(&tree).is_err(),
+            "uncommitted work blocks the merge"
+        );
         commit_all(&tree, "Tree work").unwrap();
         assert_eq!(merge_worktree(&tree).unwrap(), "main");
-        assert_eq!(fs::read_to_string(dir.join("b.txt")).unwrap(), "from tree\n");
+        assert_eq!(
+            fs::read_to_string(dir.join("b.txt")).unwrap(),
+            "from tree\n"
+        );
         let again = add_worktree(&dir, &base, "Fix the Login page!").unwrap();
         assert!(again.ends_with("fix-the-login-page-1"));
         remove_worktree(&tree).unwrap();

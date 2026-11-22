@@ -386,6 +386,29 @@ pub fn render_overview(
                     .child(t("Unattended")),
             )
         })
+        .children(ws.scheduler_elsewhere(&project.root).map(|device| {
+            // Another device holds the scheduler's lease: work starts there.
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .py_0p5()
+                .rounded_full()
+                .bg(colors.info.opacity(0.12))
+                .text_size(theme.text_size(TextSize::Xs))
+                .text_color(colors.info)
+                .child(
+                    Icon::new(IconName::Monitor)
+                        .size(IconSize::Xs)
+                        .color(colors.info),
+                )
+                .child(tf(
+                    "Scheduled on {device}; this computer only watches",
+                    &[("device", &device)],
+                ))
+        }))
         .child(
             div()
                 .flex_none()

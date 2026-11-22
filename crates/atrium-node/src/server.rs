@@ -3,8 +3,10 @@ use crate::{
     config::{Config, find_binary},
     fs::{FsError, Roots},
     procs::{InputCapacity, InputReplaced, MAX_LINE_BYTES, Process, ProcessManager},
+    sync::{HostError, SyncState},
 };
 use anyhow::Result;
+use atrium_sync::{AnswerInput, ApprovalAnswer, Op, ThreadEvent, TurnInput, Vector};
 use axum::{
     Json, Router,
     body::Bytes,
@@ -29,9 +31,18 @@ pub struct State {
     info: RwLock<Value>,
     instance_id: String,
     ws_slots: Arc<Semaphore>,
+    pub sync: Option<Arc<SyncState>>,
 }
 impl State {
     pub async fn new(config: Arc<Config>, path: String) -> Result<Arc<Self>> {
+        Self::new_with_sync(config, path, None).await
+    }
+
+    pub async fn new_with_sync(
+        config: Arc<Config>,
+        path: String,
+        sync: Option<Arc<SyncState>>,
+    ) -> Result<Arc<Self>> {
         let roots = Arc::new(Roots::new(config.roots.clone())?);
         let s = Arc::new(Self {
             procs: ProcessManager::with_total_output_bytes(
@@ -50,6 +61,7 @@ impl State {
             roots,
             info: RwLock::new(Value::Null),
             instance_id: uuid::Uuid::new_v4().to_string(),
+            sync,
         });
         s.refresh(false).await;
         let c = s.clone();
@@ -102,9 +114,47 @@ impl State {
     }
 }
 pub fn router(s: Arc<State>) -> Router {
-    let auth = Arc::new(Auth::new(s.config.clone(), s.path.clone()));
+    let auth = Arc::new(Auth::new(s.config.clone(), s.path.clone(), s.sync.clone()));
     Router::new()
         .route("/v1/node", get(info))
+        .route("/v1/atrium", get(atrium_info))
+        .route("/v1/sync/vector", get(sync_vector))
+        .route("/v1/sync/ops", post(sync_ops))
+        .route("/v1/sync/events", get(sync_events))
+        .route("/v1/sync/inbox", post(sync_inbox))
+        .route("/v1/sync/pair/start", post(sync_pair_start))
+        .route("/v1/sync/pair/join", post(sync_pair_join))
+        .route("/v1/sync/threads", get(sync_threads))
+        .route(
+            "/v1/sync/threads/{backend}/{id}/snapshot",
+            get(sync_snapshot),
+        )
+        .route(
+            "/v1/sync/threads/{backend}/{id}/events",
+            get(sync_thread_events),
+        )
+        .route("/v1/sync/threads/{backend}/{id}/turn", post(sync_turn))
+        .route("/v1/sync/threads/{backend}/{id}/steer", post(sync_steer))
+        .route(
+            "/v1/sync/threads/{backend}/{id}/interrupt",
+            post(sync_interrupt),
+        )
+        .route(
+            "/v1/sync/threads/{backend}/{id}/approvals/{request}",
+            post(sync_approve),
+        )
+        .route(
+            "/v1/sync/threads/{backend}/{id}/answers/{request}",
+            post(sync_answer),
+        )
+        .route(
+            "/v1/sync/threads/{backend}/{id}/move-package",
+            get(sync_move_package),
+        )
+        .route(
+            "/v1/sync/threads/{backend}/{id}/move-release",
+            post(sync_move_release),
+        )
         .route("/v1/procs", get(list).post(spawn))
         .route("/v1/procs/{id}", delete(stop))
         .route("/v1/procs/{id}/attach", get(attach))
@@ -122,6 +172,358 @@ pub fn router(s: Arc<State>) -> Router {
         ))
         .layer(axum::middleware::from_fn(json_errors))
         .with_state(s)
+}
+
+fn no_sync() -> ApiError {
+    ApiError(
+        StatusCode::NOT_FOUND,
+        "not_found",
+        "this node has no Atrium sync state".into(),
+    )
+}
+
+fn sync_or_error(s: &State) -> Result<Arc<SyncState>, ApiError> {
+    s.sync.clone().ok_or_else(no_sync)
+}
+
+async fn atrium_info(AxState(s): AxState<Arc<State>>) -> Result<Json<Value>, ApiError> {
+    let sync = sync_or_error(&s)?;
+    Ok(Json(serde_json::to_value(sync.directory()).map_err(
+        |error| {
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "bad_request",
+                error.to_string(),
+            )
+        },
+    )?))
+}
+
+async fn sync_vector(AxState(s): AxState<Arc<State>>) -> Result<Json<Vector>, ApiError> {
+    let sync = sync_or_error(&s)?;
+    Ok(Json(sync.vector()))
+}
+
+#[derive(Deserialize)]
+struct SyncOpsRequest {
+    #[serde(default)]
+    ops: Vec<Op>,
+    #[serde(default)]
+    vector: Vector,
+}
+
+async fn sync_ops(
+    AxState(s): AxState<Arc<State>>,
+    Json(request): Json<SyncOpsRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let sync = sync_or_error(&s)?;
+    if request.ops.len() > 10_000 {
+        return Err(ApiError(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "bad_request",
+            "too many overlay ops in one request".into(),
+        ));
+    }
+    let applied = sync
+        .merge(request.ops)
+        .map_err(|error| ApiError(StatusCode::BAD_REQUEST, "bad_request", error.to_string()))?;
+    let ops = sync.missing_for(&request.vector);
+    Ok(Json(json!({"applied": applied.len(), "ops": ops})))
+}
+
+async fn sync_events(
+    AxState(s): AxState<Arc<State>>,
+    upgrade: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    let sync = sync_or_error(&s)?;
+    Ok(upgrade.on_upgrade(move |socket| sync_events_loop(sync, socket)))
+}
+
+async fn sync_events_loop(sync: Arc<SyncState>, mut socket: WebSocket) {
+    let mut events = sync.subscribe();
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
+    loop {
+        tokio::select! {
+            _ = heartbeat.tick() => {
+                if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    break;
+                }
+            }
+            event = events.recv() => {
+                match event {
+                    Ok(op) => {
+                        if let Ok(text) = serde_json::to_string(&op)
+                            && socket.send(Message::Text(text.into())).await.is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        let _ = socket
+                            .send(Message::Text(
+                                json!({"rebuild": true}).to_string().into(),
+                            ))
+                            .await;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct PairJoin {
+    code: String,
+}
+
+async fn sync_pair_start(AxState(s): AxState<Arc<State>>) -> Result<Json<Value>, ApiError> {
+    let sync = sync_or_error(&s)?;
+    let code = sync.start_pairing(crate::sync::now_ms());
+    Ok(Json(json!({"code": code, "expires_in_secs": 300})))
+}
+
+async fn sync_pair_join(
+    AxState(s): AxState<Arc<State>>,
+    Json(request): Json<PairJoin>,
+) -> Result<Json<Value>, ApiError> {
+    let sync = sync_or_error(&s)?;
+    match sync.join_pairing(request.code.trim(), crate::sync::now_ms()) {
+        Ok(token) => Ok(Json(json!({"token": token}))),
+        Err(crate::sync::PairError::Io(error)) => Err(ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "bad_request",
+            error.to_string(),
+        )),
+        Err(error) => Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "not_allowed",
+            error.to_string(),
+        )),
+    }
+}
+
+#[derive(Deserialize)]
+struct InboxQuery {
+    name: Option<String>,
+}
+
+async fn sync_inbox(
+    AxState(s): AxState<Arc<State>>,
+    Query(query): Query<InboxQuery>,
+    body: Bytes,
+) -> Result<Json<Value>, ApiError> {
+    let sync = sync_or_error(&s)?;
+    let name = query.name.unwrap_or_else(|| "attachment".into());
+    let path = sync.write_inbox(&name, &body).map_err(|error| {
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "bad_request",
+            error.to_string(),
+        )
+    })?;
+    Ok(Json(json!({"path": path})))
+}
+
+#[derive(Deserialize)]
+struct SinceQuery {
+    since: Option<i64>,
+}
+
+async fn sync_threads(
+    AxState(s): AxState<Arc<State>>,
+    Query(query): Query<SinceQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let sync = sync_or_error(&s)?;
+    let host = sync.host().ok_or_else(no_sync)?;
+    let threads = host.threads(query.since).await.map_err(ApiError::from)?;
+    Ok(Json(json!({"threads": threads})))
+}
+
+async fn sync_snapshot(
+    AxState(s): AxState<Arc<State>>,
+    Path((backend, id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let sync = sync_or_error(&s)?;
+    let host = sync.host().ok_or_else(no_sync)?;
+    let snapshot = host.snapshot(&backend, &id).await.map_err(ApiError::from)?;
+    Ok(Json(serde_json::to_value(snapshot).map_err(|error| {
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "bad_request",
+            error.to_string(),
+        )
+    })?))
+}
+
+async fn sync_thread_events(
+    AxState(s): AxState<Arc<State>>,
+    Path((backend, id)): Path<(String, String)>,
+    upgrade: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    let sync = sync_or_error(&s)?;
+    let host = sync.host().ok_or_else(no_sync)?;
+    Ok(upgrade.on_upgrade(move |socket| thread_events_loop(host, backend, id, socket)))
+}
+
+async fn thread_events_loop(
+    host: Arc<dyn crate::sync::SyncHost>,
+    backend: String,
+    id: String,
+    mut socket: WebSocket,
+) {
+    let mut last = u64::MAX;
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
+    loop {
+        tokio::select! {
+            _ = heartbeat.tick() => {
+                if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    break;
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_millis(400)) => {
+                let Ok(snapshot) = host.snapshot(&backend, &id).await else {
+                    break;
+                };
+                if snapshot.cursor == last {
+                    continue;
+                }
+                last = snapshot.cursor;
+                let event = ThreadEvent {
+                    cursor: snapshot.cursor,
+                    items: snapshot.items,
+                    rebuild: false,
+                };
+                let Ok(text) = serde_json::to_string(&event) else {
+                    break;
+                };
+                if socket.send(Message::Text(text.into())).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+async fn sync_turn(
+    AxState(s): AxState<Arc<State>>,
+    Path((backend, id)): Path<(String, String)>,
+    Json(input): Json<TurnInput>,
+) -> Result<StatusCode, ApiError> {
+    let sync = sync_or_error(&s)?;
+    check_attachments(&sync, &input)?;
+    let host = sync.host().ok_or_else(no_sync)?;
+    host.turn(&backend, &id, input)
+        .await
+        .map_err(ApiError::from)?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+async fn sync_steer(
+    AxState(s): AxState<Arc<State>>,
+    Path((backend, id)): Path<(String, String)>,
+    Json(input): Json<TurnInput>,
+) -> Result<StatusCode, ApiError> {
+    let sync = sync_or_error(&s)?;
+    check_attachments(&sync, &input)?;
+    let host = sync.host().ok_or_else(no_sync)?;
+    host.steer(&backend, &id, input)
+        .await
+        .map_err(ApiError::from)?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+fn check_attachments(sync: &SyncState, input: &TurnInput) -> Result<(), ApiError> {
+    let inbox = sync.inbox();
+    if input
+        .attachments
+        .iter()
+        .all(|path| std::path::Path::new(path).starts_with(inbox))
+    {
+        return Ok(());
+    }
+    Err(ApiError(
+        StatusCode::FORBIDDEN,
+        "outside_roots",
+        "attachments must be uploaded to the sync inbox first".into(),
+    ))
+}
+
+async fn sync_interrupt(
+    AxState(s): AxState<Arc<State>>,
+    Path((backend, id)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let sync = sync_or_error(&s)?;
+    let host = sync.host().ok_or_else(no_sync)?;
+    host.interrupt(&backend, &id)
+        .await
+        .map_err(ApiError::from)?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+fn request_id(raw: &str) -> Value {
+    if let Ok(number) = raw.parse::<i64>() {
+        json!(number)
+    } else {
+        json!(raw)
+    }
+}
+
+async fn sync_approve(
+    AxState(s): AxState<Arc<State>>,
+    Path((backend, id, request)): Path<(String, String, String)>,
+    Json(answer): Json<ApprovalAnswer>,
+) -> Result<StatusCode, ApiError> {
+    let sync = sync_or_error(&s)?;
+    let host = sync.host().ok_or_else(no_sync)?;
+    host.approve(&backend, &id, request_id(&request), answer)
+        .await
+        .map_err(ApiError::from)?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+async fn sync_answer(
+    AxState(s): AxState<Arc<State>>,
+    Path((backend, id, request)): Path<(String, String, String)>,
+    Json(input): Json<AnswerInput>,
+) -> Result<StatusCode, ApiError> {
+    let sync = sync_or_error(&s)?;
+    let host = sync.host().ok_or_else(no_sync)?;
+    host.answer(&backend, &id, request_id(&request), input)
+        .await
+        .map_err(ApiError::from)?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+async fn sync_move_package(
+    AxState(s): AxState<Arc<State>>,
+    Path((backend, id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let sync = sync_or_error(&s)?;
+    let host = sync.host().ok_or_else(no_sync)?;
+    let package = host
+        .move_package(&backend, &id)
+        .await
+        .map_err(ApiError::from)?;
+    Ok(Json(serde_json::to_value(package).map_err(|error| {
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "bad_request",
+            error.to_string(),
+        )
+    })?))
+}
+
+async fn sync_move_release(
+    AxState(s): AxState<Arc<State>>,
+    Path((backend, id)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let sync = sync_or_error(&s)?;
+    let host = sync.host().ok_or_else(no_sync)?;
+    host.move_release(&backend, &id)
+        .await
+        .map_err(ApiError::from)?;
+    Ok(StatusCode::ACCEPTED)
 }
 async fn json_errors(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let response = next.run(req).await;
@@ -179,6 +581,20 @@ impl From<anyhow::Error> for ApiError {
             },
         };
         Self(code, name, e.to_string())
+    }
+}
+impl From<HostError> for ApiError {
+    fn from(error: HostError) -> Self {
+        match error {
+            HostError::NotFound => ApiError(StatusCode::NOT_FOUND, "not_found", error.to_string()),
+            HostError::Unavailable(message) => {
+                ApiError(StatusCode::CONFLICT, "agent_unavailable", message)
+            }
+            HostError::BadRequest(message) => {
+                ApiError(StatusCode::BAD_REQUEST, "bad_request", message)
+            }
+            HostError::Conflict(message) => ApiError(StatusCode::CONFLICT, "bad_request", message),
+        }
     }
 }
 async fn info(AxState(s): AxState<Arc<State>>) -> Json<Value> {

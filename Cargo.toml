@@ -5,6 +5,7 @@ members = [
     "crates/atrium-node",
     "crates/atrium-process",
     "crates/atrium-phone",
+    "crates/atrium-sync",
     "crates/atrium-core",
     "crates/agent-rpc",
     "crates/codex-client",
@@ -40,6 +41,8 @@ tungstenite = { version = "0.24", default-features = false, features = ["handsha
 
 atrium-process = { path = "crates/atrium-process" }
 atrium-core = { path = "crates/atrium-core" }
+atrium-node = { path = "crates/atrium-node" }
+atrium-sync = { path = "crates/atrium-sync" }
 codex-client = { path = "crates/codex-client" }
 agent-rpc = { path = "crates/agent-rpc" }
 acp-client = { path = "crates/acp-client" }

@@ -259,6 +259,20 @@ impl Workspace {
         answer: Answer,
         cx: &mut Context<Self>,
     ) -> Result<Task<Result<(), Error>>, Error> {
+        let device = self.settings.device_name.clone();
+        self.submit_answer_from(thread, id, answer, &device, cx)
+    }
+
+    /// Answers on behalf of `device`; the owner claims an approval once, so
+    /// two devices cannot both execute it.
+    pub(super) fn submit_answer_from(
+        &mut self,
+        thread: &str,
+        id: RequestId,
+        answer: Answer,
+        device: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<Task<Result<(), Error>>, Error> {
         let transcript = self.transcripts.get(thread).ok_or(Error::Stale)?;
         let write: Box<dyn FnOnce() -> anyhow::Result<()> + Send> = match &answer {
             Answer::Approval(d) => {
@@ -301,9 +315,13 @@ impl Workspace {
             }
         };
         let key = (thread.to_owned(), id.to_string());
+        if self.answered_by.contains_key(&key) {
+            return Err(Error::Stale);
+        }
         if !self.answering.insert(key.clone()) {
             return Err(Error::Stale);
         }
+        self.answered_by.insert(key.clone(), device.to_string());
         let (sent, received) = futures::channel::oneshot::channel();
         cx.spawn(async move |this, cx| {
             let result = cx.background_executor().spawn(async move { write() }).await;
@@ -312,6 +330,9 @@ impl Workspace {
             }
             let _ = this.update(cx, |ws, cx| {
                 ws.answering.remove(&key);
+                if result.is_err() {
+                    ws.answered_by.remove(&key);
+                }
                 if result.is_ok()
                     && let Some(t) = ws.transcripts.get_mut(&key.0)
                 {
@@ -326,6 +347,12 @@ impl Workspace {
         })
         .detach();
         Ok(cx.spawn(async move |_, _| received.await.unwrap_or(Err(Error::Unavailable))))
+    }
+
+    pub(super) fn answered_by(&self, thread: &str, request: &RequestId) -> Option<&str> {
+        self.answered_by
+            .get(&(thread.to_owned(), request.to_string()))
+            .map(String::as_str)
     }
 }
 

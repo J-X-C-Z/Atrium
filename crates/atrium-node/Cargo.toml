@@ -7,7 +7,10 @@ license.workspace = true
 
 [dependencies]
 atrium-process.workspace = true
+atrium-sync.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true
+log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 futures.workspace = true
@@ -27,6 +30,9 @@ acp-client.workspace = true
 agent-rpc.workspace = true
 atrium-core.workspace = true
 tungstenite.workspace = true
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
