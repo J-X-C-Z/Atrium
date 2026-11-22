@@ -9,6 +9,7 @@ use crate::{
     buttons::{Button, ButtonVariant, IconButton, ToggleButton, ToggleItem},
     forms::{Input, TextInput},
     primitives::IconName,
+    i18n,
     theme::{ActiveTheme, ControlSize, Elevation, Radius, TextSize},
 };
 
@@ -161,7 +162,7 @@ impl RenderOnce for FindWidget {
             let on_options = self.on_options.clone();
             ToggleButton::new(
                 (self.id.clone(), key),
-                ToggleItem::new(key).icon(icon).tooltip(words),
+                ToggleItem::new(key).icon(icon).tooltip(i18n::text(cx, words, &[])),
                 on,
             )
             .size(ControlSize::Sm)
@@ -175,9 +176,20 @@ impl RenderOnce for FindWidget {
             })
         };
         let (count, missing) = match &self.matches {
-            Ok((_, 0)) => ("No results".to_string(), true),
-            Ok((Some(current), total)) => (format!("{} of {total}", current + 1), false),
-            Ok((None, total)) => (format!("{total} found"), false),
+            Ok((_, 0)) => (i18n::text(cx, "find.none", &[]).to_string(), true),
+            Ok((Some(current), total)) => (
+                i18n::text(
+                    cx,
+                    "find.current",
+                    &[("n", &(current + 1).to_string()), ("total", &total.to_string())],
+                )
+                .to_string(),
+                false,
+            ),
+            Ok((None, total)) => (
+                i18n::text(cx, "find.found", &[("total", &total.to_string())]).to_string(),
+                false,
+            ),
             Err(message) => (message.to_string(), true),
         };
         let found = matches!(self.matches, Ok((_, total)) if total > 0);
@@ -190,7 +202,7 @@ impl RenderOnce for FindWidget {
             IconButton::new((self.id.clone(), key), icon)
                 .variant(ButtonVariant::Ghost)
                 .size(ControlSize::Sm)
-                .tooltip(words)
+                .tooltip(i18n::text(cx, words, &[]))
                 .disabled(!enabled)
                 .when_some(action, move |button, action| {
                     button.on_click(move |_, window, cx| action(value, window, cx))
@@ -229,7 +241,7 @@ impl RenderOnce for FindWidget {
                             } else {
                                 IconName::ChevronRight
                             },
-                            "Toggle replace",
+                            "find.toggle_replace",
                             true,
                             Some(fold),
                             !showing,
@@ -245,21 +257,21 @@ impl RenderOnce for FindWidget {
                         row.child(toggle(
                             "case",
                             IconName::CaseSensitive,
-                            "Match case",
+                            "find.case",
                             options.case,
                             |next, on| next.case = on,
                         ))
                         .child(toggle(
                             "word",
                             IconName::WholeWord,
-                            "Whole word",
+                            "find.word",
                             options.word,
                             |next, on| next.word = on,
                         ))
                         .child(toggle(
                             "regex",
                             IconName::Regex,
-                            "Regular expression",
+                            "find.regex",
                             options.regex,
                             |next, on| next.regex = on,
                         ))
@@ -278,7 +290,7 @@ impl RenderOnce for FindWidget {
                     .child(icon_button(
                         "previous",
                         IconName::ArrowUp,
-                        "Previous match",
+                        "find.previous",
                         found,
                         self.on_step.clone(),
                         false,
@@ -286,7 +298,7 @@ impl RenderOnce for FindWidget {
                     .child(icon_button(
                         "next",
                         IconName::ArrowDown,
-                        "Next match",
+                        "find.next",
                         found,
                         self.on_step.clone(),
                         true,
@@ -295,7 +307,7 @@ impl RenderOnce for FindWidget {
                         IconButton::new((self.id.clone(), "close"), IconName::X)
                             .variant(ButtonVariant::Ghost)
                             .size(ControlSize::Sm)
-                            .tooltip("Close")
+                            .tooltip(i18n::text(cx, "find.close", &[]))
                             .on_click(move |_, window, cx| close(window, cx))
                     })),
             )
@@ -312,7 +324,7 @@ impl RenderOnce for FindWidget {
                             .child(Input::new(field).size(ControlSize::Sm)),
                     )
                     .child(
-                        Button::new((self.id.clone(), "replace"), "Replace")
+                        Button::new((self.id.clone(), "replace"), i18n::text(cx, "find.replace", &[]))
                             .variant(ButtonVariant::Ghost)
                             .size(ControlSize::Sm)
                             .disabled(!found)
@@ -321,7 +333,7 @@ impl RenderOnce for FindWidget {
                             }),
                     )
                     .child(
-                        Button::new((self.id.clone(), "all"), "Replace all")
+                        Button::new((self.id.clone(), "all"), i18n::text(cx, "find.replace_all", &[]))
                             .variant(ButtonVariant::Ghost)
                             .size(ControlSize::Sm)
                             .disabled(!found)

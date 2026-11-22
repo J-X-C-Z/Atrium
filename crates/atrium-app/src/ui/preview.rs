@@ -7,17 +7,19 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use atrium_office::{Format, OpenError, SaveError};
-use atrium_preview::{Ask, Fonts, Layout, Preview, Previewer, Refused};
+use atrium_preview::{Ask, Fonts, Hit, Layout, Preview, Previewer, Refused};
 use ely_gpui_component::{
     buttons::{Button, ButtonVariant, IconButton},
-    documents::{DocPage, DocumentViewer, MarkdownRenderer},
+    documents::{DocPage, DocumentViewer, MarkdownRenderer, PageHit},
+    editor::FindWidget,
+    forms::{InputEvent, TextInput},
     primitives::{Icon, IconName},
     tables::Spreadsheet,
     theme::{ActiveTheme, ControlSize, IconSize, Radius, TextSize},
 };
 use gpui::{
-    AnyElement, Context, Entity, IntoElement, ParentElement, SharedString, Styled, Subscription,
-    Window, div, img, prelude::*, px,
+    AnyElement, Bounds, Context, Entity, Focusable, IntoElement, ParentElement, SharedString,
+    Styled, Subscription, Window, div, img, point, prelude::*, px, size,
 };
 
 use super::RootView;
@@ -66,7 +68,8 @@ pub struct PreviewPane {
     pub mode: Mode,
     /// Whether the file opens as an editable document at all.
     pub editable: bool,
-    pub zoom: f32,
+    /// The zoom you picked; pages fit the width until then.
+    pub zoom: Option<f32>,
     pub sheet: usize,
     previewer: Arc<Previewer>,
     /// The file's modification time when it was read.
@@ -80,6 +83,18 @@ pub struct PreviewPane {
     /// The file as it was before the last save, to undo it.
     pub backup: Option<(PathBuf, PathBuf)>,
     _doc_events: Option<Subscription>,
+    /// Searching the pages, while the find box is open.
+    find: Option<PageFind>,
+}
+
+/// The find box over the pages, and what it found.
+struct PageFind {
+    query: Entity<TextInput>,
+    hits: Vec<Hit>,
+    current: Option<usize>,
+    /// Counts searches, so an older one finishing late is dropped.
+    asked: u64,
+    _events: Subscription,
 }
 
 impl PreviewPane {
@@ -93,7 +108,7 @@ impl PreviewPane {
             look: Look::Empty,
             mode: Mode::Edit,
             editable: false,
-            zoom: 1.0,
+            zoom: None,
             sheet: 0,
             previewer: Arc::new(Previewer::new(cache, Fonts::system())),
             stamp: None,
@@ -103,6 +118,7 @@ impl PreviewPane {
             save_when_idle: false,
             backup: None,
             _doc_events: None,
+            find: None,
         }
     }
 
@@ -232,6 +248,10 @@ impl RootView {
         self.review.tab = SideTab::Preview;
         if self.preview.path.as_deref() != Some(&path) {
             self.preview.mode = Mode::Edit;
+        }
+        if self.preview.path.as_deref() != Some(&path) {
+            self.preview.find = None;
+            self.preview.zoom = None;
         }
         self.preview.path = Some(path);
         self.preview.sheet = 0;
@@ -495,6 +515,78 @@ impl RootView {
         .detach();
     }
 
+    /// Opens the find box over the pages, or puts the cursor back in it.
+    fn open_page_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(find) = &self.preview.find {
+            let focus = find.query.read(cx).focus_handle(cx);
+            focus.focus(window, cx);
+            return;
+        }
+        let query = cx.new(|cx| TextInput::new(window, cx).placeholder(t("Find in pages")));
+        let events = cx.subscribe_in(&query, window, |root, _, event, _, cx| match event {
+            InputEvent::Changed => root.search_pages(cx),
+            InputEvent::Submit => root.step_page_find(true, cx),
+            _ => {}
+        });
+        let focus = query.read(cx).focus_handle(cx);
+        focus.focus(window, cx);
+        self.preview.find = Some(PageFind {
+            query,
+            hits: Vec::new(),
+            current: None,
+            asked: 0,
+            _events: events,
+        });
+        cx.notify();
+    }
+
+    /// Searches the open file's pages for what the find box holds.
+    fn search_pages(&mut self, cx: &mut Context<Self>) {
+        let (Some(path), Some(find)) = (self.preview.path.clone(), self.preview.find.as_mut())
+        else {
+            return;
+        };
+        let needle = find.query.read(cx).text().trim().to_string();
+        find.asked += 1;
+        let asked = find.asked;
+        if needle.is_empty() {
+            find.hits.clear();
+            find.current = None;
+            cx.notify();
+            return;
+        }
+        let previewer = self.preview.previewer.clone();
+        let job = cx.background_spawn(async move { previewer.find(&path, &needle) });
+        cx.spawn(async move |this, cx| {
+            let hits = job.await.unwrap_or_default();
+            let _ = this.update(cx, |root, cx| {
+                if let Some(find) = root.preview.find.as_mut().filter(|f| f.asked == asked) {
+                    find.current = (!hits.is_empty()).then_some(0);
+                    find.hits = hits;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn step_page_find(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let Some(find) = self.preview.find.as_mut() else {
+            return;
+        };
+        let total = find.hits.len();
+        if total == 0 {
+            return;
+        }
+        let at = find.current.unwrap_or(0);
+        find.current = Some(if forward {
+            (at + 1) % total
+        } else {
+            (at + total - 1) % total
+        });
+        cx.notify();
+    }
+
     pub(super) fn pick_preview_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: true,
@@ -629,6 +721,18 @@ impl RootView {
                     }),
                 );
         }
+        if matches!(self.preview.look, Look::Rendered(Preview::Pages { .. })) {
+            let find = root.clone();
+            bar = bar.child(
+                IconButton::new("preview-find", IconName::Search)
+                    .variant(ButtonVariant::Ghost)
+                    .size(ControlSize::Sm)
+                    .tooltip(t("Find in pages"))
+                    .on_click(move |_, window, cx| {
+                        find.update(cx, |r, cx| r.open_page_find(window, cx))
+                    }),
+            );
+        }
         let (reload, open, editor) = (root.clone(), path.clone(), (root.clone(), path.clone()));
         bar = bar
             .child(
@@ -756,6 +860,43 @@ impl RootView {
                     })
                     .collect();
                 let zoom = root.clone();
+                let set_zoom = move |z: f32, _: &mut Window, cx: &mut gpui::App| {
+                    zoom.update(cx, |r, cx| {
+                        r.preview.zoom = Some(z);
+                        cx.notify();
+                    })
+                };
+                let viewer = DocumentViewer::new("preview-pages-view", title, shown);
+                let mut viewer = match self.preview.zoom {
+                    Some(z) => viewer.zoom(z, set_zoom),
+                    None => viewer.fit_width(set_zoom),
+                };
+                if let Some(find) = &self.preview.find {
+                    let hits: Vec<PageHit> = find
+                        .hits
+                        .iter()
+                        .map(|h| PageHit {
+                            page: h.page,
+                            bounds: Bounds::new(
+                                point(h.rect_pt[0], h.rect_pt[1]),
+                                size(h.rect_pt[2], h.rect_pt[3]),
+                            ),
+                        })
+                        .collect();
+                    let (step, close) = (root.clone(), root.clone());
+                    let widget =
+                        FindWidget::new("preview-find-box", &find.query, find.current, hits.len())
+                            .on_step(move |forward, _, cx| {
+                                step.update(cx, |r, cx| r.step_page_find(forward, cx))
+                            })
+                            .on_close(move |_, cx| {
+                                close.update(cx, |r, cx| {
+                                    r.preview.find = None;
+                                    cx.notify();
+                                })
+                            });
+                    viewer = viewer.find(widget, hits, find.current);
+                }
                 div()
                     .size_full()
                     .flex()
@@ -786,17 +927,7 @@ impl RootView {
                                 )),
                         )
                     })
-                    .child(div().flex_1().min_h_0().child(
-                        DocumentViewer::new("preview-pages-view", title, shown).zoom(
-                            self.preview.zoom,
-                            move |z, _, cx| {
-                                zoom.update(cx, |r, cx| {
-                                    r.preview.zoom = z;
-                                    cx.notify();
-                                })
-                            },
-                        ),
-                    ))
+                    .child(div().flex_1().min_h_0().child(viewer))
                     .into_any_element()
             }
             Preview::Table {

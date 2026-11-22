@@ -309,6 +309,7 @@ const ZH: &[(&str, &str)] = &[
     ("Pages", "页面"),
     ("Previews of this kind of file are not available yet.", "这类文件暂时还不能预览。"),
     ("Reload", "重新加载"),
+    ("Find in pages", "在页面中查找"),
     ("Rows, columns and new tables can't be changed here yet; edit the cells' text.", "这里暂时不能增删行列或新建表格，只能修改单元格里的文字。"),
     ("Save a copy…", "另存一份…"),
     ("Save or discard your edits to this document first.", "请先保存或放弃对这份文档的修改。"),

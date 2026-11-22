@@ -14,6 +14,7 @@ use crate::{
     buttons::{ButtonVariant, IconButton, ToggleButton, ToggleItem},
     documents::blocks::source,
     editor::FindWidget,
+    i18n,
     overlays::HoverCard,
     primitives::{Icon, IconName},
     shell::ToolbarSeparator,
@@ -88,6 +89,8 @@ pub struct DocumentViewer {
     pages: Rc<Vec<DocPage>>,
     zoom: f32,
     on_zoom: Option<OnZoom>,
+    /// Fit pages to the width until the owner picks a zoom.
+    fit: bool,
     thumbnails: bool,
     find: Option<Find>,
     notes: Vec<PageNote>,
@@ -114,6 +117,7 @@ impl DocumentViewer {
             pages,
             zoom: 1.0,
             on_zoom: None,
+            fit: false,
             thumbnails: false,
             find: None,
             notes: Vec::new(),
@@ -129,6 +133,13 @@ impl DocumentViewer {
     ) -> Self {
         assert!(zoom > 0.0, "a zoom of {zoom} shows nothing");
         self.zoom = zoom;
+        self.on_zoom = Some(Rc::new(on_zoom));
+        self
+    }
+
+    /// Fits the pages to the width, until a step or fit hands the owner a zoom to keep with `zoom`.
+    pub fn fit_width(mut self, on_zoom: impl Fn(f32, &mut Window, &mut App) + 'static) -> Self {
+        self.fit = true;
         self.on_zoom = Some(Rc::new(on_zoom));
         self
     }
@@ -190,7 +201,13 @@ impl RenderOnce for DocumentViewer {
             let desk = desk.read(cx);
             (desk.scroll.clone(), desk.page, desk.width, desk.pinning)
         };
-        let zoom = self.zoom;
+        let widest = self.pages.iter().map(|page| page.width).fold(0.0, f32::max);
+        let fit = (width > 0.0 && widest > 0.0)
+            .then(|| (width / widest).clamp(STEPS[0], STEPS[STEPS.len() - 1]));
+        let zoom = match (self.fit, fit) {
+            (true, Some(fit)) => fit,
+            _ => self.zoom,
+        };
         let theme = cx.theme();
         let colors = theme.colors.clone();
         let count = self.pages.len();
@@ -205,15 +222,12 @@ impl RenderOnce for DocumentViewer {
             IconButton::new((self.id.clone(), tip), icon)
                 .variant(ButtonVariant::Ghost)
                 .size(ControlSize::Sm)
-                .tooltip(tip)
+                .tooltip(i18n::text(cx, tip, &[]))
                 .disabled(next.is_none() || on_zoom.is_none())
                 .when_some(next.zip(on_zoom), |button, (next, on_zoom)| {
                     button.on_click(move |_, window, cx| on_zoom(next, window, cx))
                 })
         };
-        let widest = self.pages.iter().map(|page| page.width).fold(0.0, f32::max);
-        let fit = (width > 0.0 && widest > 0.0)
-            .then(|| (width / widest).clamp(STEPS[0], STEPS[STEPS.len() - 1]));
         let header = div()
             .flex()
             .items_center()
@@ -233,24 +247,28 @@ impl RenderOnce for DocumentViewer {
                 IconButton::new((self.id.clone(), "previous"), IconName::ChevronUp)
                     .variant(ButtonVariant::Ghost)
                     .size(ControlSize::Sm)
-                    .tooltip("Previous page")
+                    .tooltip(i18n::text(cx, "viewer.previous", &[]))
                     .disabled(page_now == 0)
                     .on_click(go(page_now.saturating_sub(1), &scroll)),
             )
             .child(
                 tabular(div().text_size(theme.text_size(TextSize::Sm)))
-                    .child(format!("{} of {count}", page_now + 1)),
+                    .child(i18n::text(
+                        cx,
+                        "viewer.page",
+                        &[("n", &(page_now + 1).to_string()), ("count", &count.to_string())],
+                    )),
             )
             .child(
                 IconButton::new((self.id.clone(), "next"), IconName::ChevronDown)
                     .variant(ButtonVariant::Ghost)
                     .size(ControlSize::Sm)
-                    .tooltip("Next page")
+                    .tooltip(i18n::text(cx, "viewer.next", &[]))
                     .disabled(page_now + 1 >= count)
                     .on_click(go((page_now + 1).min(count.saturating_sub(1)), &scroll)),
             )
             .child(ToolbarSeparator)
-            .child(zoom_to(step(zoom, false), IconName::ZoomOut, "Zoom out"))
+            .child(zoom_to(step(zoom, false), IconName::ZoomOut, "viewer.zoom_out"))
             .child(
                 tabular(
                     div()
@@ -260,8 +278,8 @@ impl RenderOnce for DocumentViewer {
                 )
                 .child(format!("{:.0}%", zoom * 100.0)),
             )
-            .child(zoom_to(step(zoom, true), IconName::ZoomIn, "Zoom in"))
-            .child(zoom_to(fit, IconName::Maximize2, "Fit to width"))
+            .child(zoom_to(step(zoom, true), IconName::ZoomIn, "viewer.zoom_in"))
+            .child(zoom_to(fit, IconName::Maximize2, "viewer.fit"))
             .when(self.on_note.is_some(), |header| {
                 let desk = desk.clone();
                 header.child(
@@ -269,7 +287,7 @@ impl RenderOnce for DocumentViewer {
                         (self.id.clone(), "pin"),
                         ToggleItem::new("notes")
                             .icon(IconName::MessageSquare)
-                            .tooltip("Pin notes"),
+                            .tooltip(i18n::text(cx, "viewer.pin", &[])),
                         pinning,
                     )
                     .size(ControlSize::Sm)
