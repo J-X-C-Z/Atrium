@@ -194,7 +194,31 @@ pub fn render(
                 let id = key.to_string();
                 archive.update(cx, |ws, cx| ws.archive(id, cx));
             },
-        );
+        )
+        .extra_actions({
+            // A conversation another device owns can be moved here.
+            let remote: std::collections::HashSet<String> = ws
+                .threads
+                .iter()
+                .filter(|thread| ws.sync_is_remote(&thread.id))
+                .map(|thread| thread.id.clone())
+                .collect();
+            let mover = workspace.clone();
+            move |key| {
+                if !remote.contains(key.as_ref()) {
+                    return Vec::new();
+                }
+                let mover = mover.clone();
+                vec![(
+                    t("Move to this computer").into(),
+                    IconName::Monitor,
+                    std::rc::Rc::new(move |key: &SharedString, _: &mut Window, cx: &mut App| {
+                        let id = key.to_string();
+                        mover.update(cx, |ws, cx| ws.move_to_this_computer(id, cx));
+                    }),
+                )]
+            }
+        });
 
     Sidebar::new("sidebar", false)
         .child(

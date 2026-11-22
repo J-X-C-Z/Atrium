@@ -152,7 +152,9 @@ pub fn section(workspace: &Entity<Workspace>, address: &Entity<TextInput>, cx: &
                 )
                 .child(div().text_size(tiny).text_color(colors.fg_muted).child(
                     match &device.status {
-                        DeviceStatus::Offline(why) => tf("Offline: {why}", &[("why", why)]),
+                        DeviceStatus::Offline(why) => {
+                            tf("Offline: {why}", &[("why", &crate::i18n::t_any(why))])
+                        }
                         DeviceStatus::Online if agents.is_empty() => t("No agents").into(),
                         DeviceStatus::Online => agents.join(" · "),
                     },

@@ -89,21 +89,20 @@ fn find_tool(tool: &str) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
+#[cfg(target_os = "macos")]
 fn has_chinese_font() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        return Path::new("/System/Library/Fonts/PingFang.ttc").exists()
-            || Path::new("/System/Library/Fonts/STHeiti Light.ttc").exists();
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        // `fc-list` succeeds with no output when nothing matches.
-        Command::new("fc-list")
-            .args([":lang=zh", "family"])
-            .stderr(std::process::Stdio::null())
-            .output()
-            .is_ok_and(|out| out.status.success() && !out.stdout.trim_ascii().is_empty())
-    }
+    Path::new("/System/Library/Fonts/PingFang.ttc").exists()
+        || Path::new("/System/Library/Fonts/STHeiti Light.ttc").exists()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn has_chinese_font() -> bool {
+    // `fc-list` succeeds with no output when nothing matches.
+    Command::new("fc-list")
+        .args([":lang=zh", "family"])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .is_ok_and(|out| out.status.success() && !out.stdout.trim_ascii().is_empty())
 }
 
 /// Run a `command` check in `dir`. The failure detail keeps the end of its

@@ -105,6 +105,12 @@ pub fn new_chat_button(id: impl Into<ElementId>) -> Button {
 
 type OnKey = OnValue;
 
+/// An extra menu entry on one conversation: its label, icon and action.
+pub type ExtraAction = (SharedString, IconName, OnKey);
+
+/// The extra entries a conversation's menu shows, by its key.
+pub type ExtraActions = Rc<dyn Fn(&SharedString) -> Vec<ExtraAction>>;
+
 /// One conversation in the list: its title, a pin when pinned, the one open marked with its menu of rename, pin and delete, which the others show on hover or focus.
 #[derive(IntoElement)]
 pub struct ConversationItem {
@@ -115,6 +121,7 @@ pub struct ConversationItem {
     on_rename: Option<OnKey>,
     on_pin: Option<OnKey>,
     on_delete: Option<OnKey>,
+    extra: Vec<ExtraAction>,
 }
 
 impl ConversationItem {
@@ -127,11 +134,18 @@ impl ConversationItem {
             on_rename: None,
             on_pin: None,
             on_delete: None,
+            extra: Vec::new(),
         }
     }
 
     pub fn active(mut self, active: bool) -> Self {
         self.active = active;
+        self
+    }
+
+    /// Entries shown between pin and delete.
+    pub fn extra(mut self, extra: Vec<ExtraAction>) -> Self {
+        self.extra = extra;
         self
     }
 
@@ -164,29 +178,36 @@ impl RenderOnce for ConversationItem {
         let menu = match (self.on_rename, self.on_pin, self.on_delete) {
             (Some(rename), Some(pin), Some(delete)) => {
                 let (a, b, c) = (key.clone(), key.clone(), key.clone());
-                Some(
-                    Menu::new()
-                        .item(
-                            MenuItem::new(crate::i18n::word("chat.rename"))
-                                .icon(IconName::Pencil)
-                                .on_click(move |window, cx| rename(&a, window, cx)),
-                        )
-                        .item(
-                            match self.conversation.pinned {
-                                true => MenuItem::new(crate::i18n::word("chat.unpin"))
-                                    .icon(IconName::PinOff),
-                                false => {
-                                    MenuItem::new(crate::i18n::word("chat.pin")).icon(IconName::Pin)
-                                }
+                let mut menu = Menu::new()
+                    .item(
+                        MenuItem::new(crate::i18n::word("chat.rename"))
+                            .icon(IconName::Pencil)
+                            .on_click(move |window, cx| rename(&a, window, cx)),
+                    )
+                    .item(
+                        match self.conversation.pinned {
+                            true => MenuItem::new(crate::i18n::word("chat.unpin"))
+                                .icon(IconName::PinOff),
+                            false => {
+                                MenuItem::new(crate::i18n::word("chat.pin")).icon(IconName::Pin)
                             }
-                            .on_click(move |window, cx| pin(&b, window, cx)),
-                        )
-                        .separator()
-                        .item(
-                            MenuItem::new(crate::i18n::word("chat.delete"))
-                                .icon(IconName::Trash2)
-                                .on_click(move |window, cx| delete(&c, window, cx)),
-                        ),
+                        }
+                        .on_click(move |window, cx| pin(&b, window, cx)),
+                    );
+                for (label, icon, action) in self.extra {
+                    let k = key.clone();
+                    menu = menu.item(
+                        MenuItem::new(label)
+                            .icon(icon)
+                            .on_click(move |window, cx| action(&k, window, cx)),
+                    );
+                }
+                Some(
+                    menu.separator().item(
+                        MenuItem::new(crate::i18n::word("chat.delete"))
+                            .icon(IconName::Trash2)
+                            .on_click(move |window, cx| delete(&c, window, cx)),
+                    ),
                 )
             }
             _ => None,
@@ -305,6 +326,7 @@ pub struct ConversationList {
     today: Date,
     on_select: Option<OnKey>,
     actions: Option<(OnKey, OnKey, OnKey)>,
+    extra: Option<ExtraActions>,
 }
 
 impl ConversationList {
@@ -322,6 +344,7 @@ impl ConversationList {
             today,
             on_select: None,
             actions: None,
+            extra: None,
         }
     }
 
@@ -350,6 +373,15 @@ impl ConversationList {
         on_delete: impl Fn(&SharedString, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.actions = Some((Rc::new(on_rename), Rc::new(on_pin), Rc::new(on_delete)));
+        self
+    }
+
+    /// More menu entries per conversation, after pin.
+    pub fn extra_actions(
+        mut self,
+        extra: impl Fn(&SharedString) -> Vec<ExtraAction> + 'static,
+    ) -> Self {
+        self.extra = Some(Rc::new(extra));
         self
     }
 }
@@ -402,12 +434,20 @@ impl RenderOnce for ConversationList {
                     )
                     .children(items.into_iter().map(|ix| {
                         let conversation = self.conversations[ix].clone();
+                        let key = conversation.key.clone();
                         let active = self.active.as_ref() == Some(&conversation.key);
                         let item = ConversationItem::new(
                             (self.id.clone(), format!("item-{}", conversation.key)),
                             conversation,
                         )
                         .active(active);
+                        let item = match &self.extra {
+                            Some(extra) => {
+                                let more = extra(&key);
+                                item.extra(more)
+                            }
+                            None => item,
+                        };
                         let item = match self.on_select.clone() {
                             Some(select) => {
                                 item.on_select(move |key, window, cx| select(key, window, cx))

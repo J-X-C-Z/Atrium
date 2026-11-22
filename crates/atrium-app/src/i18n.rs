@@ -984,6 +984,7 @@ const ZH: &[(&str, &str)] = &[
         "另一台电脑上已经没有这段对话。",
     ),
     ("Change with AI", "让 AI 修改"),
+    ("did not answer", "没有应答"),
     ("Chinese font", "中文字体"),
     ("Install a Chinese font such as Noto Sans CJK SC or Source Han Sans SC.", "请安装中文字体，比如 Noto Sans CJK SC 或思源黑体。"),
     ("Install Typst, or use TeX Live/MacTeX for xelatex.", "请安装 Typst，或安装 TeX Live / MacTeX 以使用 xelatex。"),
