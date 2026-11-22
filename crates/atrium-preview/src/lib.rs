@@ -15,6 +15,7 @@ mod pdf;
 pub use cache::probe;
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -47,19 +48,31 @@ pub fn kind(path: &Path) -> Kind {
         "pdf" => Kind::Pdf,
         _ => return Kind::Other,
     };
-    let mut head = [0u8; 5];
+    let mut head = Vec::new();
     let read = std::fs::File::open(path)
-        .and_then(|mut f| std::io::Read::read(&mut f, &mut head))
+        .and_then(|file| {
+            let mut file = file.take(8 * 1024);
+            file.read_to_end(&mut head)
+        })
         .unwrap_or(0);
     let head = &head[..read];
     let fits = match claimed {
         Kind::Pdf => head.starts_with(b"%PDF-"),
-        Kind::Csv => !head.starts_with(b"PK\x03\x04") && !head.starts_with(b"%PDF-"),
+        Kind::Csv => {
+            !head.starts_with(b"PK\x03\x04") && !head.starts_with(b"%PDF-") && !looks_binary(head)
+        }
         // xls and some xlsb are OLE files.
         Kind::Sheet if ext == "xls" => head.starts_with(&[0xD0, 0xCF, 0x11, 0xE0]),
         _ => head.starts_with(b"PK\x03\x04"),
     };
     if fits { claimed } else { Kind::Other }
+}
+
+/// A NUL byte means this is not a text table. UTF-16 files start with a BOM
+/// and contain NULs by design.
+fn looks_binary(head: &[u8]) -> bool {
+    let utf16 = head.starts_with(&[0xFF, 0xFE]) || head.starts_with(&[0xFE, 0xFF]);
+    !utf16 && head.contains(&0)
 }
 
 /// Font folders and files used to draw documents.
@@ -381,6 +394,12 @@ mod tests {
         let csv = dir.join("data.csv");
         std::fs::write(&csv, "a,b\n1,2\n").unwrap();
         assert_eq!(kind(&csv), Kind::Csv);
+        let binary = dir.join("binary.csv");
+        std::fs::write(&binary, [0u8, 1, 2, 3, 0]).unwrap();
+        assert_eq!(kind(&binary), Kind::Other);
+        let utf16 = dir.join("utf16.csv");
+        std::fs::write(&utf16, [0xFF, 0xFE, 0x41, 0x00]).unwrap();
+        assert_eq!(kind(&utf16), Kind::Csv);
         assert_eq!(kind(&dir.join("notes.txt")), Kind::Other);
         std::fs::remove_dir_all(&dir).unwrap();
     }

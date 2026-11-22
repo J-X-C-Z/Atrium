@@ -10,7 +10,7 @@ and PDF. Everything runs in-process, in Rust, on macOS, Windows and Linux.
 
 The crate has no GPUI dependency, so it is tested headless. The UI calls
 `Previewer::preview` from a background task and `Previewer::find` for search
-highlights.
+highlights. Search returns at most 500 hits per call.
 
 Converted PDFs and drawn pages are cached under
 `cache_dir/<sha-256 of path, size, mtime and RENDER_VERSION>/`, trimmed to

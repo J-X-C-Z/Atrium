@@ -1,8 +1,9 @@
 //! PDF pages to PNG, and text search over the same pages.
 
+use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use hayro::hayro_interpret::font::{FontData, FontQuery};
 use hayro::hayro_interpret::{
@@ -46,7 +47,7 @@ pub(crate) fn render_pages(
 
     let pages = pdf.pages();
     let mut out = Vec::new();
-    let settings = interpreter_settings();
+    let settings = interpreter_settings(None);
     let render_settings = RenderSettings::default();
     let mut render_cache = RenderCache::new();
     for index in wanted {
@@ -139,14 +140,100 @@ fn encode_png(pixmap: &Pixmap) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-fn interpreter_settings() -> InterpreterSettings {
+fn interpreter_settings(fonts: Option<&Fonts>) -> InterpreterSettings {
+    let custom = fonts.and_then(cjk_font_for);
     InterpreterSettings {
-        font_resolver: Arc::new(|query| match query {
+        font_resolver: Arc::new(move |query| match query {
             FontQuery::Standard(font) => Some(font.get_font_data()),
-            FontQuery::Fallback(_) => cjk_font(),
+            FontQuery::Fallback(_) => custom.clone().or_else(cjk_font),
         }),
         ..Default::default()
     }
+}
+
+/// A CJK face from the caller's font paths, then the system's.
+fn cjk_font_for(fonts: &Fonts) -> Option<(FontData, u32)> {
+    for path in &fonts.paths {
+        if path.is_file() {
+            if is_font_file(path)
+                && let Some(font) = font_from(path)
+            {
+                return Some(font);
+            }
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(path) else {
+            continue;
+        };
+        let mut found: Vec<PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| is_font_file(path) && looks_cjk(path))
+            .collect();
+        found.sort();
+        for path in found {
+            if let Some(font) = font_from(&path) {
+                return Some(font);
+            }
+        }
+    }
+    cjk_font()
+}
+
+fn is_font_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "ttf" | "otf" | "ttc" | "otc"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn looks_cjk(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let name = name.to_ascii_lowercase();
+    [
+        "pingfang",
+        "hiragino",
+        "heiti",
+        "songti",
+        "notosanscjk",
+        "notoserifcjk",
+        "msyh",
+        "simsun",
+        "dengxian",
+        "wqy",
+        "sourcehansans",
+        "sourcehanserif",
+    ]
+    .iter()
+    .any(|needle| name.contains(needle))
+}
+
+fn font_from(path: &Path) -> Option<(FontData, u32)> {
+    type Font = (FontData, u32);
+    type Cache = Mutex<HashMap<PathBuf, Option<Font>>>;
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+    let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut cache) = cache.lock() {
+        if let Some(font) = cache.get(&key) {
+            return font.clone();
+        }
+        let font = std::fs::read(path)
+            .ok()
+            .map(|bytes| (Arc::new(bytes) as FontData, 0));
+        cache.insert(key, font.clone());
+        return font;
+    }
+    std::fs::read(path)
+        .ok()
+        .map(|bytes| (Arc::new(bytes) as FontData, 0))
 }
 
 /// A system CJK face for PDFs whose fonts are not embedded. Loaded once.
@@ -164,6 +251,7 @@ fn cjk_font() -> Option<(FontData, u32)> {
 pub(crate) fn cjk_font_path() -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if cfg!(target_os = "macos") {
+        candidates.push("/System/Library/Fonts/PingFang.ttc".into());
         candidates.push("/System/Library/Fonts/Hiragino Sans GB.ttc".into());
         candidates.push("/System/Library/Fonts/STHeiti Light.ttc".into());
         candidates.push("/System/Library/Fonts/Supplemental/Songti.ttc".into());
@@ -183,12 +271,28 @@ pub(crate) fn cjk_font_path() -> Option<PathBuf> {
 
 /// The family name of [`cjk_font_path`], for Typst's last-resort fallback.
 pub(crate) fn cjk_family() -> Option<&'static str> {
-    if cfg!(target_os = "macos") {
+    let path = cjk_font_path()?;
+    let name = path.file_name()?.to_str()?.to_ascii_lowercase();
+    if name.contains("pingfang") {
+        Some("PingFang SC")
+    } else if name.contains("hiragino") {
         Some("Hiragino Sans GB")
-    } else if cfg!(windows) {
+    } else if name.contains("heiti") {
+        Some("Heiti SC")
+    } else if name.contains("songti") {
+        Some("Songti SC")
+    } else if name.contains("msyh") {
         Some("Microsoft YaHei")
-    } else {
+    } else if name.contains("simsun") {
+        Some("SimSun")
+    } else if name.contains("notosanscjk") {
         Some("Noto Sans CJK SC")
+    } else if name.contains("notoserifcjk") {
+        Some("Noto Serif CJK SC")
+    } else if name.contains("wqy") {
+        Some("WenQuanYi Zen Hei")
+    } else {
+        None
     }
 }
 
@@ -197,7 +301,7 @@ pub(crate) fn find(pdf: &Pdf, needle: &str, fonts: &Fonts) -> Result<Vec<Hit>, R
     if needle.is_empty() {
         return Ok(Vec::new());
     }
-    let settings = interpreter_settings();
+    let settings = interpreter_settings(Some(fonts));
     let mut hits = Vec::new();
     for (page_index, page) in pdf.pages().iter().enumerate() {
         let mut device = TextDevice::default();
@@ -231,7 +335,6 @@ pub(crate) fn find(pdf: &Pdf, needle: &str, fonts: &Fonts) -> Result<Vec<Hit>, R
             }
         }
     }
-    let _ = fonts;
     Ok(hits)
 }
 
