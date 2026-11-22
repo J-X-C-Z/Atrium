@@ -6,8 +6,21 @@
 //! [`Previewer::preview`] and [`Previewer::find`], with office2pdf, hayro
 //! and calamine.
 
+mod cache;
+mod convert;
+mod grid;
+mod pdf;
+
+#[doc(hidden)]
+pub use cache::probe;
+
+use std::collections::HashMap;
+use std::io::Read;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak, mpsc};
+use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -35,19 +48,31 @@ pub fn kind(path: &Path) -> Kind {
         "pdf" => Kind::Pdf,
         _ => return Kind::Other,
     };
-    let mut head = [0u8; 5];
+    let mut head = Vec::new();
     let read = std::fs::File::open(path)
-        .and_then(|mut f| std::io::Read::read(&mut f, &mut head))
+        .and_then(|file| {
+            let mut file = file.take(8 * 1024);
+            file.read_to_end(&mut head)
+        })
         .unwrap_or(0);
     let head = &head[..read];
     let fits = match claimed {
         Kind::Pdf => head.starts_with(b"%PDF-"),
-        Kind::Csv => !head.starts_with(b"PK\x03\x04") && !head.starts_with(b"%PDF-"),
+        Kind::Csv => {
+            !head.starts_with(b"PK\x03\x04") && !head.starts_with(b"%PDF-") && !looks_binary(head)
+        }
         // xls and some xlsb are OLE files.
         Kind::Sheet if ext == "xls" => head.starts_with(&[0xD0, 0xCF, 0x11, 0xE0]),
         _ => head.starts_with(b"PK\x03\x04"),
     };
     if fits { claimed } else { Kind::Other }
+}
+
+/// A NUL byte means this is not a text table. UTF-16 files start with a BOM
+/// and contain NULs by design.
+fn looks_binary(head: &[u8]) -> bool {
+    let utf16 = head.starts_with(&[0xFF, 0xFE]) || head.starts_with(&[0xFE, 0xFF]);
+    !utf16 && head.contains(&0)
 }
 
 /// Font folders and files used to draw documents.
@@ -195,17 +220,161 @@ impl Previewer {
     }
 
     /// Blocking: the UI runs it on the background executor.
-    pub fn preview(&self, path: &Path, _ask: &Ask) -> Result<Preview, Refused> {
-        if std::fs::metadata(path).is_err() {
-            return Err(Refused::Failed("the file is gone".into()));
+    pub fn preview(&self, path: &Path, ask: &Ask) -> Result<Preview, Refused> {
+        let meta =
+            std::fs::metadata(path).map_err(|_| Refused::Failed("the file is gone".into()))?;
+        if meta.len() > cache::INPUT_LIMIT {
+            return Err(Refused::TooBig);
         }
-        Err(Refused::Unsupported)
+        let kind = kind(path);
+        match kind {
+            Kind::Other => Err(Refused::Unsupported),
+            Kind::Csv => {
+                let path = path.to_path_buf();
+                let ask = ask.clone();
+                with_deadline(move |_| grid::csv(&path, &ask))
+            }
+            Kind::Sheet if ask.layout == Layout::Grid => {
+                let path = path.to_path_buf();
+                let ask = ask.clone();
+                with_deadline(move |_| grid::sheet(&path, &ask))
+            }
+            _ => self.pages(path, kind, ask),
+        }
+    }
+
+    fn pages(&self, path: &Path, kind: Kind, ask: &Ask) -> Result<Preview, Refused> {
+        let key = cache::Cache::key(path)?;
+        let path = path.to_path_buf();
+        let cache_dir = self.cache_dir.clone();
+        let fonts = self.fonts.clone();
+        let ask = ask.clone();
+        with_deadline(move |cancel| {
+            let (bytes, warnings) = if kind == Kind::Pdf {
+                let bytes =
+                    std::fs::read(&path).map_err(|_| Refused::Failed("the file is gone".into()))?;
+                (bytes, Vec::new())
+            } else {
+                convert::check_limits(&path, kind)?;
+                ensure_pdf(&cache_dir, &path, &key, &fonts, &cancel)?
+            };
+            let pdf = pdf::open(&bytes)?;
+            let total = pdf::count(&pdf);
+            let start = ask.pages.start.min(total);
+            let end = ask.pages.end.min(total).min(start.saturating_add(20));
+            let cache = cache::Cache::new(cache_dir);
+            let pages = pdf::render_pages(&pdf, &cache, &key, ask.width_px, start..end, &cancel)?;
+            Ok(Preview::Pages {
+                pages,
+                total,
+                warnings,
+            })
+        })
     }
 
     /// Where `needle` appears, for highlights.
-    pub fn find(&self, _path: &Path, _needle: &str) -> Result<Vec<Hit>, Refused> {
-        Err(Refused::Unsupported)
+    pub fn find(&self, path: &Path, needle: &str) -> Result<Vec<Hit>, Refused> {
+        let meta =
+            std::fs::metadata(path).map_err(|_| Refused::Failed("the file is gone".into()))?;
+        if meta.len() > cache::INPUT_LIMIT {
+            return Err(Refused::TooBig);
+        }
+        let kind = kind(path);
+        if matches!(kind, Kind::Other | Kind::Csv | Kind::Sheet) {
+            return Err(Refused::Unsupported);
+        }
+        let key = cache::Cache::key(path)?;
+        let path = path.to_path_buf();
+        let cache_dir = self.cache_dir.clone();
+        let fonts = self.fonts.clone();
+        let needle = needle.to_string();
+        with_deadline(move |cancel| {
+            let bytes = if kind == Kind::Pdf {
+                std::fs::read(&path).map_err(|_| Refused::Failed("the file is gone".into()))?
+            } else {
+                convert::check_limits(&path, kind)?;
+                ensure_pdf(&cache_dir, &path, &key, &fonts, &cancel)?.0
+            };
+            let pdf = pdf::open(&bytes)?;
+            pdf::find(&pdf, &needle, &fonts)
+        })
     }
+}
+
+/// Run dependency work off the caller's thread, with a 30 s deadline. The
+/// thread cannot be killed, so a late result is discarded through `cancel`.
+fn with_deadline<T, F>(job: F) -> Result<T, Refused>
+where
+    T: Send + 'static,
+    F: FnOnce(Arc<AtomicBool>) -> Result<T, Refused> + Send + 'static,
+{
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (sender, receiver) = mpsc::channel();
+    let flag = cancel.clone();
+    std::thread::Builder::new()
+        .name("atrium-preview".into())
+        .spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(flag)));
+            let _ = sender.send(match result {
+                Ok(result) => result,
+                Err(_) => Err(Refused::Failed("the preview stopped unexpectedly".into())),
+            });
+        })
+        .map_err(|err| Refused::Failed(format!("the preview could not start: {err}")))?;
+    match receiver.recv_timeout(Duration::from_secs(30)) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            cancel.store(true, Ordering::SeqCst);
+            Err(Refused::Timeout)
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err(Refused::Failed("the preview stopped unexpectedly".into()))
+        }
+    }
+}
+
+/// Convert once per file version, then share the cached PDF.
+fn ensure_pdf(
+    cache_dir: &Path,
+    path: &Path,
+    key: &str,
+    fonts: &Fonts,
+    cancel: &AtomicBool,
+) -> Result<(Vec<u8>, Vec<String>), Refused> {
+    let cache = cache::Cache::new(cache_dir.to_path_buf());
+    if let Some(bytes) = cache.pdf(key) {
+        return Ok((bytes, cache.warnings(key)));
+    }
+    let lock = key_lock(key);
+    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(bytes) = cache.pdf(key) {
+        return Ok((bytes, cache.warnings(key)));
+    }
+    convert::check_limits(path, kind(path))?;
+    let (bytes, warnings) = convert::to_pdf(path, fonts, None)?;
+    if cancel.load(Ordering::SeqCst) {
+        return Err(Refused::Timeout);
+    }
+    cache
+        .put_pdf(key, &bytes)
+        .map_err(|err| Refused::Failed(format!("the preview could not be saved: {err}")))?;
+    cache.put_warnings(key, &warnings);
+    Ok((bytes, warnings))
+}
+
+/// One conversion per file version at a time.
+fn key_lock(key: &str) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<String, Weak<Mutex<()>>>>> = OnceLock::new();
+    let locks = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut locks = locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(lock) = locks.get(key).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(key.to_string(), Arc::downgrade(&lock));
+    lock
 }
 
 #[cfg(test)]
@@ -225,6 +394,12 @@ mod tests {
         let csv = dir.join("data.csv");
         std::fs::write(&csv, "a,b\n1,2\n").unwrap();
         assert_eq!(kind(&csv), Kind::Csv);
+        let binary = dir.join("binary.csv");
+        std::fs::write(&binary, [0u8, 1, 2, 3, 0]).unwrap();
+        assert_eq!(kind(&binary), Kind::Other);
+        let utf16 = dir.join("utf16.csv");
+        std::fs::write(&utf16, [0xFF, 0xFE, 0x41, 0x00]).unwrap();
+        assert_eq!(kind(&utf16), Kind::Csv);
         assert_eq!(kind(&dir.join("notes.txt")), Kind::Other);
         std::fs::remove_dir_all(&dir).unwrap();
     }
