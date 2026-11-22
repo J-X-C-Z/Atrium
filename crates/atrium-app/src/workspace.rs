@@ -229,6 +229,8 @@ pub struct Workspace {
     /// Reviews whose separate reviewer chat has started.
     pub(super) workflow_reviews: HashMap<(PathBuf, String), WorkflowReview>,
     pub(super) workflow_recovered: HashSet<PathBuf>,
+    /// Interrupted workflow tries whose still-running turn is being checked.
+    pub(super) workflow_reattaching: HashSet<(PathBuf, String)>,
     _workflow_ticker: Option<Task<()>>,
     /// A newer Atrium, when one is out.
     pub update: Option<crate::updates::Update>,
@@ -359,6 +361,7 @@ impl Workspace {
             workflow_checking: HashSet::new(),
             workflow_reviews: HashMap::new(),
             workflow_recovered: HashSet::new(),
+            workflow_reattaching: HashSet::new(),
             _workflow_ticker: None,
             update: None,
             goals: HashMap::new(),

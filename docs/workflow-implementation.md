@@ -134,8 +134,9 @@ rule holds: take ideas, not text. What it added:
    - detects turn completion, runs the checks and calls `Run::checked`;
    - follows retry, fixer and gate outcomes, and saves every change;
    - handles `pause`, `resume`, `stop` and restart recovery. A step cut
-     off mid-turn is retried without using an allowance; it does not yet
-     re-attach the old turn.
+     off mid-turn is retried without using an allowance. If the saved
+     thread still has that turn in progress, the runner resumes the thread
+     and re-attaches the turn instead of starting a second one.
    - lays out repeating (`each`) steps once their list file is written,
      and runs the items like any other step;
    - reloads the run after each finished turn, so two steps finishing in
@@ -164,8 +165,6 @@ rule holds: take ideas, not text. What it added:
    with real Codex and Claude Code and a TeX Live installation. Record the
    timings, tries, PDF result and verifier findings in the backend
    acceptance matrix. This has not been done yet.
-2. Close the remaining runner limit stated above: re-attach a
-   still-running turn after restart.
 
 The UI (the Workflows room, the template editor, the start dialog, the run
 view and the stops) is built on the UI side against the API in section 5.

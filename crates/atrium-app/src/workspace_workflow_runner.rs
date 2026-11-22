@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use atrium_core::{EntryKind, Item, Transcript};
+use atrium_core::{EntryKind, Item, Transcript, TurnStatus};
 use atrium_workflow::{
     Check,
     check::{self, describe},
@@ -45,8 +45,9 @@ impl Workspace {
             let dir = entry.dir;
             let mut run = entry.run;
             if !self.workflow_recovered.contains(&dir) {
-                run.recover(super::workflows::now_ms());
-                let _ = save_run(&dir, &run);
+                if self.workflow_recover_run(&dir, &mut run, cx) {
+                    continue;
+                }
                 append_log(
                     &dir,
                     serde_json::json!({"at": super::workflows::now_ms(), "event": "recovered"}),
@@ -65,6 +66,150 @@ impl Workspace {
             self.workflow_poll_review(&dir, &mut run, cx);
         }
         cx.notify();
+    }
+
+    /// After a restart, check every cut-off turn with its agent. A turn that
+    /// is still running keeps its attempt and is attached again; anything
+    /// else follows the existing retry path. Returns true while a check is
+    /// still in flight.
+    fn workflow_recover_run(
+        &mut self,
+        dir: &Path,
+        run: &mut atrium_workflow::run::Run,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let now = super::workflows::now_ms();
+        let mut pending = false;
+        let mut retry = Vec::new();
+        for step in run.steps.clone() {
+            if step.expanded || !matches!(step.status, StepStatus::Running | StepStatus::Checking) {
+                continue;
+            }
+            if step.status == StepStatus::Running
+                && let Some(attempt) = step.last()
+                && attempt.finished_ms.is_none()
+                && let Some(thread) = attempt.thread.as_deref()
+            {
+                let backend = attempt.agent.as_deref().unwrap_or("codex");
+                if self.workflow_turn_is_live(thread, attempt.turn.as_deref()) {
+                    continue;
+                }
+                let key = (dir.to_path_buf(), step.id.clone());
+                if self.workflow_reattaching.contains(&key) {
+                    pending = true;
+                    continue;
+                }
+                if crate::agents::is_codex(backend) && self.codex_for(backend).is_some() {
+                    self.workflow_reattach_try(
+                        dir,
+                        &step.id,
+                        thread,
+                        attempt.turn.clone(),
+                        backend,
+                        cx,
+                    );
+                    pending = true;
+                    continue;
+                }
+            }
+            retry.push(step.id.clone());
+        }
+        let mut changed = false;
+        for id in retry {
+            if run.recover_step(&id, now).is_ok() {
+                changed = true;
+            }
+        }
+        if changed {
+            let _ = save_run(dir, run);
+            append_log(
+                dir,
+                serde_json::json!({"at": now, "event": "restart_retry"}),
+            );
+        }
+        pending
+    }
+
+    fn workflow_turn_is_live(&self, thread: &str, turn: Option<&str>) -> bool {
+        self.transcripts
+            .get(thread)
+            .and_then(Transcript::active_turn)
+            .is_some_and(|active| turn.is_none_or(|turn| turn == active))
+    }
+
+    fn workflow_reattach_try(
+        &mut self,
+        dir: &Path,
+        step: &str,
+        thread: &str,
+        turn: Option<String>,
+        backend: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(client) = self.codex_for(backend) else {
+            return;
+        };
+        let key = (dir.to_path_buf(), step.to_string());
+        if !self.workflow_reattaching.insert(key.clone()) {
+            return;
+        }
+        let dir = dir.to_path_buf();
+        let step = step.to_string();
+        let thread = thread.to_string();
+        let backend = backend.to_string();
+        cx.spawn(async move |this, cx| {
+            let resumed = client.thread_resume(&thread).await;
+            let live = resumed.as_ref().is_ok_and(|(_, turns)| {
+                turns.iter().any(|(id, status, _)| {
+                    *status == TurnStatus::InProgress
+                        && turn.as_deref().is_none_or(|turn| turn == id)
+                })
+            });
+            let _ = this.update(cx, |workspace, cx| {
+                workspace.workflow_reattaching.remove(&key);
+                match resumed {
+                    Ok((mut meta, turns)) if live => {
+                        meta.backend = backend;
+                        workspace.upsert_thread(meta);
+                        workspace
+                            .transcripts
+                            .insert(thread.clone(), Transcript::from_history(turns));
+                        workspace.loaded_threads.insert(thread.clone());
+                        workspace
+                            .turn_started
+                            .insert(thread.clone(), std::time::Instant::now());
+                        append_log(
+                            &dir,
+                            serde_json::json!({
+                                "at": super::workflows::now_ms(),
+                                "event": "reattached",
+                                "step": step,
+                                "thread": thread,
+                                "turn": turn
+                            }),
+                        );
+                    }
+                    _ => {
+                        if let Some(mut run) = load_run(&dir)
+                            && run.recover_step(&step, super::workflows::now_ms()).is_ok()
+                        {
+                            let _ = save_run(&dir, &run);
+                            append_log(
+                                &dir,
+                                serde_json::json!({
+                                    "at": super::workflows::now_ms(),
+                                    "event": "restart_retry",
+                                    "step": step,
+                                    "thread": thread
+                                }),
+                            );
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn workflow_assign_threads(&mut self, dir: &Path, run: &mut atrium_workflow::run::Run) {
@@ -261,7 +406,14 @@ impl Workspace {
                     "backend": backend
                 }),
             );
-            self.workflow_start_chat(prompt, backend, dir.to_path_buf(), spec.effort, cx);
+            self.workflow_start_chat(
+                prompt,
+                backend,
+                dir.to_path_buf(),
+                spec.effort,
+                id.clone(),
+                cx,
+            );
         }
     }
 
@@ -271,6 +423,7 @@ impl Workspace {
         backend: String,
         cwd: PathBuf,
         effort: Option<String>,
+        step: String,
         cx: &mut Context<Self>,
     ) {
         if !agents::is_codex(&backend) {
@@ -330,6 +483,13 @@ impl Workspace {
             if prepared.is_err() {
                 return;
             }
+            let _ = this.update(cx, |_, _| {
+                if let Some(mut run) = load_run(&dir)
+                    && run.set_thread(&step, thread.clone()).is_ok()
+                {
+                    let _ = save_run(&dir, &run);
+                }
+            });
             let sent = client
                 .turn_start(
                     &thread,
@@ -342,28 +502,39 @@ impl Workspace {
                     },
                 )
                 .await;
-            if let Err(error) = sent {
-                let _ = this.update(cx, |ws, cx| {
-                    if let Some(transcript) = ws.transcripts.get_mut(&thread) {
-                        transcript.fail_pending_turn(format!("Could not send: {error:#}"));
-                    }
-                    ws.turn_started.remove(&thread);
-                    let step = ws
-                        .workflow_runs
-                        .iter()
-                        .find(|entry| entry.dir == dir)
-                        .and_then(|entry| {
-                            entry
-                                .run
-                                .steps
-                                .iter()
-                                .find(|step| step.thread() == Some(&thread))
-                        })
-                        .map(|step| step.id.clone());
-                    if let Some(step) = step {
-                        ws.workflow_fail_start(&dir, &step, format!("{error:#}"), cx);
-                    }
-                });
+            match sent {
+                Ok(turn) => {
+                    let _ = this.update(cx, |_, _| {
+                        if let Some(mut run) = load_run(&dir)
+                            && run.set_turn(&step, turn.clone()).is_ok()
+                        {
+                            let _ = save_run(&dir, &run);
+                        }
+                    });
+                }
+                Err(error) => {
+                    let _ = this.update(cx, |ws, cx| {
+                        if let Some(transcript) = ws.transcripts.get_mut(&thread) {
+                            transcript.fail_pending_turn(format!("Could not send: {error:#}"));
+                        }
+                        ws.turn_started.remove(&thread);
+                        let step = ws
+                            .workflow_runs
+                            .iter()
+                            .find(|entry| entry.dir == dir)
+                            .and_then(|entry| {
+                                entry
+                                    .run
+                                    .steps
+                                    .iter()
+                                    .find(|step| step.thread() == Some(&thread))
+                            })
+                            .map(|step| step.id.clone());
+                        if let Some(step) = step {
+                            ws.workflow_fail_start(&dir, &step, format!("{error:#}"), cx);
+                        }
+                    });
+                }
             }
         })
         .detach();
