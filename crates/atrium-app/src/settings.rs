@@ -102,6 +102,8 @@ pub struct Settings {
     pub sync_enabled: Option<bool>,
     /// What other devices call this one.
     pub device_name: String,
+    /// Tokens from pairing codes, by the address of the device that gave them.
+    pub paired: std::collections::HashMap<String, String>,
 }
 
 impl Settings {

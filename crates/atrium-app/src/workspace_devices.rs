@@ -119,6 +119,7 @@ impl Workspace {
             .filter(|a| !a.trim().is_empty())
             .collect();
         let token = self.settings.node_token.clone();
+        let paired = self.settings.paired.clone();
         let use_tailnet = std::env::var("ATRIUM_NO_TAILSCALE").is_err();
         cx.spawn(async move |this, cx| {
             let found = cx
@@ -127,7 +128,8 @@ impl Workspace {
                     let mut nodes: Vec<(NodeClient, NodeInfo)> = manual
                         .iter()
                         .filter_map(|address| {
-                            let client = NodeClient::new(address, token.clone());
+                            let token = paired.get(address).cloned().or_else(|| token.clone());
+                            let client = NodeClient::new(address, token);
                             match client.info() {
                                 Ok(info) => Some((client, info)),
                                 Err(error) => {

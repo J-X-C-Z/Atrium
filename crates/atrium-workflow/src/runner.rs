@@ -97,12 +97,12 @@ fn has_chinese_font() -> bool {
     }
     #[cfg(not(target_os = "macos"))]
     {
+        // `fc-list` succeeds with no output when nothing matches.
         Command::new("fc-list")
-            .args([":lang=zh"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
+            .args([":lang=zh", "family"])
+            .stderr(std::process::Stdio::null())
+            .output()
+            .is_ok_and(|out| out.status.success() && !out.stdout.trim_ascii().is_empty())
     }
 }
 
