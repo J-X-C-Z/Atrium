@@ -570,7 +570,7 @@ fn lang() -> atrium_workflow::render::Lang {
     }
 }
 
-fn kind_label(kind: InputKind) -> &'static str {
+pub(super) fn kind_label(kind: InputKind) -> &'static str {
     match kind {
         InputKind::Files => t("File input"),
         InputKind::Text => t("Text"),

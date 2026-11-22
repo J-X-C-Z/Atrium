@@ -20,6 +20,7 @@ mod steps;
 mod tools;
 mod workflow;
 mod workflow_author;
+mod workflow_editor;
 
 use atrium_core::{Account, plan_label};
 use codex_client::AccessMode;
@@ -205,6 +206,7 @@ pub struct RootView {
     extras: extras::ExtrasInputs,
     workflow: workflow::WorkflowForm,
     author: workflow_author::AuthorForm,
+    editor: Option<workflow_editor::TemplateEditor>,
     /// The theme last applied, so a change of preference or system appearance re-applies.
     applied: Option<(ThemePref, bool)>,
     /// Whether the long-lived inputs show Chinese placeholders.
@@ -280,6 +282,7 @@ impl RootView {
             extras,
             workflow,
             author,
+            editor: None,
             applied: None,
             placeholders_chinese: crate::i18n::chinese(),
             _subscriptions: subscriptions,

@@ -262,6 +262,37 @@ pub fn sidebar_list(workspace: &Entity<Workspace>, cx: &App) -> AnyElement {
             .child(div().flex_1().min_w_0().truncate().child(t("New with AI…")))
             .on_click(move |_, _, cx| author.update(cx, |ws, cx| ws.open_authoring(None, cx))),
     );
+    let blank = workspace.clone();
+    let editing_new = ws.template_editing.as_ref().is_some_and(|e| e.id.is_none());
+    column = column.child(
+        div()
+            .id("wf-tpl-new")
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1p5()
+            .rounded(theme.radius(Radius::Md))
+            .cursor_pointer()
+            .text_size(small)
+            .when(editing_new, |d| d.bg(colors.active).text_color(colors.fg))
+            .when(!editing_new, |d| {
+                d.text_color(colors.fg_muted).hover(|d| d.bg(colors.hover))
+            })
+            .child(
+                Icon::new(IconName::Plus)
+                    .size(IconSize::Sm)
+                    .color(colors.fg_subtle),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(t("New, step by step…")),
+            )
+            .on_click(move |_, _, cx| blank.update(cx, |ws, cx| ws.open_editor(None, cx))),
+    );
     for (ix, entry) in ws.workflow_templates().into_iter().enumerate() {
         let open = workspace.clone();
         let id = entry.template.id.clone();
@@ -309,16 +340,24 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (run, picked, authoring) = {
+        let (run, picked, authoring, editing) = {
             let ws = self.workspace.read(cx);
             let run = match &ws.room {
                 Room::Workflows { run } => run.clone(),
                 _ => None,
             };
-            (run, ws.pick_template.clone(), ws.authoring.clone())
+            (
+                run,
+                ws.pick_template.clone(),
+                ws.authoring.clone(),
+                ws.template_editing.clone(),
+            )
         };
         if let Some(authoring) = authoring {
             return self.author_view(authoring, cx);
+        }
+        if let Some(editing) = editing {
+            return self.editor_view(editing, window, cx);
         }
         if let Some(id) = picked {
             self.workspace.update(cx, |ws, _| ws.pick_template = None);
@@ -577,17 +616,21 @@ impl RootView {
                                     .gap_3()
                                     .text_size(tiny)
                                     .text_color(colors.fg_subtle)
-                                    .child(tf("Template: {source}", &[("source", &source)]))
                                     .child(
-                                        Button::new("wf-copy-template", t("Copy and edit"))
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .child(tf("Template: {source}", &[("source", &source)])),
+                                    )
+                                    .child(
+                                        Button::new("wf-edit-template", t("Edit"))
                                             .variant(ButtonVariant::Ghost)
                                             .size(ControlSize::Sm)
                                             .icon(IconName::Pencil)
                                             .on_click(move |_, _, cx| {
-                                                let path = copy.update(cx, |ws, cx| ws.copy_template(&copy_id, cx));
-                                                if let Some(path) = path {
-                                                    let _ = crate::opener::open_default(&path);
-                                                }
+                                                let id = copy_id.clone();
+                                                copy.update(cx, |ws, cx| ws.open_editor(Some(id), cx));
                                             }),
                                     )
                                     .child(
@@ -789,7 +832,7 @@ impl RootView {
                     .child(
                         DropZone::new(SharedString::from(format!("wf-drop-{key}")))
                             .multiple()
-                            .hint(t("Drop the problem PDF and its data here, or browse."))
+                            .hint(t("Drop the files here, or browse."))
                             .on_drop(move |paths, _, cx| {
                                 let key = add_key.clone();
                                 add.update(cx, |root, cx| {

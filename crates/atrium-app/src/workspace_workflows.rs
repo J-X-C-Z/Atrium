@@ -42,6 +42,14 @@ pub struct Authoring {
     pub base: Option<String>,
 }
 
+/// The visual template editor: on the template with `id`, or on a new
+/// one. `nonce` tells one opening from the next.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Editing {
+    pub id: Option<String>,
+    pub nonce: u64,
+}
+
 /// A run as the list shows it.
 #[derive(Clone, Debug)]
 pub struct RunEntry {
@@ -373,39 +381,6 @@ impl Workspace {
         out
     }
 
-    /// Copies a template to the user's folder, to change it there.
-    pub fn copy_template(&mut self, id: &str, cx: &mut Context<Self>) -> Option<PathBuf> {
-        let entry = self
-            .workflow_templates()
-            .into_iter()
-            .find(|e| e.template.id == id)?;
-        if let TemplateSource::User(path) = entry.source {
-            return Some(path);
-        }
-        let dir = user_dir()?;
-        let path = dir.join(format!("{id}.toml"));
-        let text = builtin::SOURCES
-            .iter()
-            .find(|(i, _)| *i == id)
-            .map(|(_, t)| t.to_string())
-            .unwrap_or_else(|| entry.template.to_toml());
-        let written = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, text));
-        match written {
-            Ok(()) => {
-                cx.emit(Notice::Success(tf(
-                    "Copied to {path}. Changes there take the built-in one's place.",
-                    &[("path", &path.display())],
-                )));
-                cx.notify();
-                Some(path)
-            }
-            Err(error) => {
-                cx.emit(Notice::Error(error.to_string()));
-                None
-            }
-        }
-    }
-
     /// Runs read from their folders, newest first; folders that are gone
     /// drop out of the list.
     pub fn refresh_workflows(&mut self) {
@@ -432,7 +407,110 @@ impl Workspace {
         self.refresh_workflows();
         self.room = Room::Workflows { run };
         self.authoring = None;
+        self.template_editing = None;
         cx.notify();
+    }
+
+    /// Shows the visual editor on the template `id`, or on a new one.
+    pub fn open_editor(&mut self, id: Option<String>, cx: &mut Context<Self>) {
+        self.enter_workflows(None, cx);
+        self.template_editing = Some(Editing {
+            id,
+            nonce: self.nav,
+        });
+    }
+
+    /// The template `id` as text, as its file holds it, with where it
+    /// came from.
+    pub fn template_source(&self, id: &str) -> Option<(Template, TemplateSource, String)> {
+        let entry = self
+            .workflow_templates()
+            .into_iter()
+            .find(|e| e.template.id == id)?;
+        let text = match &entry.source {
+            TemplateSource::User(path) | TemplateSource::Folder(path) => {
+                std::fs::read_to_string(path).unwrap_or_else(|_| entry.template.to_toml())
+            }
+            TemplateSource::Builtin => builtin::SOURCES
+                .iter()
+                .find(|(i, _)| *i == id)
+                .map(|(_, t)| t.to_string())
+                .unwrap_or_else(|| entry.template.to_toml()),
+        };
+        Some((entry.template, entry.source, text))
+    }
+
+    /// Saves a template from the visual editor. `was` is the id it was
+    /// opened with: the user's file under that id is renamed with it.
+    pub fn save_template(
+        &mut self,
+        template: &Template,
+        was: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        let text = template.to_toml();
+        let report = author::inspect(&text, AGENT_IDS, lang());
+        if let Some(error) = report.error {
+            cx.emit(Notice::Error(error));
+            return;
+        }
+        let templates = self.workflow_templates();
+        let source_of = |id: &str| {
+            templates
+                .iter()
+                .find(|e| e.template.id == id)
+                .map(|e| e.source.clone())
+        };
+        let old = was.and_then(source_of);
+        let taken = source_of(&template.id);
+        if was != Some(template.id.as_str())
+            && matches!(
+                taken,
+                Some(TemplateSource::User(_) | TemplateSource::Folder(_))
+            )
+        {
+            cx.emit(Notice::Error(tf(
+                "Another template is already called {id}.",
+                &[("id", &template.id)],
+            )));
+            return;
+        }
+        let path = match (&old, was == Some(template.id.as_str())) {
+            (Some(TemplateSource::User(path) | TemplateSource::Folder(path)), true) => path.clone(),
+            (Some(TemplateSource::Folder(path)), false) => {
+                path.with_file_name(format!("{}.toml", template.id))
+            }
+            _ => match user_dir() {
+                Some(d) => d.join(format!("{}.toml", template.id)),
+                None => return,
+            },
+        };
+        let written = path
+            .parent()
+            .map(std::fs::create_dir_all)
+            .transpose()
+            .and_then(|_| write_atomic(&path, &text));
+        if let Err(error) = written {
+            cx.emit(Notice::Error(error.to_string()));
+            return;
+        }
+        // A renamed template leaves no copy under its old id.
+        if let Some(TemplateSource::User(old) | TemplateSource::Folder(old)) = &old
+            && *old != path
+        {
+            let _ = std::fs::remove_file(old);
+        }
+        let replaces_builtin = matches!(taken, Some(TemplateSource::Builtin));
+        cx.emit(Notice::Success(if replaces_builtin {
+            tf(
+                "Saved as {name}; it takes the built-in one's place.",
+                &[("name", &template.name)],
+            )
+        } else {
+            tf("Saved as {name}.", &[("name", &template.name)])
+        }));
+        self.pick_template = Some(template.id.clone());
+        self.enter_workflows(None, cx);
     }
 
     /// Shows the form for writing a template with an agent.
