@@ -15,9 +15,10 @@ existing functions to call, the tests to write and when it is done.
 
 ## Backlog
 
-**Next up: 8.** Real-device acceptance (multi-device
-items 12/13 and workflow W1 in `docs/backend-acceptance-matrix.md`) is run
-by the owner on real machines; do not mark it done from mocks.
+**Next up: none** — the backend backlog below is complete. Real-device
+acceptance (multi-device items 12/13 and workflow W1 in
+`docs/backend-acceptance-matrix.md`) is run by the owner on real machines;
+do not mark it done from mocks.
 
 | # | Task | Brief | Depends on |
 | --- | --- | --- | --- |
