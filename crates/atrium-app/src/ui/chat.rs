@@ -4,7 +4,7 @@
 use ely_gpui_component::{
     buttons::{Button, ButtonVariant, IconButton},
     chat::{ChatContainer, ErrorMessage, MessageList, SuggestionChips, WelcomeScreen},
-    menus::{DropdownMenu, Menu, MenuItem, OverflowMenu},
+    menus::{Menu, MenuItem, OverflowMenu},
     motion::{ProgressBar, Skeleton, SkeletonText, Spinner, SpinnerStyle},
     primitives::{Icon, IconName},
     shell::drag_region,
@@ -88,34 +88,6 @@ fn header(
     let thread_id = ws.active_thread_id().map(str::to_owned);
     let quick_view = super::context::quick_view(ws, root.clone(), cx);
     let running = ws.running_for();
-
-    let mut models = Menu::new().item(
-        MenuItem::radio(t("Codex default"), ws.settings.model.is_none()).on_click({
-            let workspace = workspace.clone();
-            move |_, cx| workspace.update(cx, |ws, cx| ws.set_model(None, cx))
-        }),
-    );
-    if !ws.models.is_empty() {
-        models = models.separator();
-    }
-    for model in &ws.models {
-        let id = model.id.clone();
-        let workspace = workspace.clone();
-        let label = if model.description.trim().is_empty() {
-            model.display_name.clone()
-        } else {
-            format!(
-                "{} · {}",
-                model.display_name,
-                truncate(model.description.trim(), 36)
-            )
-        };
-        let item = MenuItem::radio(label, ws.settings.model.as_deref() == Some(&model.id))
-            .on_click(move |_, cx| {
-                workspace.update(cx, |ws, cx| ws.set_model(Some(id.clone()), cx))
-            });
-        models = models.item(item);
-    }
 
     let memory = ws.memory_enabled();
     // How much of the plan's usage is spent: a ring that opens the details.
@@ -318,87 +290,6 @@ fn header(
         OverflowMenu::new("chat-menu", menu).tooltip(t("More"))
     });
 
-    // Which agent, and on which device: chosen for a new chat, fixed once
-    // the chat exists.
-    let agent_picker = {
-        let backend = ws.view_backend().to_string();
-        let label = crate::agents::backend_label(&backend);
-        if thread_id.is_none() {
-            let item = |id: String, name: String| {
-                let workspace = workspace.clone();
-                let state = backend_status(ws, &id);
-                MenuItem::radio(agent_label(&name, state), backend == id)
-                    .disabled(state == Some("not installed"))
-                    .on_click(move |_, cx| {
-                        workspace.update(cx, |ws, cx| ws.set_draft_backend(&id, cx))
-                    })
-            };
-            let here: Vec<MenuItem> = std::iter::once(item(CODEX.into(), "Codex".into()))
-                .chain(
-                    ws.agents
-                        .iter()
-                        .filter(|a| a.remote.is_none())
-                        .map(|a| item(a.profile.id.clone(), a.profile.name.clone())),
-                )
-                .collect();
-            let mut menu = if ws.devices.is_empty() {
-                here.into_iter().fold(Menu::new(), |menu, i| menu.item(i))
-            } else {
-                Menu::new().group(t("This computer"), here)
-            };
-            for device in &ws.devices {
-                let mut items = Vec::new();
-                let codex = crate::agents::backend_id(CODEX, Some(&device.id));
-                if device.codex_status != AgentStatus::NotInstalled {
-                    items.push(item(codex, "Codex".into()));
-                }
-                items.extend(
-                    ws.agents
-                        .iter()
-                        .filter(|a| a.remote.as_ref().is_some_and(|r| r.device == device.id))
-                        .map(|a| item(a.profile.id.clone(), a.profile.name.clone())),
-                );
-                let title = match &device.status {
-                    crate::workspace::DeviceStatus::Online => device.id.clone(),
-                    crate::workspace::DeviceStatus::Offline(_) => {
-                        tf("{device} · offline", &[("device", &device.id)])
-                    }
-                };
-                if items.is_empty() {
-                    items.push(MenuItem::new(t("No agents there")).disabled(true));
-                }
-                menu = menu.group(title, items);
-            }
-            DropdownMenu::new("agent", label, menu)
-                .icon(if ws.is_remote_view() {
-                    IconName::Monitor
-                } else {
-                    IconName::Bot
-                })
-                .variant(ButtonVariant::Ghost)
-                .into_any_element()
-        } else {
-            div()
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap_1p5()
-                .px_2()
-                .text_size(theme.text_size(TextSize::Sm))
-                .child(
-                    Icon::new(if ws.is_remote_view() {
-                        IconName::Monitor
-                    } else {
-                        IconName::Bot
-                    })
-                    .size(IconSize::Sm)
-                    .color(colors.fg_muted),
-                )
-                .child(label)
-                .into_any_element()
-        }
-    };
-
     // The link to the device a remote chat runs on, when it is not well.
     let link = ws
         .link_state(ws.view_backend())
@@ -453,15 +344,7 @@ fn header(
         .flex()
         .items_center()
         .gap_2()
-        .child(agent_picker)
         .children(link)
-        .when(codex && !ws.is_remote_view(), |bar| {
-            bar.child(
-                DropdownMenu::new("model", ws.model_label(), models)
-                    .icon(IconName::Sparkles)
-                    .variant(ButtonVariant::Ghost),
-            )
-        })
         .child(
             div()
                 .flex_1()
@@ -558,7 +441,7 @@ fn header(
         .into_any_element()
 }
 
-fn truncate(text: &str, max: usize) -> String {
+pub(super) fn truncate(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         text.to_string()
     } else {
@@ -1053,7 +936,7 @@ fn goal_banner(
     )
 }
 
-fn agent_label(name: &str, status: Option<&'static str>) -> String {
+pub(super) fn agent_label(name: &str, status: Option<&'static str>) -> String {
     match status {
         Some(status) => format!("{name} · {}", t(status)),
         None => name.to_string(),
@@ -1078,7 +961,7 @@ fn agent_status_text(status: &AgentStatus) -> Option<&'static str> {
 }
 
 /// Why a backend cannot take a message, when it cannot.
-fn backend_status(ws: &Workspace, backend: &str) -> Option<&'static str> {
+pub(super) fn backend_status(ws: &Workspace, backend: &str) -> Option<&'static str> {
     match crate::agents::split_backend(backend) {
         (CODEX, None) => codex_status(ws),
         (CODEX, Some(device)) => match ws.device(device) {

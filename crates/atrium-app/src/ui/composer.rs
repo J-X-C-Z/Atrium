@@ -289,7 +289,7 @@ impl Composer {
         }
     }
 
-    /// Codex's pickers: plan mode, Fast, access and reasoning effort.
+    /// Codex's toggles and pickers: plan mode, Fast and access.
     fn codex_tools(&self, tools: &mut Vec<AnyElement>, cx: &mut Context<Self>) {
         let ws = self.workspace.read(cx);
         // Plan mode and Fast.
@@ -362,33 +362,141 @@ impl Composer {
                 .variant(ButtonVariant::Ghost)
                 .into_any_element(),
         );
+    }
 
-        // Reasoning effort, when the model offers a choice.
+    /// Which agent runs the chat, and on which device: chosen for a new
+    /// chat, shown (and fixed) once the chat exists.
+    fn agent_picker(&self, cx: &App) -> AnyElement {
+        use super::chat::{agent_label, backend_status};
+        use crate::workspace::{AgentStatus, CODEX};
+        let ws = self.workspace.read(cx);
+        let workspace = &self.workspace;
+        let backend = ws.view_backend().to_string();
+        let label = crate::agents::backend_label(&backend);
+        let icon = if ws.is_remote_view() {
+            IconName::Monitor
+        } else {
+            IconName::Bot
+        };
+        if ws.active_thread().is_some() {
+            let theme = cx.theme();
+            return div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_1p5()
+                .text_size(theme.text_size(TextSize::Sm))
+                .text_color(theme.colors.fg_muted)
+                .child(
+                    Icon::new(icon)
+                        .size(IconSize::Sm)
+                        .color(theme.colors.fg_subtle),
+                )
+                .child(label)
+                .into_any_element();
+        }
+        let item = |id: String, name: String| {
+            let workspace = workspace.clone();
+            let state = backend_status(ws, &id);
+            MenuItem::radio(agent_label(&name, state), backend == id)
+                .disabled(state == Some("not installed"))
+                .on_click(move |_, cx| workspace.update(cx, |ws, cx| ws.set_draft_backend(&id, cx)))
+        };
+        let here: Vec<MenuItem> = std::iter::once(item(CODEX.into(), "Codex".into()))
+            .chain(
+                ws.agents
+                    .iter()
+                    .filter(|a| a.remote.is_none())
+                    .map(|a| item(a.profile.id.clone(), a.profile.name.clone())),
+            )
+            .collect();
+        let mut menu = if ws.devices.is_empty() {
+            here.into_iter().fold(Menu::new(), |menu, i| menu.item(i))
+        } else {
+            Menu::new().group(t("This computer"), here)
+        };
+        for device in &ws.devices {
+            let mut items = Vec::new();
+            let codex = crate::agents::backend_id(CODEX, Some(&device.id));
+            if device.codex_status != AgentStatus::NotInstalled {
+                items.push(item(codex, "Codex".into()));
+            }
+            items.extend(
+                ws.agents
+                    .iter()
+                    .filter(|a| a.remote.as_ref().is_some_and(|r| r.device == device.id))
+                    .map(|a| item(a.profile.id.clone(), a.profile.name.clone())),
+            );
+            let title = match &device.status {
+                crate::workspace::DeviceStatus::Online => device.id.clone(),
+                crate::workspace::DeviceStatus::Offline(_) => {
+                    tf("{device} · offline", &[("device", &device.id)])
+                }
+            };
+            if items.is_empty() {
+                items.push(MenuItem::new(t("No agents there")).disabled(true));
+            }
+            menu = menu.group(title, items);
+        }
+        DropdownMenu::new("agent", label, menu)
+            .icon(icon)
+            .variant(ButtonVariant::Ghost)
+            .into_any_element()
+    }
+
+    /// Codex's model and reasoning effort, in one menu: "GPT-5 · High".
+    fn model_picker(&self, cx: &App) -> AnyElement {
+        let ws = self.workspace.read(cx);
+        let mut models = vec![
+            MenuItem::radio(t("Codex default"), ws.settings.model.is_none()).on_click({
+                let workspace = self.workspace.clone();
+                move |_, cx| workspace.update(cx, |ws, cx| ws.set_model(None, cx))
+            }),
+        ];
+        for model in &ws.models {
+            let id = model.id.clone();
+            let workspace = self.workspace.clone();
+            let label = if model.description.trim().is_empty() {
+                model.display_name.clone()
+            } else {
+                format!(
+                    "{} · {}",
+                    model.display_name,
+                    super::chat::truncate(model.description.trim(), 36)
+                )
+            };
+            models.push(
+                MenuItem::radio(label, ws.settings.model.as_deref() == Some(&model.id)).on_click(
+                    move |_, cx| workspace.update(cx, |ws, cx| ws.set_model(Some(id.clone()), cx)),
+                ),
+            );
+        }
+        let mut menu = Menu::new().group(t("Model"), models);
         let (efforts, effort) = ws.efforts();
         if !efforts.is_empty() {
-            let mut menu = Menu::new();
-            for level in &efforts {
-                let workspace = self.workspace.clone();
-                let value = level.clone();
-                menu = menu.item(
+            let levels: Vec<MenuItem> = efforts
+                .iter()
+                .map(|level| {
+                    let workspace = self.workspace.clone();
+                    let value = level.clone();
                     MenuItem::radio(title_case(level), effort.as_deref() == Some(level)).on_click(
                         move |_, cx| {
                             workspace.update(cx, |ws, cx| ws.set_effort(Some(value.clone()), cx))
                         },
-                    ),
-                );
-            }
-            let label = effort
-                .as_deref()
-                .map(title_case)
-                .unwrap_or_else(|| t("Effort").into());
-            tools.push(
-                DropdownMenu::new("effort", label, menu)
-                    .icon(IconName::Gauge)
-                    .variant(ButtonVariant::Ghost)
-                    .into_any_element(),
-            );
+                    )
+                })
+                .collect();
+            menu = menu.group(t("Reasoning effort"), levels);
         }
+        let label = match effort.as_deref().filter(|_| !efforts.is_empty()) {
+            Some(level) => format!("{} · {}", ws.model_label(), title_case(level)),
+            None => ws.model_label(),
+        };
+        DropdownMenu::new("model", label, menu)
+            .icon(IconName::Sparkles)
+            .variant(ButtonVariant::Ghost)
+            .into_any_element()
     }
 
     /// An ACP agent's pickers, as the agent offers them: mode, model,
@@ -499,8 +607,10 @@ impl Composer {
                 .into_any_element(),
         );
 
+        tools.push(self.agent_picker(cx));
         // A device's Codex keeps its own model settings.
         if ws.is_codex_view() && !ws.is_remote_view() {
+            tools.push(self.model_picker(cx));
             self.codex_tools(&mut tools, cx);
         } else if !ws.is_codex_view() {
             self.agent_tools(&mut tools, cx);

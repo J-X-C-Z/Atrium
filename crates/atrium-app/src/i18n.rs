@@ -984,6 +984,8 @@ const ZH: &[(&str, &str)] = &[
         "另一台电脑上已经没有这段对话。",
     ),
     ("Change with AI", "让 AI 修改"),
+    ("Model", "模型"),
+    ("Reasoning effort", "思考强度"),
     ("Drop the files here, or browse.", "把文件拖到这里，或点「浏览」选择。"),
     ("For example contest=CUMCM", "例如 contest=CUMCM"),
     ("For example reports/questions.json", "例如 reports/questions.json"),
