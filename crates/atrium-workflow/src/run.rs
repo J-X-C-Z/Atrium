@@ -83,6 +83,9 @@ pub struct Attempt {
     pub agent: Option<String>,
     /// The agent's conversation, once it has one.
     pub thread: Option<String>,
+    /// The turn started for this attempt, once the agent named it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<String>,
     pub started_ms: i64,
     pub finished_ms: Option<i64>,
     /// What the agent was told to fix, from failed checks or the user.
@@ -458,6 +461,7 @@ impl Run {
             self.steps[ix].attempts.push(Attempt {
                 agent: None,
                 thread: None,
+                turn: None,
                 started_ms: now_ms,
                 finished_ms: Some(now_ms),
                 feedback: Vec::new(),
@@ -540,6 +544,7 @@ impl Run {
         step.attempts.push(Attempt {
             agent,
             thread: None,
+            turn: None,
             started_ms: now_ms,
             finished_ms: None,
             feedback,
@@ -554,6 +559,14 @@ impl Run {
         let ix = self.ix(id)?;
         if let Some(a) = self.steps[ix].attempts.last_mut() {
             a.thread = Some(thread);
+        }
+        Ok(())
+    }
+
+    pub fn set_turn(&mut self, id: &str, turn: String) -> Result<(), RunError> {
+        let ix = self.ix(id)?;
+        if let Some(a) = self.steps[ix].attempts.last_mut() {
+            a.turn = Some(turn);
         }
         Ok(())
     }
@@ -857,21 +870,34 @@ impl Run {
     /// After Atrium restarts: steps cut off mid-turn or mid-check start
     /// their try again, without it counting against them.
     pub fn recover(&mut self, now_ms: i64) {
-        for step in &mut self.steps {
-            if step.expanded {
-                continue;
-            }
-            if matches!(step.status, StepStatus::Running | StepStatus::Checking) {
-                if let Some(a) = step.attempts.last()
-                    && a.finished_ms.is_none()
-                {
-                    step.feedback = a.feedback.clone();
-                    step.attempts.pop();
-                }
-                step.status = StepStatus::Pending;
-                self.updated_ms = now_ms;
-            }
+        let ids: Vec<String> = self
+            .steps
+            .iter()
+            .filter(|step| {
+                !step.expanded && matches!(step.status, StepStatus::Running | StepStatus::Checking)
+            })
+            .map(|step| step.id.clone())
+            .collect();
+        for id in ids {
+            let _ = self.recover_step(&id, now_ms);
         }
+    }
+
+    /// Forget one interrupted try and make its step ready again. The try
+    /// does not count against the allowance.
+    pub fn recover_step(&mut self, id: &str, now_ms: i64) -> Result<(), RunError> {
+        let ix = self.ix(id)?;
+        self.expect(ix, &[StepStatus::Running, StepStatus::Checking], "running")?;
+        let step = &mut self.steps[ix];
+        if let Some(a) = step.attempts.last()
+            && a.finished_ms.is_none()
+        {
+            step.feedback = a.feedback.clone();
+            step.attempts.pop();
+        }
+        step.status = StepStatus::Pending;
+        self.updated_ms = now_ms;
+        Ok(())
     }
 
     /// Steps done, and steps in all: items count, the repeating steps that
@@ -1075,12 +1101,31 @@ attempts = 3
         let mut run = Run::new(template(), inputs(), &[], 0).unwrap();
         run.begin("plan", None, 1).unwrap();
         run.set_thread("plan", "th-1".into()).unwrap();
+        run.set_turn("plan", "turn-1".into()).unwrap();
+        let saved = Run::from_json(&run.to_json()).unwrap();
+        assert_eq!(
+            saved.step("plan").unwrap().last().unwrap().turn.as_deref(),
+            Some("turn-1")
+        );
         run.recover(2);
         let plan = run.step("plan").unwrap();
         assert_eq!(plan.status, StepStatus::Pending);
         assert!(plan.attempts.is_empty());
         let saved = Run::from_json(&run.to_json()).unwrap();
         assert_eq!(saved, run);
+    }
+
+    #[test]
+    fn recovering_one_step_leaves_another_running_try_alone() {
+        let mut run = Run::new(template(), inputs(), &[], 0).unwrap();
+        run.begin("plan", None, 1).unwrap();
+        run.set_thread("plan", "th-plan".into()).unwrap();
+        run.set_turn("plan", "turn-plan".into()).unwrap();
+        run.begin("write", None, 2).unwrap();
+        run.recover_step("write", 3).unwrap();
+        let plan = run.step("plan").unwrap();
+        assert_eq!(plan.status, StepStatus::Running);
+        assert_eq!(plan.last().unwrap().turn.as_deref(), Some("turn-plan"));
     }
 
     fn contest() -> Template {
