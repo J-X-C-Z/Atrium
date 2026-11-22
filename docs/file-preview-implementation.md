@@ -60,8 +60,11 @@ them in v1. If you switch, say why in the PR, with the fixtures that showed it.
 
 - **`crates/atrium-preview` exists** with the API below; `kind()` is
   implemented and tested.
-- **Yours**: the bodies of `Previewer::preview` and `Previewer::find`,
-  which return `Unsupported` today.
+- **`Previewer::preview` and `Previewer::find` are implemented**:
+  office2pdf for DOCX/PPTX/XLSX pages, hayro for PDF pages and search,
+  calamine and `csv` for grids, with the cache, size limits and deadline
+  described below. Tests use small fixtures in
+  `crates/atrium-preview/tests/fixtures/`.
 - **The Preview view is built and calls them**:
   - for PDF, CSV, xls and ods;
   - for docx, xlsx and pptx when `atrium_office::open` cannot open them;
