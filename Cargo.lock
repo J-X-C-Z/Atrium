@@ -572,6 +572,7 @@ dependencies = [
  "agent-rpc",
  "anyhow",
  "atrium-core",
+ "atrium-memory",
  "atrium-node",
  "atrium-office",
  "atrium-phone",
@@ -603,6 +604,22 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "atrium-memory"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs 6.0.0",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.21",
+ "ureq",
+ "uuid",
 ]
 
 [[package]]

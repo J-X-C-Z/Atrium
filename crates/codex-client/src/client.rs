@@ -44,6 +44,8 @@ pub struct StartThread {
     pub mcp_servers: Vec<McpServer>,
     /// Environment variables for the commands the thread runs.
     pub env: Vec<(String, String)>,
+    /// Added to the model's instructions for this thread only.
+    pub developer_instructions: Option<String>,
 }
 
 /// Config overrides adding `servers`, one dotted key each so the user's own
@@ -313,6 +315,11 @@ impl CodexClient {
         put(&mut params, "model", options.model);
         put(&mut params, "approvalPolicy", options.approval_policy);
         put(&mut params, "sandbox", options.sandbox);
+        put(
+            &mut params,
+            "developerInstructions",
+            options.developer_instructions,
+        );
         let mut config = mcp_config(&options.mcp_servers)
             .and_then(|c| c.as_object().cloned())
             .unwrap_or_default();

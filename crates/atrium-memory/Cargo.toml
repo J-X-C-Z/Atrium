@@ -1,0 +1,21 @@
+[package]
+name = "atrium-memory"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Atrium's shared memory: curated notes, skills and exported sessions on disk, the queue a memory service works from, what goes into an agent's session, and a Hindsight client."
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+uuid.workspace = true
+dirs.workspace = true
+ureq.workspace = true
+regex = "1"
+
+[dev-dependencies]
+tempfile = "3"

@@ -14,6 +14,7 @@ members = [
     "crates/atrium-office",
     "crates/atrium-preview",
     "crates/atrium-workflow",
+    "crates/atrium-memory",
     "crates/atrium-app",
 ]
 
@@ -49,6 +50,7 @@ acp-client = { path = "crates/acp-client" }
 atrium-project = { path = "crates/atrium-project" }
 atrium-office = { path = "crates/atrium-office" }
 atrium-preview = { path = "crates/atrium-preview" }
+atrium-memory = { path = "crates/atrium-memory" }
 atrium-workflow = { path = "crates/atrium-workflow" }
 
 # UI stack. GPUI Kit 0.7.1 and Ely both pin the gpui-pre 0.3.8 snapshot:

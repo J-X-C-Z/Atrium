@@ -441,7 +441,7 @@ impl Workspace {
         // Claim the slot so a second call does not make another session.
         self.warm
             .insert(backend.clone(), (String::new(), cwd.clone()));
-        let mcp = self.user_mcp(&backend);
+        let mcp = self.chat_mcp(&backend);
         cx.spawn(async move |this, cx| {
             let started = client.new_session_with(&cwd, &mcp).await;
             let _ = this.update(cx, |ws, cx| match started {
@@ -565,7 +565,8 @@ impl Workspace {
                 let warm_options = warm
                     .as_ref()
                     .and_then(|id| self.session_options.get(id).cloned());
-                let mcp = self.user_mcp(&backend);
+                let mcp = self.chat_mcp(&backend);
+                let memory = self.memory_prep(&backend);
                 let (checkpoint, adopt) = self.checkpoint_new_chat(&backend, cx);
                 let folder = self.new_chat_folder(&backend, &composed.text, cx);
                 let mut warm = warm;
@@ -586,6 +587,19 @@ impl Workspace {
                         warm = None;
                     }
                     checkpoint.await;
+                    // What earlier sessions learned goes in front of the
+                    // first message: ACP takes no instructions of its own.
+                    let block = match memory {
+                        Some(memory) => {
+                            let (dir, query) = (cwd.clone(), composed.text.clone());
+                            Some(
+                                cx.background_executor()
+                                    .spawn(async move { memory.block(&dir, &query) })
+                                    .await,
+                            )
+                        }
+                        None => None,
+                    };
                     let started = match (warm, warm_options) {
                         (Some(session_id), Some(options)) => Ok(acp_client::SessionStart {
                             session_id,
@@ -659,11 +673,19 @@ impl Workspace {
                         }
                         ws.warm_draft(cx);
                         cx.notify();
+                        let mut prompt = composed.clone();
+                        if let Some(block) = block {
+                            if !block.is_empty() {
+                                prompt.text =
+                                    atrium_memory::inject::with_memory(&block.text, &prompt.text);
+                            }
+                            ws.shared_memory.injected.insert(session.clone(), block);
+                        }
                         Self::run_prompt(
                             client.clone(),
                             backend.clone(),
                             session.clone(),
-                            composed.clone(),
+                            prompt,
                             None,
                             cx,
                         );

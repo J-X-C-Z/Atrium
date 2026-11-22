@@ -9,6 +9,7 @@ mod context;
 mod devices;
 mod document;
 mod extras;
+mod memory;
 mod motion;
 mod overview;
 mod preview;
@@ -206,6 +207,7 @@ pub struct RootView {
     extras: extras::ExtrasInputs,
     workflow: workflow::WorkflowForm,
     author: workflow_author::AuthorForm,
+    memory_ui: memory::MemoryUi,
     editor: Option<workflow_editor::TemplateEditor>,
     /// The theme last applied, so a change of preference or system appearance re-applies.
     applied: Option<(ThemePref, bool)>,
@@ -233,6 +235,7 @@ impl RootView {
         let extras = extras::ExtrasInputs::new(window, cx);
         let workflow = workflow::WorkflowForm::new(window, cx);
         let author = workflow_author::AuthorForm::new(window, cx);
+        let memory_ui = memory::MemoryUi::new(window, cx);
         let subscriptions = vec![
             cx.observe_in(&workspace, window, |this, workspace, window, cx| {
                 this.apply_theme(window, cx);
@@ -282,6 +285,7 @@ impl RootView {
             extras,
             workflow,
             author,
+            memory_ui,
             editor: None,
             applied: None,
             placeholders_chinese: crate::i18n::chinese(),
@@ -1236,7 +1240,9 @@ impl Render for RootView {
             self.workspace.read(cx).room,
             crate::workspace::Room::Workflows { .. }
         );
-        let main = if in_workflows {
+        let main = if self.workspace.read(cx).memory_open() {
+            self.memory_view(cx)
+        } else if in_workflows {
             let view = self.workflow_view(window, cx);
             // The draft panel belongs beside its chat.
             let pane = if self.review.tab == changes::SideTab::Draft {

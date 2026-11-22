@@ -44,6 +44,18 @@ fn main() {
         }
         return;
     }
+    // `atrium memory-mcp --root <dir> --cwd <dir> --agent <id>`: the shared
+    // memory's `recall` and `remember` tools for any agent.
+    if args.first().map(String::as_str) == Some("memory-mcp") {
+        let served = atrium_memory::mcp::Server::from_args(&args[1..]).and_then(|server| {
+            atrium_memory::mcp::serve(&server, std::io::stdin().lock(), std::io::stdout().lock())
+        });
+        if let Err(error) = served {
+            eprintln!("atrium memory-mcp: {error:#}");
+            std::process::exit(2);
+        }
+        return;
+    }
     // `atrium skill install`: the skill for Claude Code and Codex;
     // `atrium skill`: print it.
     if args.first().map(String::as_str) == Some("skill") {

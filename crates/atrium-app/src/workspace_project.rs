@@ -888,6 +888,7 @@ impl Workspace {
                 sandbox: Some(self.settings.mode.sandbox_mode().into()),
                 mcp_servers: self.user_mcp(&backend),
                 env: self.session_env(),
+                developer_instructions: None,
             };
             cx.spawn(async move |this, cx| {
                 let meta = match client.thread_start(options).await {
@@ -1128,6 +1129,7 @@ impl Workspace {
                     servers
                 },
                 env: self.session_env(),
+                developer_instructions: None,
             };
             // Controllers are event-driven; never give them an auto-continuing goal.
             let objective = if stream.role == Role::Controller {

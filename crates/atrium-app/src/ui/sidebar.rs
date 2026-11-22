@@ -576,6 +576,14 @@ pub fn render(
                             .on_click(move |_, _, cx| retry.update(cx, |ws, cx| ws.connect(cx))),
                     )
                 })
+                .child({
+                    let memory = workspace.clone();
+                    IconButton::new("open-memory", IconName::Lightbulb)
+                        .variant(ButtonVariant::Ghost)
+                        .size(ControlSize::Sm)
+                        .tooltip(t("Memory"))
+                        .on_click(move |_, _, cx| memory.update(cx, |ws, cx| ws.open_memory(cx)))
+                })
                 .child(
                     IconButton::new("open-settings", IconName::Settings)
                         .variant(ButtonVariant::Ghost)

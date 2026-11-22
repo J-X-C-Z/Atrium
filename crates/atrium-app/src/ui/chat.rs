@@ -160,6 +160,16 @@ fn header(
                     ws.update(cx, |ws, cx| ws.toggle_pin(&id, cx));
                 }),
         );
+        if !ws.sync_is_remote(id) {
+            let (workspace, id) = (workspace.clone(), id.clone());
+            menu = menu.item(
+                MenuItem::new(t("Learn from this conversation"))
+                    .icon(IconName::Lightbulb)
+                    .on_click(move |_, cx| {
+                        workspace.update(cx, |ws, cx| ws.learn_from_chat(&id, cx));
+                    }),
+            );
+        }
         if ws.sync_is_remote(id) {
             let (workspace, id) = (workspace.clone(), id.clone());
             menu = menu.item(

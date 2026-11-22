@@ -36,6 +36,8 @@ mod checkpoints;
 mod devices;
 #[path = "workspace_docs.rs"]
 mod docs;
+#[path = "workspace_memory.rs"]
+pub mod memory;
 #[path = "workspace_phone.rs"]
 mod phone;
 #[path = "workspace_preview.rs"]
@@ -235,6 +237,8 @@ pub struct Workspace {
     /// Interrupted workflow tries whose still-running turn is being checked.
     pub(super) workflow_reattaching: HashSet<(PathBuf, String)>,
     _workflow_ticker: Option<Task<()>>,
+    /// The shared memory: what sessions got, what was handed on.
+    pub shared_memory: memory::MemoryState,
     /// A newer Atrium, when one is out.
     pub update: Option<crate::updates::Update>,
     pub goals: HashMap<String, Goal>,
@@ -309,6 +313,7 @@ impl Workspace {
         workspace.init_devices(cx);
         workspace.init_sync(cx);
         workspace.init_workflow_runner(cx);
+        workspace.init_memory(cx);
         workspace.sync_phone(cx);
         workspace.start_schedules(cx);
         workspace.start_update_checks(cx);
@@ -367,6 +372,7 @@ impl Workspace {
             workflow_recovered: HashSet::new(),
             workflow_reattaching: HashSet::new(),
             _workflow_ticker: None,
+            shared_memory: Default::default(),
             update: None,
             goals: HashMap::new(),
             memory_off: HashSet::new(),
@@ -1721,10 +1727,12 @@ impl Workspace {
                     },
                     approval_policy: Some(self.settings.mode.approval_policy().into()),
                     sandbox: Some(self.settings.mode.sandbox_mode().into()),
-                    mcp_servers: self.user_mcp(&backend),
+                    mcp_servers: self.chat_mcp(&backend),
                     env: self.session_env(),
+                    developer_instructions: None,
                 };
                 let title = composed.text.clone();
+                let memory = self.memory_prep(&backend);
                 let (checkpoint, adopt) = self.checkpoint_new_chat(&backend, cx);
                 let folder = self.new_chat_folder(&backend, &title, cx);
                 let mut options = options;
@@ -1741,6 +1749,25 @@ impl Workspace {
                         }
                     }
                     checkpoint.await;
+                    // What earlier sessions learned, once, at the start.
+                    let block = match (memory, options.cwd.clone()) {
+                        (Some(memory), Some(cwd)) => {
+                            let query = title.clone();
+                            Some(
+                                cx.background_executor()
+                                    .spawn(async move {
+                                        memory.block(std::path::Path::new(&cwd), &query)
+                                    })
+                                    .await,
+                            )
+                        }
+                        _ => None,
+                    };
+                    if let Some(block) = &block
+                        && !block.is_empty()
+                    {
+                        options.developer_instructions = Some(block.text.clone());
+                    }
                     let started = client.thread_start(options).await;
                     let thread_id = match started {
                         Ok(mut meta) => {
@@ -1751,6 +1778,9 @@ impl Workspace {
                             }
                             let id = meta.id.clone();
                             let ok = this.update(cx, |ws, cx| {
+                                if let Some(block) = block {
+                                    ws.shared_memory.injected.insert(id.clone(), block);
+                                }
                                 if let Some((dir, key)) = adopt {
                                     ws.adopt_checkpoints(dir, key, id.clone(), cx);
                                 }
@@ -2022,6 +2052,7 @@ impl Workspace {
                     sandbox: Some(AccessMode::ReadOnly.sandbox_mode().into()),
                     mcp_servers: Vec::new(),
                     env: Vec::new(),
+                    developer_instructions: None,
                 };
                 cx.spawn(async move |this, cx| {
                     let meta = match client.thread_start(options).await {

@@ -441,6 +441,7 @@ impl Workspace {
             sandbox: Some(AccessMode::Auto.sandbox_mode().into()),
             mcp_servers: self.user_mcp(&backend),
             env: self.session_env(),
+            developer_instructions: None,
         };
         let dir = cwd.clone();
         cx.spawn(async move |this, cx| {

@@ -514,8 +514,11 @@ fn item(workspace: &Entity<Workspace>, item: &Item, live: bool, cx: &App) -> Any
                 .children(chips)
                 .when(!text.is_empty(), |column| {
                     column.child(
-                        MessageBubble::new(Role::User)
-                            .child(div().whitespace_normal().child(text.clone())),
+                        MessageBubble::new(Role::User).child(
+                            div()
+                                .whitespace_normal()
+                                .child(atrium_memory::inject::without_memory(text).to_string()),
+                        ),
                     )
                 })
                 .into_any_element()
