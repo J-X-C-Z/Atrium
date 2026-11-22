@@ -285,15 +285,26 @@ fn shared_link(tree: &Path, shared: &Path, create: bool) -> Result<()> {
             shared.display()
         );
     } else if create {
+        #[cfg(unix)]
         let target = Path::new("../..");
+        #[cfg(windows)]
+        let target = shared;
         #[cfg(unix)]
         let result = std::os::unix::fs::symlink(target, &link);
         #[cfg(windows)]
         let result = std::os::windows::fs::symlink_dir(target, &link).or_else(|_| {
-            // Only literal relative paths reach cmd; junctions need no symlink privilege.
+            // Junctions need no symlink privilege. Keep the target absolute so
+            // canonicalize() never has to resolve a relative reparse target.
             let out = Command::new("cmd.exe")
                 .current_dir(tree)
-                .args(["/d", "/c", "mklink", "/j", ".atrium", r"..\.."])
+                .args([
+                    "/d",
+                    "/c",
+                    "mklink",
+                    "/j",
+                    ".atrium",
+                    &target.to_string_lossy(),
+                ])
                 .output()?;
             if out.status.success() {
                 Ok(())
@@ -446,8 +457,10 @@ pub(crate) fn ensure_worktree(
     let shared = root.join(".atrium");
     let worktrees = shared.join("worktrees");
     let tree = worktrees.join(id);
-    require_dir(&shared, true)?;
-    require_dir(&worktrees, true)?;
+    require_dir(&shared, true)
+        .with_context(|| format!("checking project directory {}", shared.display()))?;
+    require_dir(&worktrees, true)
+        .with_context(|| format!("checking worktree directory {}", worktrees.display()))?;
     exclude_atrium(&root)?;
     check_atrium(&root)?;
     if metadata(&tree)?.is_none() {
@@ -706,8 +719,10 @@ pub(crate) fn remove_worktree(
     let shared = root.join(".atrium");
     let worktrees = shared.join("worktrees");
     let tree = worktrees.join(id);
-    require_dir(&shared, false)?;
-    require_dir(&worktrees, false)?;
+    require_dir(&shared, false)
+        .with_context(|| format!("checking project directory {}", shared.display()))?;
+    require_dir(&worktrees, false)
+        .with_context(|| format!("checking worktree directory {}", worktrees.display()))?;
     check_tree(root, &tree, &name)?;
     ensure!(
         git_dir(root, "--git-common-dir")?.canonicalize()?
