@@ -1199,6 +1199,8 @@ const ZH: &[(&str, &str)] = &[
     ("on {device}", "在 {device}"),
     // item 18: team
     ("Stand-in · {member}", "替补 · {member}"),
+    // groups
+    ("No notices to this group yet.", "这个群组还没有公告。"),
 ];
 
 #[cfg(test)]

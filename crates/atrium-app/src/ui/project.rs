@@ -322,6 +322,8 @@ pub struct AtriumPanel {
     pub cards: bool,
     pub notice_input: Entity<TextInput>,
     pub notice_to: String,
+    /// The group whose notices are listed and posted to; empty for all.
+    pub notice_group: String,
 }
 
 pub fn render_overview(
@@ -2076,7 +2078,41 @@ fn atrium_panel(
                     },
                 ));
             }
-            let post = (workspace.clone(), view.notice_input.clone(), to.clone());
+            let group = view.notice_group.clone();
+            let post_to = if group.is_empty() {
+                to.clone()
+            } else {
+                format!("@{group}")
+            };
+            let post = (workspace.clone(), view.notice_input.clone(), post_to);
+            let mut chips = div().flex().flex_wrap().gap_1();
+            let mut choices = vec![String::new()];
+            choices.extend(project.groups().0.into_iter().map(|(name, _)| name));
+            for choice in choices {
+                let label = if choice.is_empty() {
+                    t("All").to_string()
+                } else {
+                    format!("@{choice}")
+                };
+                let on = choice == group;
+                let root = root.clone();
+                chips = chips.child(
+                    Button::new(SharedString::from(format!("group-chip-{choice}")), label)
+                        .size(ControlSize::Sm)
+                        .variant(if on {
+                            ButtonVariant::Primary
+                        } else {
+                            ButtonVariant::Ghost
+                        })
+                        .on_click(move |_, _, cx| {
+                            let choice = choice.clone();
+                            root.update(cx, |r, cx| {
+                                r.notice_group = choice;
+                                cx.notify()
+                            })
+                        }),
+                );
+            }
             let composer = div()
                 .flex()
                 .flex_col()
@@ -2087,14 +2123,20 @@ fn atrium_panel(
                         .flex()
                         .items_center()
                         .gap_2()
-                        .child(
+                        .child(if group.is_empty() {
                             DropdownMenu::new(
                                 "notice-to",
                                 tf("To {who}", &[("who", &name_of(&to))]),
                                 targets,
                             )
-                            .variant(ButtonVariant::Ghost),
-                        )
+                            .variant(ButtonVariant::Ghost)
+                            .into_any_element()
+                        } else {
+                            div()
+                                .text_size(small)
+                                .child(tf("To {who}", &[("who", &format!("@{group}"))]))
+                                .into_any_element()
+                        })
                         .child(div().flex_1())
                         .child(
                             Button::new("post-notice", t("Post"))
@@ -2112,7 +2154,19 @@ fn atrium_panel(
                         ),
                 );
             let mut list = div().flex().flex_col().gap_2();
-            if project.notices.is_empty() {
+            if !group.is_empty()
+                && !project
+                    .notices
+                    .iter()
+                    .any(|n| n.to.iter().any(|t| *t == format!("@{group}")))
+            {
+                list = list.child(
+                    div()
+                        .text_size(small)
+                        .text_color(colors.fg_subtle)
+                        .child(t("No notices to this group yet.")),
+                );
+            } else if project.notices.is_empty() {
                 list = list.child(
                     div()
                         .text_size(small)
@@ -2121,7 +2175,12 @@ fn atrium_panel(
                 );
             }
             let newest = project.notices.len();
-            for (nth, notice) in project.notices.iter().rev().take(60).enumerate() {
+            let tag = format!("@{group}");
+            let shown = project
+                .notices
+                .iter()
+                .filter(|n| group.is_empty() || n.to.contains(&tag));
+            for (nth, notice) in shown.rev().take(60).enumerate() {
                 let from_atrium = notice.from == ATRIUM;
                 list = list.child(
                     Flash::new(
@@ -2173,6 +2232,7 @@ fn atrium_panel(
                 .flex_col()
                 .gap_3()
                 .child(composer)
+                .child(chips)
                 .child(list)
                 .into_any_element()
         }

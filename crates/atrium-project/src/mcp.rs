@@ -236,7 +236,12 @@ fn run(project: &mut Project, me: &str, name: &str, args: &Value) -> Result<Stri
             &text("result"),
         ),
         "notify" => project.notify(me, &list("to"), &text("text")),
-        "read_notices" => project.notices_for(me, args["recent"].as_bool().unwrap_or(false)),
+        "read_notices" => match args["group"].as_str().filter(|g| !g.trim().is_empty()) {
+            Some(group) => project.group_history(me, group),
+            None => project.notices_for(me, args["recent"].as_bool().unwrap_or(false)),
+        },
+        "create_group" => project.create_group(me, &text("name"), &list("members")),
+        "list_groups" => Ok(project.groups_text(me)),
         "write_plan" => project.write_plan(me, &text("text")),
         "write_status" => project.write_status(me, &text("text")),
         _ => Err(anyhow!("No tool {name}.")),
@@ -416,9 +421,9 @@ fn tools(target: &Target, with_devices: bool) -> Vec<Value> {
     }
     tools.push(tool(
         "notify",
-        "Post a short notice to other workstreams: a milestone, a changed interface, a question across scopes. It reaches them with their next message; a notice to the controller wakes it.",
+        "Post a short notice to other workstreams: a milestone, a changed interface, a question across scopes. It reaches them with their next message; a notice to the controller wakes it. Groups: `@leads` (the controller and the leads), `@<lead-id>` (that lead and its workers) and any group the controller made reach every member but you, without waking idle ones; mention `@<stream-id>` in the text to wake one.",
         json!({
-            "to": { "type": "array", "items": { "type": "string" }, "description": "Workstream ids, \"all\", or \"you\" for the user." },
+            "to": { "type": "array", "items": { "type": "string" }, "description": "Workstream ids, groups such as \"@leads\" or \"@<lead-id>\", \"all\", or \"you\" for the user." },
             "text": { "type": "string" }
         }),
         &["to", "text"],
@@ -426,7 +431,16 @@ fn tools(target: &Target, with_devices: bool) -> Vec<Value> {
     tools.push(tool(
         "read_notices",
         "Notices for you not handed to you yet (they also arrive with your next message), or with recent the last ones to and from you.",
-        json!({ "recent": { "type": "boolean" } }),
+        json!({
+            "recent": { "type": "boolean" },
+            "group": { "type": "string", "description": "A group of yours, such as \"@leads\": its whole history, to catch up." }
+        }),
+        &[],
+    ));
+    tools.push(tool(
+        "list_groups",
+        "The groups you are in (`@leads`, your lead's group, custom ones) with their members.",
+        json!({}),
         &[],
     ));
     tools.push(tool(
@@ -436,6 +450,15 @@ fn tools(target: &Target, with_devices: bool) -> Vec<Value> {
         &["text"],
     ));
     if role == Some(Role::Controller) {
+        tools.push(tool(
+            "create_group",
+            "Make (or replace) a group of workstreams for notices, referred to as `@<name>`. Leads and each lead's workers already have automatic groups.",
+            json!({
+                "name": { "type": "string", "description": "Letters, digits, - or _; not an existing workstream id, `leads` or `all`." },
+                "members": { "type": "array", "items": { "type": "string" }, "description": "Workstream ids." }
+            }),
+            &["name", "members"],
+        ));
         tools.push(tool(
             "write_plan",
             "Replace .atrium/plan.md: the goal, the milestones in order, which lead owns each, and the decisions that cut across leads.",
