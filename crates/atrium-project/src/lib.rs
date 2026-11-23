@@ -3217,6 +3217,21 @@ mod tests {
     }
 
     #[test]
+    fn a_task_with_a_running_stream_is_never_offered_for_placement_again() {
+        // Stand-ins apply only when a task starts: the scheduler places
+        // `startable_with` tasks, and a task that has its stream is not one.
+        let mut project = Project::default();
+        let mut boss = stream("boss", &[]);
+        boss.role = Role::Controller;
+        project.file.streams.push(boss);
+        project.tasks = vec![Task::parse("boss", "a", "# Job\nagent: claude\n")];
+        let task = project.tasks[0].clone();
+        let started = project.stream_from_task(&task, "claude").unwrap();
+        project.file.streams.push(started);
+        assert!(project.startable_with(|_| true).is_empty());
+    }
+
+    #[test]
     fn restart_leaves_pool_claims_to_the_pool_lifecycle() {
         let root = unique_root("atrium-recover-pool");
         let mut p = Project::open(&root).unwrap();

@@ -1197,6 +1197,8 @@ const ZH: &[(&str, &str)] = &[
     ("{n} files and checks", "{n} 项文件与检查"),
     // item 19: lanes
     ("on {device}", "在 {device}"),
+    // item 18: team
+    ("Stand-in · {member}", "替补 · {member}"),
 ];
 
 #[cfg(test)]
