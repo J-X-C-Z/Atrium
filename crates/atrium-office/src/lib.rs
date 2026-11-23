@@ -29,8 +29,8 @@ pub use report::{Change, Key, Lang, Location, Piece, Snapshot, changes, describe
 pub use sheet::{Cell, Sheet, SheetOp, Value, Workbook, a1, parse_input};
 pub use slides::{Deck, Shape, Slide, SlideOp};
 pub use word::{
-    Align, Atom, AtomKind, Block, EditError, Inline, Marks, NodeId, Para, ParaStyle, Place, Table,
-    WordDoc, WordOp, inline_text,
+    Align, Atom, AtomKind, Block, EditError, Footnote, Inline, Marks, NodeId, Para, ParaStyle,
+    Place, Table, WordDoc, WordOp, inline_text,
 };
 
 /// Which model a file opens as, by its extension.

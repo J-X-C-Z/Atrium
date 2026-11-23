@@ -145,7 +145,7 @@ pub enum LabelSuffix {
 }
 
 /// How a paragraph is laid out.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParaLook {
     pub before: Twips,
     pub after: Twips,
@@ -168,9 +168,46 @@ pub struct ParaLook {
     pub list: Option<ListLook>,
     /// Lines sit on the section's line grid (`docGrid`), as Chinese documents often do.
     pub snap_to_grid: bool,
+    /// Word's "allow punctuation to hang": a closing mark may sit past the
+    /// right edge instead of moving to the next line (`overflowPunct`).
+    pub overflow_punct: bool,
+    /// Add a quarter em between East Asian text and Latin text (`autoSpaceDE`).
+    pub auto_space_de: bool,
+    /// Add a quarter em between East Asian text and numbers (`autoSpaceDN`).
+    pub auto_space_dn: bool,
+    /// Justify every line, including the last (`jc="distribute"`).
+    pub distribute: bool,
     /// How the paragraph mark looks: sets the height of an empty paragraph,
     /// and what typing into it starts with.
     pub mark: crate::Marks,
+}
+
+impl Default for ParaLook {
+    fn default() -> Self {
+        Self {
+            before: 0,
+            after: 0,
+            line: LineSpacing::default(),
+            contextual: false,
+            left: 0,
+            right: 0,
+            first_line: 0,
+            keep_next: false,
+            keep_lines: false,
+            page_break_before: false,
+            widow_control: false,
+            tabs: Vec::new(),
+            shading: None,
+            borders: Borders::default(),
+            list: None,
+            snap_to_grid: false,
+            overflow_punct: true,
+            auto_space_de: true,
+            auto_space_dn: true,
+            distribute: false,
+            mark: crate::Marks::default(),
+        }
+    }
 }
 
 /// One page setup. A document has one per section.
@@ -260,6 +297,8 @@ pub struct TableLook {
     pub rows: Vec<Option<(Twips, bool)>>,
     /// Rows repeated at the top of each page.
     pub header_rows: usize,
+    /// Rows that may not split across pages (`cantSplit`).
+    pub cant_split: Vec<bool>,
     pub borders: Borders,
     /// Between cells inside the table.
     pub inside_h: Option<Border>,

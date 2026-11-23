@@ -60,6 +60,13 @@ pub trait Shaper {
     /// shaper falls back to other fonts for characters `font` lacks.
     fn shape(&self, text: &str, font: &FontKey) -> Vec<Cluster>;
     fn metrics(&self, font: &FontKey) -> Metrics;
+    /// The underline's distance below the baseline and its thickness, in
+    /// points. A shaper that knows its font overrides this; the default is
+    /// close to common Latin and CJK faces.
+    fn underline(&self, font: &FontKey) -> (f32, f32) {
+        let m = self.metrics(font);
+        (m.descent * 0.5, (font.size / 18.0).max(0.5))
+    }
 }
 
 /// A shaper where every character is as wide as the font size and Latin
@@ -197,6 +204,8 @@ pub struct Page {
     pub height: f32,
     /// The number printed on it.
     pub number: u32,
+    /// The section this page belongs to, an index into `WordDoc::sections()`.
+    pub section: usize,
     pub background: Option<Rgb>,
     pub items: Vec<Item>,
 }
