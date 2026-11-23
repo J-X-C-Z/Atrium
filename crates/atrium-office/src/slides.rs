@@ -8,6 +8,7 @@ pub struct Shape {
     /// Position and size in points: x, y, width, height.
     pub frame: [i32; 4],
     pub paras: Vec<Para>,
+    pub look: crate::look::ShapeLook,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -15,7 +16,9 @@ pub struct Slide {
     pub hidden: bool,
     /// Width and height in points.
     pub size: (i32, i32),
+    /// Drawn in order, the first at the back.
     pub shapes: Vec<Shape>,
+    pub background: Option<crate::look::Rgb>,
 }
 
 impl Slide {

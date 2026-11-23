@@ -1,0 +1,10 @@
+[package]
+name = "atrium-layout"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Lays out Word documents and slides as pages: lines, glyph runs, rules and pictures, with hit testing and caret positions for an editor."
+
+[dependencies]
+atrium-office = { path = "../atrium-office" }

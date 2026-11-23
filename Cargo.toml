@@ -12,6 +12,7 @@ members = [
     "crates/acp-client",
     "crates/atrium-project",
     "crates/atrium-office",
+    "crates/atrium-layout",
     "crates/atrium-preview",
     "crates/atrium-workflow",
     "crates/atrium-memory",

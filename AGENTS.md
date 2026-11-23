@@ -15,8 +15,8 @@ existing functions to call, the tests to write and when it is done.
 
 ## Backlog
 
-**Next up: none** — the backend backlog below is complete. Real-device
-acceptance (multi-device items 12/13 and workflow W1 in
+**Next up: 14**, then 15 — editing Word and PowerPoint on their real
+pages. Real-device acceptance (multi-device items 12/13 and workflow W1 in
 `docs/backend-acceptance-matrix.md`) is run by the owner on real machines;
 do not mark it done from mocks.
 
@@ -35,6 +35,8 @@ do not mark it done from mocks.
 | 11 | ✓ done in #3. **Workflows** (`atrium-workflow`: template format, run state machine, file checks, prompts and the built-in math modeling template built; UI on the UI side): the runner that starts an agent per step, waits, checks (`command`, `pdf_pages`, `review`), retries with the reasons, sends faults back, stops at gates and survives restarts; template and run storage; the TeX environment check | [`docs/workflow-implementation.md`](docs/workflow-implementation.md) | — |
 | 12 | ✓ done in #4. **Windows paths**: the git worktree, checkpoint and move tests fail on Windows with `os error 123`; make `Native backend acceptance` green on all three systems | [`docs/windows-git-paths.md`](docs/windows-git-paths.md) | 5 |
 | 13 | ✓ done in #5. **Workflow runner, after a restart**: re-attach a step whose turn is still running instead of retrying it (the one runner limit left in the brief) | [`docs/workflow-implementation.md`](docs/workflow-implementation.md) "Yours" 2 | 11 |
+| 14 | **Document looks in the file binding** (`look.rs` types and `WordOp::SetLook` built): read every font, size, spacing, indent, list, section, header/footer, table and picture value into the model, resolved through styles, numbering and theme; write formatting back as minimal `rPr`/`pPr`; the same for slides. Three PRs: 14a read Word, 14b write Word, 14c slides | [`docs/layout-engine-implementation.md`](docs/layout-engine-implementation.md) | 9 |
+| 15 | **Layout engine** (`atrium-layout` API, navigation and a reference engine built; the page editor on the UI side): lay documents out as Word does — line breaking with Chinese rules, justification, tabs, line spacing and grid, keeps and widows, sections and columns, tables across pages, floating pictures, footnotes — and relayout fast enough for typing. Five PRs, 15a–15e | [`docs/layout-engine-implementation.md`](docs/layout-engine-implementation.md) | 14 |
 
 Do one item per pull request. In each PR, tick its row here (add "✓ done in
 #N") and list which of the brief's tests and end-to-end checks you ran.
@@ -50,6 +52,8 @@ crates/atrium-project   projects, no GPUI: files, roles, tasks and roadmaps (lib
                         agent operations (agent.rs), task pools (pool.rs),
                         autopilot model (autopilot.rs), the `atrium` MCP server (mcp.rs),
                         the agent skill (skill.rs, text in skills/atrium/SKILL.md)
+crates/atrium-office    Word/Excel/PowerPoint model, looks (look.rs) and the lossless file binding
+crates/atrium-layout    pages from the model: lines, items, caret and hit testing (no GPUI)
 crates/atrium-app       the GPUI app; Workspace state and backend calls in
                         workspace*.rs (projects: workspace_project.rs); UI in ui/
 ```

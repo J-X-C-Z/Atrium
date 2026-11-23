@@ -13,6 +13,7 @@ mod xml;
 mod zip_edit;
 pub(crate) use package::{Limits, Package};
 mod file_binding;
+pub mod look;
 mod report;
 mod sheet;
 mod sheet_binding;

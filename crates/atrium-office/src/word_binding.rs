@@ -248,6 +248,7 @@ impl<'a> Context<'a> {
                 id: node.range.start as NodeId,
                 rows,
                 merged,
+                look: Default::default(),
             })
         } else {
             Block::Opaque {
@@ -324,6 +325,7 @@ impl<'a> Context<'a> {
             align,
             inlines,
             locked,
+            look: Default::default(),
         }
     }
 
@@ -374,6 +376,7 @@ impl<'a> Context<'a> {
                     underline: read("u"),
                     strike: read("strike"),
                     link: link.map(str::to_owned),
+                    ..Marks::default()
                 };
                 for n in &n.children {
                     if n.is(ns, "t") || n.is(ns, "delText") {
@@ -525,6 +528,7 @@ fn atom(node: &XmlNode, kind: AtomKind) -> Inline {
     Inline::Atom(Atom {
         id: node.range.start as NodeId,
         kind,
+        look: Default::default(),
     })
 }
 fn edit_para_properties(
@@ -1027,6 +1031,12 @@ impl WordBinding {
                 let after = set_property(source, p, ns, "jc", value)?;
                 assigned = Some((p.range.start, *para));
                 (p.range.clone(), after)
+            }
+            // Written back in backlog item 14 (docs/layout-engine-implementation.md).
+            WordOp::SetLook { .. } => {
+                return Err(EditError::Invalid(
+                    "paragraph spacing and indents cannot be saved yet".into(),
+                ));
             }
             WordOp::DeletePara { para } => {
                 let (p, container) = lookup(*para)?;

@@ -102,6 +102,7 @@ impl SlidesBinding {
                     hidden,
                     size,
                     shapes,
+                    background: None,
                 });
             }
         }
@@ -256,9 +257,15 @@ impl SlidesBinding {
                 align,
                 inlines,
                 locked,
+                look: Default::default(),
             });
         }
-        Shape { id, frame, paras }
+        Shape {
+            id,
+            frame,
+            paras,
+            look: Default::default(),
+        }
     }
 
     pub(crate) fn changes(
@@ -324,6 +331,7 @@ fn read_marks(r: Option<&XmlNode>) -> Marks {
         underline: field("u").is_some_and(|s| s != "none"),
         strike: matches!(field("strike"), Some("sngStrike" | "dblStrike")),
         link: None,
+        ..Marks::default()
     }
 }
 

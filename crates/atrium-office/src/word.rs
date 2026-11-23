@@ -16,6 +16,13 @@ pub struct Marks {
     pub underline: bool,
     pub strike: bool,
     pub link: Option<String>,
+    /// The effective fonts; empty names take the document's default.
+    pub fonts: crate::look::Fonts,
+    /// The effective size; `None` takes the document's default.
+    pub size: Option<crate::look::Twips>,
+    pub color: Option<crate::look::Rgb>,
+    pub highlight: Option<crate::look::Rgb>,
+    pub baseline: crate::look::Baseline,
 }
 
 /// What a paragraph holds, in order.
@@ -35,12 +42,14 @@ pub enum Inline {
 pub struct Atom {
     pub id: NodeId,
     pub kind: AtomKind,
+    pub look: crate::look::AtomLook,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AtomKind {
     /// With the picture extracted to a file the UI can show, when there is one.
     Image(Option<PathBuf>),
+    /// The field's instruction, such as `PAGE` or `TOC \o "1-3"`; what it shows is in `Atom::look.shown`.
     Field(String),
     Footnote,
     Other(String),
@@ -80,6 +89,7 @@ pub struct Para {
     /// Holds tracked changes, comments, complex fields, content controls or
     /// math: shown, but edited only in Word.
     pub locked: bool,
+    pub look: crate::look::ParaLook,
 }
 
 impl Para {
@@ -97,6 +107,7 @@ impl Para {
                 }]
             },
             locked: false,
+            look: Default::default(),
         }
     }
 
@@ -125,6 +136,7 @@ pub struct Table {
     pub rows: Vec<Vec<Vec<Block>>>,
     /// Cells, as row and column, folded into the cell on their left.
     pub merged: Vec<(usize, usize)>,
+    pub look: crate::look::TableLook,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -176,6 +188,11 @@ pub enum WordOp {
         para: NodeId,
         align: Align,
     },
+    /// Replaces how a paragraph is laid out: spacing, indents, tabs, list…
+    SetLook {
+        para: NodeId,
+        look: Box<crate::look::ParaLook>,
+    },
 }
 
 /// Where a new paragraph goes.
@@ -218,6 +235,10 @@ impl std::error::Error for EditError {}
 pub struct WordDoc {
     pub(crate) blocks: Vec<Block>,
     next: NodeId,
+    /// One per section, in order; empty means one A4 section.
+    pub(crate) sections: Vec<crate::look::Section>,
+    /// How text looks where nothing else says: `docDefaults` and the Normal style.
+    pub(crate) defaults: Marks,
 }
 
 /// Where a paragraph sits: its container's blocks and its index there.
@@ -245,11 +266,37 @@ impl WordDoc {
         Self {
             blocks,
             next: FRESH,
+            sections: Vec::new(),
+            defaults: Marks::default(),
         }
+    }
+
+    /// Sets the sections and the default run look. Loaders call this after `from_blocks`.
+    pub fn with_look(mut self, sections: Vec<crate::look::Section>, defaults: Marks) -> Self {
+        self.sections = sections;
+        self.defaults = defaults;
+        self
     }
 
     pub fn blocks(&self) -> &[Block] {
         &self.blocks
+    }
+
+    /// The sections in order, at least one.
+    pub fn sections(&self) -> std::borrow::Cow<'_, [crate::look::Section]> {
+        if self.sections.is_empty() {
+            std::borrow::Cow::Owned(vec![crate::look::Section {
+                new_page: true,
+                ..Default::default()
+            }])
+        } else {
+            std::borrow::Cow::Borrowed(&self.sections)
+        }
+    }
+
+    /// How text looks where nothing else says.
+    pub fn defaults(&self) -> &Marks {
+        &self.defaults
     }
 
     fn para_mut(&mut self, id: NodeId) -> Result<&mut Para, EditError> {
@@ -308,6 +355,13 @@ impl WordDoc {
                 WordOp::SetAlign {
                     para,
                     align: std::mem::replace(&mut p.align, align),
+                }
+            }
+            WordOp::SetLook { para, look } => {
+                let p = self.para_mut(para)?;
+                WordOp::SetLook {
+                    para,
+                    look: Box::new(std::mem::replace(&mut p.look, *look)),
                 }
             }
             WordOp::InsertPara {
@@ -467,6 +521,7 @@ mod tests {
                     vec![Block::Paragraph(Para::new(5, ParaStyle::Normal, "50 万"))],
                 ]],
                 merged: vec![],
+                look: Default::default(),
             }),
         ])
     }

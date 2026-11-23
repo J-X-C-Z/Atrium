@@ -648,6 +648,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "atrium-layout"
+version = "0.1.0"
+dependencies = [
+ "atrium-office",
+]
+
+[[package]]
 name = "atrium-memory"
 version = "0.1.0"
 dependencies = [
