@@ -312,8 +312,9 @@ impl SlidesBinding {
         } else {
             return Err(damaged("invalid presentation root"));
         };
-        let size = named(root, p, "sldSz")
-            .map_or((720, 540), |n| (emu(attr(n, "cx")), emu(attr(n, "cy"))));
+        let size = named(root, p, "sldSz").map_or((720, 540), |n| {
+            (points(attr(n, "cx")), points(attr(n, "cy")))
+        });
         let rels: HashMap<_, _> = package
             .relationships(&main)?
             .into_iter()

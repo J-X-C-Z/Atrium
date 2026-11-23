@@ -418,8 +418,9 @@ pub(crate) fn table(cx: &mut Ctx<'_>, t: &Table, width: f32) -> (Vec<Row>, Vec<I
             ));
         }
         let free = cell_h - spec.pad[0] - spec.pad[2] - spec.content_h;
-        let dy = y0
-            + spec.pad[0]
+        // Lines sit relative to the row that holds the cell, like the items
+        // (which are shifted back by the row's top below).
+        let dy = spec.pad[0]
             + match spec.look.v_align {
                 VAlign::Top => 0.0,
                 VAlign::Center => free / 2.0,

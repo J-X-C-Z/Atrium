@@ -145,3 +145,51 @@ fn autofit_and_font_scale_grow_or_shrink_text() {
         .unwrap();
     assert_eq!(size, 9.0);
 }
+
+/// Slides are laid out in points: a 16:9 deck is 720 x 405 pt, not twips,
+/// and its title text sits inside the page.
+#[test]
+fn fixture_deck_pages_are_point_sized_with_text_inside() {
+    let layout = layout_deck(&deck(), &FixedShaper);
+    assert_eq!(layout.pages.len(), 2);
+    for page in &layout.pages {
+        assert_eq!((page.width, page.height), (720.0, 405.0));
+        let texts: Vec<_> = page
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Text {
+                    x, baseline, text, ..
+                } => Some((*x, *baseline, text.as_str())),
+                _ => None,
+            })
+            .collect();
+        // The fixture's charts and tables deliberately run past the slide
+        // edge, so only require that most text lands on the page.
+        let inside = texts
+            .iter()
+            .filter(|(x, y, _)| (0.0..=page.width).contains(x) && (0.0..=page.height).contains(y))
+            .count();
+        assert!(inside > 0 && inside * 2 >= texts.len(), "{texts:?}");
+    }
+    let title = layout.pages[0]
+        .items
+        .iter()
+        .find_map(|i| match i {
+            Item::Text {
+                x, baseline, text, ..
+            } if text.contains("Inherited") => Some((*x, *baseline)),
+            _ => None,
+        })
+        .expect("title text");
+    assert!(title.0 >= 0.0 && title.0 < 720.0 && title.1 > 0.0 && title.1 < 405.0);
+    let first: String = layout.pages[0]
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(first.contains("Inherited title"), "{first}");
+}
