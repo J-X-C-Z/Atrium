@@ -19,7 +19,9 @@ existing functions to call, the tests to write and when it is done.
 [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md)),
 in the order the brief gives (32 first). Keep T3's MIT notice with ported
 code. Running agents through T3 itself (`docs/t3-extension-plan.md`) is
-paused; don't build it. Earlier: items 14–17 are merged; real-file checks of Word,
+paused; don't build it. Side lanes 33–37
+([`docs/parallel-lanes.md`](docs/parallel-lanes.md)) don't touch the port: take
+one whenever a port PR waits for review or a real-machine check. Earlier: items 14–17 are merged; real-file checks of Word,
 PowerPoint and Excel are next. Real-device acceptance (multi-device items 12/13 and workflow W1 in
 `docs/backend-acceptance-matrix.md`) is run by the owner on real machines;
 do not mark it done from mocks.
@@ -58,6 +60,11 @@ do not mark it done from mocks.
 | 30 | **App on the engine**: model pill, quiet extras, queue chips, usage banner, chat list by state, changes panel, work log | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | 25, 26 |
 | 31 | **Overlaps**: scheduled tasks, PR watch, workflows; fold what Atrium lacks into Atrium's own | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | 30 |
 | 32 | **Runtime seam** (`atrium-runtime`): the project layer talks to agents through one trait | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | — |
+| 33 | **Team gaps**: apply member model/effort, pool workers through `pick`, persist the stand-in badge, stand-in on ACP limits without the autopilot | [`docs/parallel-lanes.md`](docs/parallel-lanes.md) | — |
+| 34 | **Soak and footprint**: hours-long headless runs with mocks, RSS/files/CPU over time, leak fixes, the same numbers for T3 | [`docs/parallel-lanes.md`](docs/parallel-lanes.md) | — |
+| 35 | **Office vs LibreOffice**: render a generated corpus both ways, per-page diff report, fix the worst differences | [`docs/parallel-lanes.md`](docs/parallel-lanes.md) | — |
+| 36 | **Installers and updates**: dmg (signed when secrets exist), msi/exe, AppImage/deb, node as a service, release workflow | [`docs/parallel-lanes.md`](docs/parallel-lanes.md) | — |
+| 37 | **Small cleanups**: the `&PathBuf` warning, symlinked-path keys, CI on pushes to main | [`docs/parallel-lanes.md`](docs/parallel-lanes.md) | — |
 
 Do one item per pull request. In each PR, tick its row here (add "✓ done in
 #N") and list which of the brief's tests and end-to-end checks you ran.
