@@ -62,7 +62,7 @@ impl Project {
         Ok(project)
     }
 
-    fn me(&self, me: &str) -> Result<&Workstream> {
+    pub(crate) fn me(&self, me: &str) -> Result<&Workstream> {
         self.stream(me)
             .ok_or_else(|| anyhow!("`{me}` is not a workstream of this project"))
     }
@@ -428,8 +428,22 @@ impl Project {
         }
         let unknown: Vec<&String> = to
             .iter()
-            .filter(|t| !matches!(t.as_str(), "all" | crate::YOU) && self.stream(t).is_none())
+            .filter(|t| {
+                !t.starts_with('@')
+                    && !matches!(t.as_str(), "all" | crate::YOU)
+                    && self.stream(t).is_none()
+            })
             .collect();
+        let groups = self.groups();
+        let own_role = self.me(me)?.role;
+        for group in to.iter().filter_map(|t| t.strip_prefix('@')) {
+            let Some(members) = groups.members(group) else {
+                bail!("No group `@{group}`. Yours:\n{}", self.groups_text(me));
+            };
+            if own_role != Role::Controller && !members.iter().any(|m| m == me) {
+                bail!("You are not in `@{group}`.");
+            }
+        }
         if !unknown.is_empty() {
             let known: Vec<String> = self
                 .file
@@ -455,11 +469,12 @@ impl Project {
     /// addressed to it whether handed or not.
     pub fn notices_for(&self, me: &str, recent: bool) -> Result<String> {
         self.me(me)?;
+        let groups = self.groups();
         let notices: Vec<&ProjectNotice> = if recent {
             let mine: Vec<&ProjectNotice> = self
                 .notices
                 .iter()
-                .filter(|n| n.is_for(me) || n.from == me)
+                .filter(|n| n.from == me || groups.reaches(n, me, true))
                 .collect();
             mine[mine.len().saturating_sub(20)..].to_vec()
         } else {

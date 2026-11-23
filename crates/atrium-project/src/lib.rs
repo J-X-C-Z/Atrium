@@ -26,6 +26,7 @@ pub mod agent;
 pub mod autopilot;
 pub mod devices;
 mod git;
+pub mod groups;
 pub mod mcp;
 pub mod notice_delivery;
 pub mod pool;
@@ -662,6 +663,8 @@ pub struct Project {
     /// Every task file, sorted by owner and id.
     pub tasks: Vec<Task>,
     pub notices: Vec<ProjectNotice>,
+    /// `.atrium/groups.json`: groups the controller made, by name.
+    pub custom_groups: std::collections::BTreeMap<String, Vec<String>>,
     /// Scope crossings seen this session.
     pub crossings: Vec<Crossing>,
     /// `(stream, path)` pairs whose change to another computer's folder was
@@ -779,6 +782,7 @@ impl Project {
             dir.join("brief.md"),
             dir.join("notices.md"),
             dir.join("plan.md"),
+            dir.join("groups.json"),
         ];
         for sub in ["contracts", "status", "tasks"] {
             paths.push(dir.join(sub));
@@ -810,6 +814,7 @@ impl Project {
         self.brief = fs::read_to_string(dir.join("brief.md")).unwrap_or_default();
         self.notices =
             parse_notices(&fs::read_to_string(dir.join("notices.md")).unwrap_or_default());
+        self.custom_groups = groups::read_custom(&dir.join("groups.json"));
         self.contracts = read_dir_texts(&dir.join("contracts"));
         self.statuses = read_dir_texts(&dir.join("status"))
             .into_iter()
@@ -1315,12 +1320,11 @@ impl Project {
         let Some(own) = self.stream(stream) else {
             return Vec::new();
         };
-        let worker = own.role == Role::Worker;
+        let groups = self.groups();
         self.notices
             .iter()
             .skip(own.notices_seen)
-            .filter(|n| n.is_for(stream))
-            .filter(|n| !worker || n.to.iter().any(|to| to == stream))
+            .filter(|n| groups.reaches(n, stream, own.role != Role::Worker))
             .collect()
     }
 
@@ -1390,12 +1394,12 @@ impl Project {
             return Ok(NoticePreparation::Blocked);
         };
         let notices = self.notices_from_disk()?;
+        let groups = self.groups();
         let unread = notices
             .get(target.notices_seen..)
             .context("notice journal no longer contains the saved cursor")?
             .iter()
-            .filter(|n| n.is_for(stream))
-            .filter(|n| target.role != Role::Worker || n.to.iter().any(|to| to == stream))
+            .filter(|n| groups.reaches(n, stream, target.role != Role::Worker))
             .collect::<Vec<_>>();
         if unread.is_empty() {
             return Ok(NoticePreparation::Empty);
@@ -1667,7 +1671,7 @@ impl Project {
              - `{dir}/status/{id}.md`: your status. Keep it current with the headings Focus, Done, Next, Touching (files you are changing) and Questions.\n\
              - `{dir}/notices.md`: append-only. To tell others something, append one line: `- YYYY-MM-DD HH:MM · {id} → <id or all>: <message>`.\n\
              New notices for you are added to your next message, so there is no need to check for them.\n\n\
-             You have a task pool and up to {max} sub-agents to work it. Break the current phase into self-contained, checkable tasks and add them all at once (`create_tasks`, or one file each as `{dir}/tasks/{id}/<task-id>.md` with a `# Title`, `status: open`, optionally `scope:` inside yours, `after: <ids>` for tasks that must be done first and `priority: high`, then what to do and how it will be checked). Sub-agents start on their own; each claims a task, finishes it and claims the next, without you. You are woken with their results when fewer than one task per sub-agent is left: review them, tick your roadmap, and add the next batch so they never run dry. Do the parts that need your judgement yourself.\n\n\
+             {groups}You have a task pool and up to {max} sub-agents to work it. Break the current phase into self-contained, checkable tasks and add them all at once (`create_tasks`, or one file each as `{dir}/tasks/{id}/<task-id>.md` with a `# Title`, `status: open`, optionally `scope:` inside yours, `after: <ids>` for tasks that must be done first and `priority: high`, then what to do and how it will be checked). Sub-agents start on their own; each claims a task, finishes it and claims the next, without you. You are woken with their results when fewer than one task per sub-agent is left: review them, tick your roadmap, and add the next batch so they never run dry. Do the parts that need your judgement yourself.\n\n\
              If your part has a user interface, save a screenshot of it to `{dir}/previews/{id}.png` at the end of each phase (overwrite the last one): the user sees it beside your progress.\n\n\
              Read the brief and the contracts, write your status file, then work toward your goal on your own. Stop to ask only when a decision really needs me.",
             name = stream.name,
@@ -1676,6 +1680,7 @@ impl Project {
             goal = stream.goal.trim(),
             scope = scope_label(&stream.scope),
             others = self.lead_lines(&stream.id),
+            groups = self.groups_line(&stream.id),
             dir = DIR,
             max = self.file.max_workers.max(1),
         )
@@ -1694,12 +1699,14 @@ impl Project {
             "You are a pool sub-agent (id `{id}`) of the lead `{lead}` in the project \"{project}\". The lead keeps a pool of tasks in `{dir}/tasks/{lead}/`; you and other sub-agents work through it, one task at a time, without waiting for anyone.\n\n\
              Your scope: {scope}, unless a task names a narrower one. Do not change files outside it.\n\n\
              Read `{dir}/brief.md` and follow it. Do not edit the brief, the contracts, the plan or task files other than the one you hold, and do not start sub-agents.\n\n\
+             {groups}\
              The loop: do the task you hold, then `finish_task` with what you changed, how you checked it and anything left open (status `failed` with the reason if you cannot). `finish_task` claims your next task and gives it to you: carry straight on with it. Stop only when it says the pool is empty. Keep each task's work separate; do not rely on what you remember from earlier tasks without checking the files.\n\n\
              Without the tools: work only on the task Atrium claimed for you. Finish it by adding `## Result` and setting `status: done` (or `failed` with the reason), keeping `claimed_by: {id}`. End your turn; Atrium assigns the next task.\n\n\
              {first}",
             id = stream.id,
             project = self.file.name,
             scope = scope_label(&stream.scope),
+            groups = self.groups_line(&stream.id),
             dir = DIR,
         )
     }
@@ -1724,11 +1731,13 @@ impl Project {
              Your task, from `{path}`:\n{goal}\n\n\
              Your scope: {scope}. Do not change files outside it.\n\n\
              Read `{dir}/brief.md` and follow it. Do not edit the brief, the contracts, the plan or other task files, and do not start sub-agents of your own; if something there needs to change, say so in your result.\n\n\
+             {groups}\
              When you are done, add a short report under `## Result` at the end of `{path}`: what you changed, how you checked it, and anything left open. Then change its `status:` line to `done`, or to `failed` with the reason in the result if you could not do it. Your lead is told as soon as you do.",
             id = stream.id,
             project = self.file.name,
             goal = stream.goal.trim(),
             scope = scope_label(&stream.scope),
+            groups = self.groups_line(&stream.id),
             dir = DIR,
         )
     }

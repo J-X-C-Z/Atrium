@@ -27,9 +27,7 @@ use super::{CODEX, Composed, Notice, View, Workspace};
 use crate::i18n::tf;
 use crate::{
     agents,
-    project::{
-        self, ATRIUM, Project, Role, Task, TaskStatus, Workstream, controller_notice, wake_allowed,
-    },
+    project::{self, ATRIUM, Project, Role, Task, TaskStatus, Workstream, wake_allowed},
 };
 
 #[path = "workspace_autopilot.rs"]
@@ -385,7 +383,7 @@ impl Workspace {
                     .notices
                     .iter()
                     .skip((*seen).min(project.notices.len()))
-                    .any(|n| controller_notice(n, &controller.id))
+                    .any(|n| project.notice_wakes(n, &controller.id))
             {
                 self.project_schedule
                     .pending
@@ -2036,6 +2034,7 @@ fn focus_of(status: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use atrium_project::controller_notice;
 
     #[test]
     fn the_focus_is_read_from_a_status_file() {

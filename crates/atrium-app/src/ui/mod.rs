@@ -202,6 +202,8 @@ pub struct RootView {
     pub(super) overview_cards: bool,
     notice_input: Entity<TextInput>,
     notice_to: String,
+    /// The group chip selected in the notices list; empty for all.
+    notice_group: String,
     /// The changes pane: open or not, and the comments being written.
     pub(super) review: changes::Review,
     comment_input: Entity<TextInput>,
@@ -284,6 +286,7 @@ impl RootView {
             overview_cards: false,
             notice_input,
             notice_to: "all".into(),
+            notice_group: String::new(),
             review: changes::Review::default(),
             comment_input,
             tools: tools::Tools::new(window, cx),
@@ -1288,6 +1291,7 @@ impl Render for RootView {
                 cards: self.overview_cards,
                 notice_input: self.notice_input.clone(),
                 notice_to: self.notice_to.clone(),
+                notice_group: self.notice_group.clone(),
             };
             project::render_overview(&self.workspace, cx.entity(), panel, collapsed, window, cx)
         } else {
