@@ -15,7 +15,11 @@ existing functions to call, the tests to write and when it is done.
 
 ## Backlog
 
-**Backlog clear.** Items 14–17 are merged; real-file checks of Word,
+**Next: native parity, items 20–32** (track A, brief in
+[`docs/native-parity-implementation.md`](docs/native-parity-implementation.md)),
+in the order the brief gives (32 first). Track B — running agents through T3
+Code (`docs/t3-extension-plan.md`) — is done on the owner's Claude side; don't
+build it. Earlier: items 14–17 are merged; real-file checks of Word,
 PowerPoint and Excel are next. Real-device acceptance (multi-device items 12/13 and workflow W1 in
 `docs/backend-acceptance-matrix.md`) is run by the owner on real machines;
 do not mark it done from mocks.
@@ -41,6 +45,19 @@ do not mark it done from mocks.
 | 17 | ✓ done (merged from Codex's branches). **Sheets in full** (`CellStyle`, `Workbook::styles`, `Cell::style`, `SheetLook`, conditional rules, `SheetOp::SetStyle`, `Workbook::shown` built; the grid on the UI side): read cell styles, number formats, column widths, row heights, hidden rows/columns, frozen panes, conditional formats and drawings; show values through their number formats and conditional rules; write formatting, sizes and panes back. Three PRs, 17a–17c | [`docs/slides-sheets-implementation.md`](docs/slides-sheets-implementation.md) | 16c for charts |
 | 18 | ✓ done. **Teams** (`atrium-team`, the settings page and Codex's limit hook built): give the controller and leads the team roster, start tasks on a stand-in while a member's limit is hit or it cannot start, mark ACP agents' limits from failed turns, and tell a parent when its worker goes in circles. Small on purpose: no routing rules in code | [`docs/team-implementation.md`](docs/team-implementation.md) | 1, 3 |
 | 19 | ✓ done. **Projects across computers** (`spread.rs`, the Atrium Workspace settings, remote start folders and the kickoff section built): the `atrium` tools over the network for agents on other computers (`/v1/mcp`), tool wording in their kickoffs, `device_list`/`device_read`/`device_copy`, notices when a computer writes a folder it does not own, the device on each lane | [`docs/spread-projects-implementation.md`](docs/spread-projects-implementation.md) | 4, 10 |
+| 20 | **Agent capabilities**: one record per session of what the agent supports; the UI shows only supported controls | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | 32 |
+| 21 | **Composer**: one model · effort · speed pill, approval mode only when not default, overflow menu, shortcuts | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | 20 |
+| 22 | **Queue and steer**: queued messages as editable chips, steer/queue setting, prompt recall, per-thread drafts | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | 20 |
+| 23 | **Usage limits everywhere**: banner, all windows for all agents and devices, continue after reset, context window | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | 20 |
+| 24 | **Mid-thread settings**: model/effort/tier/approval apply to a loaded thread, or say when they take effect | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | 20 |
+| 25 | **Codex protocol completeness**: MCP status and elicitation, skills, config, delete, read state, `!command`, read-vs-write | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | — |
+| 26 | **Claude Code natively**: `claude-client` over the CLI's streaming JSON mode (subagents, tasks, skills, usage, permissions), ACP kept as fallback | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | 20 |
+| 27 | **Antigravity specifics**: sign-in, usage, skills, child work | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | 20, 23 |
+| 28 | **Chat list by state**: Pinned / Working / Recent / Archived, undo toasts, optional grouping by project | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | — |
+| 29 | **Changes panel and work log**: changed-files tree with diffs, grouped tool rows with timers and an inspector, plan/todo cards | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | — |
+| 30 | **Rewind**: edit an earlier message and continue from there (files and agent rolled back) | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | 20 |
+| 31 | **Devices**: heartbeat and wake probe, per-device results, threads that continue from any device via a node event log | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | — |
+| 32 | **Agent-runtime seam** (`atrium-runtime`): the project layer talks to agents through one trait; shared with track B | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | — |
 
 Do one item per pull request. In each PR, tick its row here (add "✓ done in
 #N") and list which of the brief's tests and end-to-end checks you ran.

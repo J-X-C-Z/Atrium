@@ -1,4 +1,8 @@
-# Atrium 作为 T3 Code 的能力扩展层：改造方案
+# Atrium 作为 T3 Code 的能力扩展层：改造方案（路线 B）
+
+> 与路线 A（`docs/native-parity-implementation.md`，Codex 在 Rust 里重写原生能力）并行试验。
+> 两条路线共用第 32 项的 agent 运行层接口：项目、团队、记忆、群聊只写一份，下面分别接
+> Atrium 原生实现和 T3 实现。路线 B 由 Claude 这边做，不交给 Codex。试用一段时间后保留更好的一条。
 
 日期 2026-11-23。依据：`docs/t3-spike.md`（T3 0.1.11 无界面驱动验证）。
 
