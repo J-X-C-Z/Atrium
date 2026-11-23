@@ -1,5 +1,6 @@
 //! Read-only WordprocessingML projection. The original package remains the
 //! authority for formatting, unknown content, and any later save.
+use crate::word_looks::Looks;
 use crate::{
     Align, Atom, AtomKind, Block, Inline, Marks, NodeId, OpenError, Package, Para, ParaStyle,
     Table, WordDoc,
@@ -20,6 +21,7 @@ fn project(
     document: &XmlPart,
     styles: Option<&XmlPart>,
     numbering: Option<&XmlPart>,
+    theme: Option<&XmlPart>,
     relationships: Option<&XmlPart>,
     images: &HashMap<String, std::path::PathBuf>,
 ) -> Result<WordDoc, OpenError> {
@@ -38,7 +40,7 @@ fn project(
         .ok_or_else(|| OpenError::Damaged("missing Word document body".into()))?;
     let styles = styles.map(XmlPart::root);
     let numbering = numbering.map(XmlPart::root);
-    let mut cx = Context::new(ns, styles, numbering);
+    let mut cx = Context::new(ns, styles, numbering, theme);
     cx.images = Some(images);
     if let Some(rels) = relationships {
         let root = rels.root();
@@ -65,9 +67,23 @@ fn project(
             }
         }
     }
-    Ok(WordDoc::from_blocks(
-        body.children.iter().map(|node| cx.block(node)).collect(),
-    ))
+    let defaults = cx.looks.defaults();
+    let mut blocks = Vec::new();
+    let mut sections = Vec::new();
+    for node in &body.children {
+        if node.is(ns, "sectPr") {
+            sections.push(section(node, ns, None));
+            continue;
+        }
+        let block = cx.block(node);
+        if node.is(ns, "p")
+            && let Some(sect) = child(node, ns, "pPr").and_then(|p| child(p, ns, "sectPr"))
+        {
+            sections.push(section(sect, ns, Some(block.id())));
+        }
+        blocks.push(block);
+    }
+    Ok(WordDoc::from_blocks(blocks).with_look(sections, defaults))
 }
 
 type WordParts = (String, Option<String>, Option<String>);
@@ -99,6 +115,102 @@ fn relationship_part_name(document: &str) -> String {
         format!("{dir}/_rels/{file}.rels")
     } else {
         format!("_rels/{document}.rels")
+    }
+}
+
+fn attach_headers(
+    package: &Package,
+    document_name: &str,
+    document: &XmlPart,
+    styles: Option<&XmlPart>,
+    numbering: Option<&XmlPart>,
+    theme: Option<&XmlPart>,
+    relationships: Option<&XmlPart>,
+    model: &mut WordDoc,
+) {
+    let Some(relationships) = relationships else {
+        return;
+    };
+    let Some(rels_ns) = rel_namespace(relationships.root()) else {
+        return;
+    };
+    let targets = relationships
+        .root()
+        .children
+        .iter()
+        .filter(|n| n.is(rels_ns, "Relationship"))
+        .filter_map(|n| {
+            Some((
+                n.attr(None, "Id")?,
+                (n.attr(None, "Target")?, n.attr(None, "Type")?),
+            ))
+        })
+        .collect::<HashMap<_, _>>();
+    let root = document.root();
+    let Some(ns) = root.namespace.as_deref() else {
+        return;
+    };
+    let Some(body) = child(root, ns, "body") else {
+        return;
+    };
+    let mut sections = Vec::new();
+    for node in &body.children {
+        if node.is(ns, "sectPr") {
+            sections.push(node);
+        } else if node.is(ns, "p")
+            && let Some(sect) = child(node, ns, "pPr").and_then(|p| child(p, ns, "sectPr"))
+        {
+            sections.push(sect);
+        }
+    }
+    if sections.len() != model.sections.len() {
+        return;
+    }
+    for (index, (sect, section)) in sections.into_iter().zip(&mut model.sections).enumerate() {
+        let load = |kind: &str, first: bool| -> Option<Vec<Block>> {
+            let reference = sect.children.iter().find(|n| {
+                n.is(ns, kind)
+                    && n.attr(Some(ns), "type") == Some(if first { "first" } else { "default" })
+            })?;
+            let id = reference
+                .attr(Some(R), "id")
+                .or_else(|| reference.attr(Some(RS), "id"))?;
+            let (target, ty) = targets.get(id)?;
+            if !(ty.ends_with("/header") || ty.ends_with("/footer")) {
+                return None;
+            }
+            let target = if let Some(absolute) = target.strip_prefix('/') {
+                absolute.to_owned()
+            } else {
+                document_name
+                    .rsplit_once('/')
+                    .map(|(dir, _)| format!("{dir}/{target}"))
+                    .unwrap_or_else(|| (*target).to_owned())
+            };
+            let part = package.part(&target).ok()?;
+            let part_root = part.root();
+            if !(part_root.is(ns, "hdr") || part_root.is(ns, "ftr")) {
+                return None;
+            }
+            let mut cx = Context::new(
+                ns,
+                styles.map(XmlPart::root),
+                numbering.map(XmlPart::root),
+                theme,
+            );
+            cx.id_base = (1u64 << 48) + (index as u64 + 1) * 1_000_000;
+            Some(
+                part_root
+                    .children
+                    .iter()
+                    .map(|node| cx.block(node))
+                    .collect(),
+            )
+        };
+        section.header = load("headerReference", false);
+        section.first_header = load("headerReference", true);
+        section.footer = load("footerReference", false);
+        section.first_footer = load("footerReference", true);
     }
 }
 
@@ -140,15 +252,22 @@ fn val<'a>(node: &'a XmlNode, ns: &str, name: &str) -> Option<&'a str> {
 
 struct Context<'a> {
     ns: &'a str,
+    id_base: u64,
     links: HashMap<&'a str, &'a str>,
     images: Option<&'a HashMap<String, std::path::PathBuf>>,
     styles: HashMap<&'a str, &'a XmlNode>,
     abstracts: HashMap<&'a str, &'a XmlNode>,
     numbers: HashMap<&'a str, &'a XmlNode>,
+    looks: Looks<'a>,
 }
 
 impl<'a> Context<'a> {
-    fn new(ns: &'a str, styles: Option<&'a XmlNode>, numbering: Option<&'a XmlNode>) -> Self {
+    fn new(
+        ns: &'a str,
+        styles: Option<&'a XmlNode>,
+        numbering: Option<&'a XmlNode>,
+        theme: Option<&'a XmlPart>,
+    ) -> Self {
         let index = |parent: Option<&'a XmlNode>, tag, attr| {
             parent
                 .into_iter()
@@ -159,6 +278,7 @@ impl<'a> Context<'a> {
         };
         Self {
             ns,
+            id_base: 0,
             links: HashMap::new(),
             images: None,
             styles: index(styles.filter(|n| n.is(ns, "styles")), "style", "styleId"),
@@ -168,7 +288,12 @@ impl<'a> Context<'a> {
                 "abstractNumId",
             ),
             numbers: index(numbering.filter(|n| n.is(ns, "numbering")), "num", "numId"),
+            looks: Looks::new(ns, styles, numbering, theme.map(XmlPart::root)),
         }
+    }
+
+    fn id(&self, node: &XmlNode) -> NodeId {
+        self.id_base + node.range.start as NodeId
     }
 
     fn style_chain(&self, id: &str) -> Vec<&'a XmlNode> {
@@ -214,6 +339,10 @@ impl<'a> Context<'a> {
         if node.is(ns, "p") {
             Block::Paragraph(self.para(node))
         } else if node.is(ns, "tbl") {
+            let style = child(node, ns, "tblPr")
+                .and_then(|p| val(p, ns, "tblStyle"))
+                .map(|id| self.style_chain(id))
+                .unwrap_or_default();
             let mut merged = Vec::new();
             let rows = node
                 .children
@@ -245,14 +374,14 @@ impl<'a> Context<'a> {
                 })
                 .collect();
             Block::Table(Table {
-                id: node.range.start as NodeId,
+                id: self.id(node),
                 rows,
                 merged,
-                look: Default::default(),
+                look: self.looks.table_look(node, &style),
             })
         } else {
             Block::Opaque {
-                id: node.range.start as NodeId,
+                id: self.id(node),
                 label: node.local_name.clone(),
             }
         }
@@ -319,13 +448,14 @@ impl<'a> Context<'a> {
         for n in &node.children {
             self.inline(n, &chain, None, &mut inlines, &mut locked);
         }
+        let look = self.looks.para_look(direct, &chain);
         Para {
-            id: node.range.start as NodeId,
+            id: self.id(node),
             style,
             align,
             inlines,
             locked,
-            look: Default::default(),
+            look,
         }
     }
 
@@ -343,7 +473,7 @@ impl<'a> Context<'a> {
             .any(|ns| n.is(ns, "oMath") || n.is(ns, "oMathPara"))
         {
             *locked = true;
-            out.push(atom(n, AtomKind::Other("math".into())));
+            out.push(self.atom(n, AtomKind::Other("math".into())));
             return;
         }
         if n.namespace.as_deref() != Some(ns) {
@@ -354,30 +484,8 @@ impl<'a> Context<'a> {
                 let direct = child(n, ns, "rPr");
                 let char_id = direct.and_then(|p| val(p, ns, "rStyle"));
                 let char_chain = char_id.map(|id| self.style_chain(id)).unwrap_or_default();
-                let read = |name| {
-                    direct
-                        .and_then(|p| child(p, ns, name))
-                        .or_else(|| {
-                            char_chain
-                                .iter()
-                                .chain(para)
-                                .find_map(|n| child(child(n, ns, "rPr")?, ns, name))
-                        })
-                        .is_some_and(|n| {
-                            !matches!(
-                                n.attr(Some(ns), "val"),
-                                Some("0" | "off" | "false" | "none")
-                            )
-                        })
-                };
-                let marks = Marks {
-                    bold: read("b"),
-                    italic: read("i"),
-                    underline: read("u"),
-                    strike: read("strike"),
-                    link: link.map(str::to_owned),
-                    ..Marks::default()
-                };
+                let mut marks = self.looks.run_marks(direct, &char_chain, para);
+                marks.link = link.map(str::to_owned);
                 for n in &n.children {
                     if n.is(ns, "t") || n.is(ns, "delText") {
                         out.push(Inline::Text {
@@ -409,23 +517,42 @@ impl<'a> Context<'a> {
             | "instrText" => {
                 *locked = true;
                 if n.is(ns, "fldChar") {
-                    out.push(atom(n, AtomKind::Field(String::new())));
+                    out.push(self.atom(n, AtomKind::Field(String::new())));
                 }
             }
-            "fldSimple" => out.push(atom(n, AtomKind::Field(String::new()))),
-            "bookmarkStart" | "bookmarkEnd" => {
-                out.push(atom(n, AtomKind::Other("bookmark".into())))
+            "fldSimple" => {
+                let instruction = n.attr(Some(ns), "instr").unwrap_or_default().to_string();
+                out.push(self.atom(n, AtomKind::Field(instruction)));
             }
-            "footnoteReference" | "endnoteReference" => out.push(atom(n, AtomKind::Footnote)),
+            "bookmarkStart" | "bookmarkEnd" => {
+                out.push(self.atom(n, AtomKind::Other("bookmark".into())))
+            }
+            "footnoteReference" | "endnoteReference" => out.push(self.atom(n, AtomKind::Footnote)),
             "drawing" | "pict" => {
                 let display = image_ids(n).find_map(|id| self.images?.get(id).cloned());
-                out.push(atom(n, AtomKind::Image(display)));
+                out.push(self.atom(n, AtomKind::Image(display)));
             }
-            "object" | "sym" => out.push(atom(n, AtomKind::Other(n.local_name.clone()))),
+            "object" | "sym" => out.push(self.atom(n, AtomKind::Other(n.local_name.clone()))),
             "br" | "cr" => out.push(Inline::Break),
             "tab" => out.push(Inline::Tab),
             _ => {}
         }
+    }
+
+    fn atom(&self, node: &XmlNode, kind: AtomKind) -> Inline {
+        let look = match &kind {
+            AtomKind::Image(_) => drawing_look(node),
+            AtomKind::Field(_) => crate::look::AtomLook {
+                shown: field_result(node),
+                ..Default::default()
+            },
+            _ => crate::look::AtomLook::default(),
+        };
+        Inline::Atom(Atom {
+            id: self.id(node),
+            kind,
+            look,
+        })
     }
 }
 
@@ -524,12 +651,177 @@ fn extract_images(
     (dir, paths)
 }
 
-fn atom(node: &XmlNode, kind: AtomKind) -> Inline {
-    Inline::Atom(Atom {
-        id: node.range.start as NodeId,
-        kind,
-        look: Default::default(),
-    })
+fn section(node: &XmlNode, ns: &str, last_block: Option<NodeId>) -> crate::look::Section {
+    let mut page = crate::look::PageLook::default();
+    if let Some(size) = child(node, ns, "pgSz") {
+        if let Some(v) = size.attr(Some(ns), "w").and_then(|v| v.parse::<i32>().ok()) {
+            page.width = v;
+        }
+        if let Some(v) = size.attr(Some(ns), "h").and_then(|v| v.parse::<i32>().ok()) {
+            page.height = v;
+        }
+    }
+    if let Some(margin) = child(node, ns, "pgMar") {
+        let read = |name| {
+            margin
+                .attr(Some(ns), name)
+                .and_then(|v| v.parse::<i32>().ok())
+        };
+        if let Some(v) = read("top") {
+            page.top = v;
+        }
+        if let Some(v) = read("bottom") {
+            page.bottom = v;
+        }
+        if let Some(v) = read("left") {
+            page.left = v;
+        }
+        if let Some(v) = read("right") {
+            page.right = v;
+        }
+        if let Some(v) = read("header") {
+            page.header = v;
+        }
+        if let Some(v) = read("footer") {
+            page.footer = v;
+        }
+        if let Some(v) = read("gutter") {
+            page.gutter = v;
+        }
+    }
+    if let Some(cols) = child(node, ns, "cols") {
+        page.columns = cols
+            .attr(Some(ns), "num")
+            .and_then(|v| v.parse::<u8>().ok())
+            .unwrap_or(1)
+            .max(1);
+        if let Some(v) = cols
+            .attr(Some(ns), "space")
+            .and_then(|v| v.parse::<i32>().ok())
+        {
+            page.column_gap = v;
+        }
+    }
+    if let Some(grid) = child(node, ns, "docGrid")
+        && let Some(v) = grid
+            .attr(Some(ns), "linePitch")
+            .and_then(|v| v.parse::<i32>().ok())
+    {
+        page.line_pitch = Some(v);
+    }
+    let new_page =
+        child(node, ns, "type").and_then(|n| n.attr(Some(ns), "val")) != Some("continuous");
+    let title_page = child(node, ns, "titlePg").is_some();
+    let page_start = child(node, ns, "pgNumType")
+        .and_then(|n| n.attr(Some(ns), "start"))
+        .and_then(|v| v.parse::<u32>().ok());
+    crate::look::Section {
+        last_block,
+        page,
+        title_page,
+        page_start,
+        new_page,
+        ..Default::default()
+    }
+}
+
+fn drawing_look(node: &XmlNode) -> crate::look::AtomLook {
+    let mut look = crate::look::AtomLook::default();
+    let mut pending = vec![node];
+    while let Some(n) = pending.pop() {
+        pending.extend(n.children.iter().rev());
+        if (n.is(DRAWING, "extent") || n.is(DRAWING_STRICT, "extent")) && look.size.is_none() {
+            let cx = n.attr(None, "cx").and_then(|v| v.parse::<i64>().ok());
+            let cy = n.attr(None, "cy").and_then(|v| v.parse::<i64>().ok());
+            if let (Some(cx), Some(cy)) = (cx, cy) {
+                look.size = Some((
+                    (cx / 635).clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+                    (cy / 635).clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+                ));
+            }
+        }
+        if (n.local_name == "anchor" && n.namespace.as_deref().is_some()) && look.float.is_none() {
+            let mut float = crate::look::Float {
+                x: 0,
+                from_x: crate::look::Origin::Page,
+                y: 0,
+                from_y: crate::look::Origin::Page,
+                wrap: crate::look::Wrap::TopAndBottom,
+                clear: [0; 4],
+            };
+            for c in &n.children {
+                let origin = |s: Option<&str>| match s {
+                    Some("page") => crate::look::Origin::Page,
+                    Some("margin") => crate::look::Origin::Margin,
+                    Some("paragraph") => crate::look::Origin::Paragraph,
+                    Some("column") => crate::look::Origin::Column,
+                    _ => crate::look::Origin::Page,
+                };
+                match c.local_name.as_str() {
+                    "positionH" => {
+                        float.from_x = origin(c.attr(None, "relativeFrom"));
+                        float.x = c
+                            .children
+                            .iter()
+                            .find(|x| x.local_name == "posOffset")
+                            .and_then(|x| x.text.trim().parse::<i64>().ok())
+                            .map_or(0, |v| {
+                                (v / 635).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+                            });
+                    }
+                    "positionV" => {
+                        float.from_y = origin(c.attr(None, "relativeFrom"));
+                        float.y = c
+                            .children
+                            .iter()
+                            .find(|x| x.local_name == "posOffset")
+                            .and_then(|x| x.text.trim().parse::<i64>().ok())
+                            .map_or(0, |v| {
+                                (v / 635).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+                            });
+                    }
+                    "wrapSquare" => float.wrap = crate::look::Wrap::Square,
+                    "wrapTopAndBottom" => float.wrap = crate::look::Wrap::TopAndBottom,
+                    "wrapNone" => {
+                        float.wrap = if c.attr(None, "behindDoc") == Some("1") {
+                            crate::look::Wrap::Behind
+                        } else {
+                            crate::look::Wrap::InFront
+                        }
+                    }
+                    "distT" | "distR" | "distB" | "distL" => {
+                        let slot = match c.local_name.as_str() {
+                            "distT" => 0,
+                            "distR" => 1,
+                            "distB" => 2,
+                            _ => 3,
+                        };
+                        float.clear[slot] = c
+                            .attr(None, "val")
+                            .and_then(|v| v.parse::<i64>().ok())
+                            .map_or(0, |v| {
+                                (v / 635).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+                            });
+                    }
+                    _ => {}
+                }
+            }
+            look.float = Some(float);
+        }
+    }
+    look
+}
+
+fn field_result(node: &XmlNode) -> Option<String> {
+    let mut text = String::new();
+    let mut pending = vec![node];
+    while let Some(n) = pending.pop() {
+        pending.extend(n.children.iter().rev());
+        if n.local_name == "t" {
+            text.push_str(&n.text);
+        }
+    }
+    (!text.is_empty()).then_some(text)
 }
 fn edit_para_properties(
     source: &[u8],
@@ -538,6 +830,7 @@ fn edit_para_properties(
     style: Option<&str>,
     number: Option<(&str, u8)>,
     outline: Option<&str>,
+    look: Option<&crate::look::ParaLook>,
 ) -> Result<Vec<u8>, EditError> {
     let mut operations = Vec::<(usize, usize, Vec<u8>)>::new();
     let mut additions = Vec::<(&str, Vec<u8>)>::new();
@@ -602,6 +895,16 @@ fn edit_para_properties(
                 {
                     return Err(EditError::Locked);
                 }
+            } else if matches!(name, "spacing" | "ind" | "shd") {
+                if !old.children.is_empty()
+                    || !old.text.trim().is_empty()
+                    || old
+                        .attributes
+                        .iter()
+                        .any(|a| a.namespace.as_deref() != Some(ns))
+                {
+                    return Err(EditError::Locked);
+                }
             } else if !old.children.is_empty()
                 || !old.text.trim().is_empty()
                 || old
@@ -637,6 +940,70 @@ fn edit_para_properties(
             "outlineLvl",
             format!(r#"<w:outlineLvl xmlns:w="{ns}" w:val="{outline}"/>"#),
         )?;
+    }
+    if let Some(look) = look {
+        let mut spacing = String::new();
+        if look.before != 0 {
+            spacing.push_str(&format!(r#" w:before="{}""#, look.before));
+        }
+        if look.after != 0 {
+            spacing.push_str(&format!(r#" w:after="{}""#, look.after));
+        }
+        match look.line {
+            crate::look::LineSpacing::Auto(v) if v != 240 => {
+                spacing.push_str(&format!(r#" w:line="{v}" w:lineRule="auto""#));
+            }
+            crate::look::LineSpacing::AtLeast(v) => {
+                spacing.push_str(&format!(r#" w:line="{v}" w:lineRule="atLeast""#));
+            }
+            crate::look::LineSpacing::Exact(v) => {
+                spacing.push_str(&format!(r#" w:line="{v}" w:lineRule="exact""#));
+            }
+            _ => {}
+        }
+        if !spacing.is_empty() {
+            push(
+                "spacing",
+                format!(r#"<w:spacing xmlns:w="{ns}"{spacing}/>"#),
+            )?;
+        }
+        let mut ind = String::new();
+        if look.left != 0 {
+            ind.push_str(&format!(r#" w:left="{}""#, look.left));
+        }
+        if look.right != 0 {
+            ind.push_str(&format!(r#" w:right="{}""#, look.right));
+        }
+        if look.first_line > 0 {
+            ind.push_str(&format!(r#" w:firstLine="{}""#, look.first_line));
+        } else if look.first_line < 0 {
+            ind.push_str(&format!(r#" w:hanging="{}""#, -look.first_line));
+        }
+        if !ind.is_empty() {
+            push("ind", format!(r#"<w:ind xmlns:w="{ns}"{ind}/>"#))?;
+        }
+        for (name, value) in [
+            ("keepNext", look.keep_next),
+            ("keepLines", look.keep_lines),
+            ("pageBreakBefore", look.page_break_before),
+            ("widowControl", look.widow_control),
+            ("contextualSpacing", look.contextual),
+            ("snapToGrid", look.snap_to_grid),
+        ] {
+            push(
+                name,
+                format!(r#"<w:{name} xmlns:w="{ns}" w:val="{}"/>"#, u8::from(value)),
+            )?;
+        }
+        if let Some(fill) = look.shading {
+            push(
+                "shd",
+                format!(
+                    r#"<w:shd xmlns:w="{ns}" w:val="clear" w:fill="{:06X}"/>"#,
+                    fill.0
+                ),
+            )?;
+        }
     }
     if let Some(props) = props {
         let raw = &source[props.range.clone()];
@@ -869,15 +1236,28 @@ impl WordBinding {
         let manifest = optional(Some("[Content_Types].xml"))?;
         let relations_name = relationship_part_name(&document_name);
         let relationships = optional(Some(&relations_name))?;
+        let theme_name = package.related_part(&document_name, "theme")?;
+        let theme = optional(theme_name.as_deref())?;
         let (image_dir, images) = extract_images(package, &document);
         let images = Arc::new(images);
-        let model = project(
+        let mut model = project(
             &document,
             styles.as_deref(),
             numbering.as_deref(),
+            theme.as_deref(),
             relationships.as_deref(),
             &images,
         )?;
+        attach_headers(
+            package,
+            &document_name,
+            &document,
+            styles.as_deref(),
+            numbering.as_deref(),
+            theme.as_deref(),
+            relationships.as_deref(),
+            &mut model,
+        );
         let mut ids = BTreeMap::new();
         visit_blocks(&model.blocks, &mut |b| {
             ids.insert(b.id() as usize, b.id());
@@ -1033,10 +1413,11 @@ impl WordBinding {
                 (p.range.clone(), after)
             }
             // Written back in backlog item 14 (docs/layout-engine-implementation.md).
-            WordOp::SetLook { .. } => {
-                return Err(EditError::Invalid(
-                    "paragraph spacing and indents cannot be saved yet".into(),
-                ));
+            WordOp::SetLook { para, look } => {
+                let (p, _) = lookup(*para)?;
+                let after = edit_para_properties(source, p, ns, None, None, None, Some(look))?;
+                assigned = Some((p.range.start, *para));
+                (p.range.clone(), after)
             }
             WordOp::DeletePara { para } => {
                 let (p, container) = lookup(*para)?;
@@ -1131,6 +1512,7 @@ impl WordBinding {
             &document,
             self.styles.as_deref(),
             auxiliary.numbering.as_deref(),
+            None,
             auxiliary.relationships.as_deref(),
             &self.images,
         )
@@ -1237,13 +1619,13 @@ impl WordBinding {
             }
             // Direct outline levels take precedence over list display. Body
             // outline is sufficient, without rebuilding unrelated properties.
-            return edit_para_properties(source, p, ns, None, Some((&id, level)), Some("9"));
+            return edit_para_properties(source, p, ns, None, Some((&id, level)), Some("9"), None);
         }
         let id = match style {
             ParaStyle::Normal => "Normal".into(),
             ParaStyle::Title => "Title".into(),
             ParaStyle::Heading(level @ 1..=6) => {
-                let context = Context::new(ns, self.styles.as_ref().map(|p| p.root()), None);
+                let context = Context::new(ns, self.styles.as_ref().map(|p| p.root()), None, None);
                 context
                     .styles
                     .keys()
@@ -1277,6 +1659,7 @@ impl WordBinding {
             ns,
             self.styles.as_ref().map(|p| p.root()),
             auxiliary.numbering.as_ref().map(|p| p.root()),
+            None,
         );
         let old = context.para(p);
         let chain = context.style_chain(&id);
@@ -1306,7 +1689,7 @@ impl WordBinding {
         } else {
             None
         };
-        edit_para_properties(source, p, ns, Some(&id), suppression, outline)
+        edit_para_properties(source, p, ns, Some(&id), suppression, outline, None)
     }
 
     fn new_paragraph(
@@ -1490,7 +1873,43 @@ fn render_tokens(
                 };
                 let underline = if marks.underline { "single" } else { "none" };
                 let text = quick_xml::escape::escape(&text);
-                let run=format!(r#"<w:r xmlns:w="{ns}"><w:rPr><w:b w:val="{}"/><w:i w:val="{}"/><w:strike w:val="{}"/><w:u w:val="{underline}"/></w:rPr><w:t{preserve}>{text}</w:t></w:r>"#,u8::from(marks.bold),u8::from(marks.italic),u8::from(marks.strike)).into_bytes();
+                let mut props = format!(
+                    r#"<w:b w:val="{}"/><w:i w:val="{}"/><w:strike w:val="{}"/><w:u w:val="{underline}"/>"#,
+                    u8::from(marks.bold),
+                    u8::from(marks.italic),
+                    u8::from(marks.strike)
+                );
+                if !marks.fonts.latin.is_empty() || !marks.fonts.east_asia.is_empty() {
+                    let latin = quick_xml::escape::escape(&marks.fonts.latin);
+                    let east = quick_xml::escape::escape(&marks.fonts.east_asia);
+                    props.push_str(&format!(
+                        r#"<w:rFonts w:ascii="{latin}" w:hAnsi="{latin}" w:eastAsia="{east}"/>"#
+                    ));
+                }
+                if let Some(size) = marks.size {
+                    props.push_str(&format!(
+                        r#"<w:sz w:val="{}"/><w:szCs w:val="{}"/>"#,
+                        size / 10,
+                        size / 10
+                    ));
+                }
+                if let Some(color) = marks.color {
+                    props.push_str(&format!(r#"<w:color w:val="{:06X}"/>"#, color.0));
+                }
+                if let Some(highlight) = marks.highlight {
+                    if let Some(name) = highlight_name(highlight) {
+                        props.push_str(&format!(r#"<w:highlight w:val="{name}"/>"#));
+                    }
+                }
+                if matches!(marks.baseline, crate::look::Baseline::Superscript) {
+                    props.push_str(r#"<w:vertAlign w:val="superscript"/>"#);
+                } else if matches!(marks.baseline, crate::look::Baseline::Subscript) {
+                    props.push_str(r#"<w:vertAlign w:val="subscript"/>"#);
+                }
+                let run = format!(
+                    r#"<w:r xmlns:w="{ns}"><w:rPr>{props}</w:rPr><w:t{preserve}>{text}</w:t></w:r>"#
+                )
+                .into_bytes();
                 output.extend(wrap_link(ns, run, marks.link.as_deref(), relationships)?);
                 tokens = &tokens[len..];
             }
@@ -1526,12 +1945,16 @@ fn write_content(
     if link_only {
         return write_link_only(source, p, ns, &old, &new, relationships);
     }
-    let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let prefix = old
+        .iter()
+        .zip(&new)
+        .take_while(|(a, b)| token_matches(a, b))
+        .count();
     let suffix = old[prefix..]
         .iter()
         .rev()
         .zip(new[prefix..].iter().rev())
-        .take_while(|(a, b)| a == b)
+        .take_while(|(a, b)| token_matches(a, b))
         .count();
     let old_end = old.len() - suffix;
     let new_end = new.len() - suffix;
@@ -1546,7 +1969,7 @@ fn write_content(
     if !p.text.trim().is_empty() {
         return Err(EditError::Locked);
     }
-    let cx = Context::new(ns, None, None);
+    let cx = Context::new(ns, None, None, None);
     for node in &p.children {
         if node.is(ns, "pPr") {
             content.extend_from_slice(&source[node.range.clone()]);
@@ -1605,7 +2028,9 @@ fn write_content(
                     .is_some_and(|mark| {
                         replacement
                             .iter()
-                            .all(|token| matches!(token,Token::Text(_,m) if *m==mark))
+                            .all(|token| {
+                                matches!(token, Token::Text(_, m) if same_non_link_marks(m, mark) || markless(m))
+                            })
                     })
             {
                 let middle: String = replacement
@@ -1676,7 +2101,7 @@ fn write_link_only(
     new: &[Token<'_>],
     rels: &mut Option<Arc<XmlPart>>,
 ) -> Result<Vec<u8>, EditError> {
-    let cx = Context::new(ns, None, None);
+    let cx = Context::new(ns, None, None, None);
     let xml = &source[p.range.clone()];
     reject_unprojected_markup(xml)?;
     if !p.text.trim().is_empty() {
@@ -1799,6 +2224,43 @@ fn keep_fragment(
 
 fn same_non_link_marks(a: &Marks, b: &Marks) -> bool {
     (a.bold, a.italic, a.underline, a.strike) == (b.bold, b.italic, b.underline, b.strike)
+}
+
+fn highlight_name(color: crate::look::Rgb) -> Option<&'static str> {
+    Some(match color.0 {
+        0x000000 => "black",
+        0x0000FF => "blue",
+        0x00FFFF => "cyan",
+        0x00FF00 => "green",
+        0xFF00FF => "magenta",
+        0xFF0000 => "red",
+        0xFFFF00 => "yellow",
+        0xFFFFFF => "white",
+        0x000080 => "darkBlue",
+        0x008080 => "darkCyan",
+        0x008000 => "darkGreen",
+        0x800080 => "darkMagenta",
+        0x800000 => "darkRed",
+        0x808000 => "darkYellow",
+        0x808080 => "darkGray",
+        0xC0C0C0 => "lightGray",
+        _ => return None,
+    })
+}
+
+/// A new run with no explicit formatting keeps the formatting of text that
+/// did not change, as typing does in Word.
+fn markless(marks: &Marks) -> bool {
+    *marks == Marks::default()
+}
+
+fn token_matches(old: &Token<'_>, new: &Token<'_>) -> bool {
+    match (old, new) {
+        (Token::Text(a, m), Token::Text(b, n)) => {
+            a == b && (same_non_link_marks(m, n) || markless(n))
+        }
+        _ => old == new,
+    }
 }
 
 fn render_with_donor(
@@ -2060,6 +2522,7 @@ fn set_property(
 mod tests {
     use super::*;
     use crate::{Office, Op};
+    const A_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
 
     fn fixture(body: &str) -> (tempfile::TempDir, std::path::PathBuf, Vec<u8>) {
         use std::io::Write;
@@ -2083,6 +2546,153 @@ mod tests {
         }
         zip.finish().unwrap();
         (dir, path, xml.into_bytes())
+    }
+
+    fn look_fixture(body: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("looks.docx");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        let document = format!(
+            r#"<w:document xmlns:w="{W}" xmlns:r="{R}"><w:body>{body}<w:sectPr><w:headerReference w:type="default" r:id="rId4"/><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1800" w:bottom="1440" w:left="1800" w:header="851" w:footer="992" w:gutter="0"/><w:cols w:num="2" w:space="425"/><w:docGrid w:linePitch="312"/></w:sectPr></w:body></w:document>"#
+        );
+        let styles = format!(
+            r#"<w:styles xmlns:w="{W}"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:eastAsia="等线"/><w:sz w:val="21"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:styleId="Body"><w:name w:val="Body"/><w:pPr><w:spacing w:before="60"/></w:pPr><w:rPr><w:rFonts w:asciiTheme="minorHAnsi" w:eastAsiaTheme="minorEastAsia"/><w:sz w:val="24"/><w:color w:val="333333"/></w:rPr></w:style></w:styles>"#
+        );
+        let numbering = format!(
+            r#"<w:numbering xmlns:w="{W}"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="3"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:suff w:val="space"/><w:rPr><w:b/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="7"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#
+        );
+        let theme = format!(
+            r#"<a:theme xmlns:a="{A_NS}" name="T"><a:themeElements><a:clrScheme name="C"><a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1><a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="44546A"/></a:dk2><a:lt2><a:srgbClr val="E7E6E6"/></a:lt2><a:accent1><a:srgbClr val="4472C4"/></a:accent1><a:accent2><a:srgbClr val="ED7D31"/></a:accent2><a:accent3><a:srgbClr val="A5A5A5"/></a:accent3><a:accent4><a:srgbClr val="FFC000"/></a:accent4><a:accent5><a:srgbClr val="5B9BD5"/></a:accent5><a:accent6><a:srgbClr val="70AD47"/></a:accent6><a:hlink><a:srgbClr val="0563C1"/></a:hlink><a:folHlink><a:srgbClr val="954F72"/></a:folHlink></a:clrScheme><a:fontScheme name="F"><a:majorFont><a:latin typeface="Aptos Display"/><a:ea typeface="宋体"/></a:majorFont><a:minorFont><a:latin typeface="Aptos"/><a:ea typeface="等线"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>"#
+        );
+        let types = r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/><Override PartName="/word/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/><Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/></Types>"#;
+        let root_rels = format!(
+            r#"<Relationships xmlns="{OPC_REL}"><Relationship Id="rId1" Type="{R}/officeDocument" Target="word/document.xml"/></Relationships>"#
+        );
+        let document_rels = format!(
+            r#"<Relationships xmlns="{OPC_REL}"><Relationship Id="rId1" Type="{R}/styles" Target="styles.xml"/><Relationship Id="rId2" Type="{R}/numbering" Target="numbering.xml"/><Relationship Id="rId3" Type="{R}/theme" Target="theme/theme1.xml"/><Relationship Id="rId4" Type="{R}/header" Target="header1.xml"/></Relationships>"#
+        );
+        let header =
+            format!(r#"<w:hdr xmlns:w="{W}"><w:p><w:r><w:t>页眉</w:t></w:r></w:p></w:hdr>"#);
+        for (name, data) in [
+            ("[Content_Types].xml".to_owned(), types.to_owned()),
+            ("_rels/.rels".to_owned(), root_rels),
+            ("word/document.xml".to_owned(), document),
+            ("word/_rels/document.xml.rels".to_owned(), document_rels),
+            ("word/styles.xml".to_owned(), styles),
+            ("word/numbering.xml".to_owned(), numbering),
+            ("word/theme/theme1.xml".to_owned(), theme),
+            ("word/header1.xml".to_owned(), header),
+        ] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(data.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn reads_effective_styles_numbering_theme_and_sections() {
+        let body = r#"<w:p><w:pPr><w:pStyle w:val="Body"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="7"/></w:numPr><w:spacing w:after="240" w:line="360" w:lineRule="auto"/><w:ind w:left="720"/><w:jc w:val="both"/><w:keepNext/></w:pPr><w:r><w:rPr><w:color w:themeColor="accent1" w:themeTint="80"/><w:sz w:val="28"/></w:rPr><w:t>甲</w:t></w:r></w:p><w:tbl><w:tblPr><w:tblBorders><w:top w:val="single" w:sz="8" w:color="FF0000"/><w:insideH w:val="single" w:sz="4" w:color="00FF00"/></w:tblBorders><w:tblCellMar><w:left w:w="200"/></w:tblCellMar></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="3000"/></w:tblGrid><w:tr><w:trPr><w:tblHeader/><w:trHeight w:val="500" w:hRule="exact"/></w:trPr><w:tc><w:tcPr><w:shd w:fill="EEEEEE"/><w:vAlign w:val="center"/></w:tcPr><w:p><w:r><w:t>乙</w:t></w:r></w:p></w:tc><w:tc><w:p/></w:tc></w:tr></w:tbl>"#;
+        let (_dir, path) = look_fixture(body);
+        let package = Package::open(&path).unwrap();
+        assert_eq!(
+            package
+                .related_part("word/document.xml", "theme")
+                .unwrap()
+                .as_deref(),
+            Some("word/theme/theme1.xml")
+        );
+        let doc = crate::open(&path).unwrap();
+        let Office::Word(word) = &doc.office else {
+            panic!("not Word")
+        };
+        let Block::Paragraph(p) = &word.blocks()[0] else {
+            panic!("not paragraph")
+        };
+        assert_eq!(p.look.before, 60);
+        assert_eq!(p.look.after, 240);
+        assert_eq!(p.look.line, crate::look::LineSpacing::Auto(360));
+        assert_eq!(p.look.left, 720);
+        assert!(p.look.keep_next);
+        assert_eq!(p.align, Align::Justify);
+        let list = p.look.list.as_ref().expect("list");
+        assert_eq!(list.list, 7);
+        assert_eq!(list.pattern, "%1.");
+        assert_eq!(list.starts[0], 3);
+        assert_eq!(list.suffix, crate::look::LabelSuffix::Space);
+        assert!(matches!(list.formats[0], crate::look::NumFormat::Decimal));
+        let Inline::Text { marks, .. } = &p.inlines[0] else {
+            panic!("not text")
+        };
+        assert_eq!(marks.size, Some(280));
+        assert_eq!(marks.fonts.latin, "Aptos");
+        assert_eq!(marks.fonts.east_asia, "等线");
+        assert_eq!(marks.color, Some(crate::look::Rgb(0xA2B9E2)));
+        let Block::Table(t) = &word.blocks()[1] else {
+            panic!("not table")
+        };
+        assert_eq!(t.look.columns, vec![2000, 3000]);
+        assert_eq!(t.look.padding[3], 200);
+        assert_eq!(t.look.rows[0], Some((500, true)));
+        assert_eq!(t.look.header_rows, 1);
+        assert_eq!(t.look.cells[0][0].shading, Some(crate::look::Rgb(0xEEEEEE)));
+        assert_eq!(t.look.cells[0][0].v_align, crate::look::VAlign::Center);
+        let sections = word.sections();
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].page.columns, 2);
+        assert_eq!(sections[0].page.line_pitch, Some(312));
+        let header = sections[0].header.as_ref().expect("header");
+        let Block::Paragraph(p) = &header[0] else {
+            panic!("header paragraph")
+        };
+        assert_eq!(p.text(), "页眉");
+    }
+
+    #[test]
+    fn writes_paragraph_look_and_reopens_without_touching_the_table() {
+        let body = r#"<w:p><w:pPr><w:spacing w:before="60" w:after="240"/><w:ind w:left="720"/></w:pPr><w:r><w:t>甲</w:t></w:r></w:p><w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>乙</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#;
+        let (dir, path) = look_fixture(body);
+        let mut doc = crate::open(&path).unwrap();
+        let id = paragraph(&doc, 0).id;
+        let look = crate::look::ParaLook {
+            before: 120,
+            after: 0,
+            line: crate::look::LineSpacing::Exact(300),
+            left: 360,
+            first_line: -180,
+            keep_lines: true,
+            widow_control: false,
+            ..Default::default()
+        };
+        doc.apply(Op::Word(WordOp::SetLook {
+            para: id,
+            look: Box::new(look.clone()),
+        }))
+        .unwrap();
+        let out = dir.path().join("look-saved.docx");
+        doc.save_as(&out).unwrap();
+        let reopened = crate::open(&out).unwrap();
+        let Office::Word(word) = &reopened.office else {
+            panic!("not Word")
+        };
+        let Block::Paragraph(p) = &word.blocks()[0] else {
+            panic!("not paragraph")
+        };
+        assert_eq!(p.look.before, 120);
+        assert_eq!(p.look.after, 0);
+        assert_eq!(p.look.line, crate::look::LineSpacing::Exact(300));
+        assert_eq!(p.look.left, 360);
+        assert_eq!(p.look.first_line, -180);
+        assert!(p.look.keep_lines);
+        assert!(!p.look.widow_control);
+        assert_eq!(p.text(), "甲");
+        let package = Package::open(&out).unwrap();
+        let xml = package.read_part("word/document.xml").unwrap();
+        let xml = std::str::from_utf8(&xml).unwrap();
+        assert!(xml.contains(r#"<w:t>乙</w:t>"#));
+        assert!(xml.contains(r#"<w:gridCol w:w="2000"/>"#));
     }
 
     fn plain(text: &str) -> Inline {

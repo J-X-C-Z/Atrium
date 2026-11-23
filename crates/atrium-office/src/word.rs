@@ -376,6 +376,13 @@ impl WordDoc {
                 });
                 let mut para = Para::new(id, style, "");
                 para.inlines = inlines;
+                if let Place::After(after) = at
+                    && let Some(Block::Paragraph(previous)) =
+                        self.blocks.iter().find(|block| block.id() == after)
+                {
+                    para.look = previous.look.clone();
+                    para.align = previous.align;
+                }
                 match at {
                     Place::BodyStart => self.blocks.insert(0, Block::Paragraph(para)),
                     Place::After(after) => {

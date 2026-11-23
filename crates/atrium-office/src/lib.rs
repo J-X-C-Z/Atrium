@@ -21,6 +21,7 @@ mod slides;
 mod slides_binding;
 mod word;
 mod word_binding;
+mod word_looks;
 
 use std::path::{Path, PathBuf};
 
