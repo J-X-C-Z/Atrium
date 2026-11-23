@@ -84,6 +84,8 @@ impl State {
                 cmd.arg("--version")
                     .env("PATH", &self.path)
                     .kill_on_drop(true);
+                #[cfg(windows)]
+                cmd.creation_flags(0x0800_0000);
                 if let Ok(Ok(o)) = tokio::time::timeout(Duration::from_secs(3), cmd.output()).await
                     && o.status.success()
                 {

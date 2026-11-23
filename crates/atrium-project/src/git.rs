@@ -14,6 +14,11 @@ use std::{
 fn command(dir: &Path) -> Command {
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(dir).stdin(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
     // These can redirect -C to another repository or index (e.g. when run from a hook).
     for key in [
         "GIT_DIR",
@@ -295,6 +300,7 @@ fn shared_link(tree: &Path, shared: &Path, create: bool) -> Result<()> {
         let result = std::os::windows::fs::symlink_dir(target, &link).or_else(|_| {
             // Junctions need no symlink privilege. Keep the target absolute so
             // canonicalize() never has to resolve a relative reparse target.
+            use std::os::windows::process::CommandExt;
             let out = Command::new("cmd.exe")
                 .current_dir(tree)
                 .args([
@@ -305,6 +311,7 @@ fn shared_link(tree: &Path, shared: &Path, create: bool) -> Result<()> {
                     ".atrium",
                     &target.to_string_lossy(),
                 ])
+                .creation_flags(0x0800_0000)
                 .output()?;
             if out.status.success() {
                 Ok(())

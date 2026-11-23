@@ -119,13 +119,20 @@ impl AcpClient {
     /// Spawns the agent and runs the `initialize` handshake.
     pub async fn start(config: AcpConfig) -> Result<(Self, mpsc::UnboundedReceiver<Incoming>)> {
         log::info!("starting {} {:?}", config.program.display(), config.args);
-        let mut child = Command::new(&config.program)
+        let mut command = Command::new(&config.program);
+        command
             .args(&config.args)
             .env("PATH", process::effective_path())
             .envs(config.env.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0800_0000);
+        }
+        let mut child = command
             .spawn()
             .with_context(|| format!("could not start {}", config.program.display()))?;
         let stdin = child.stdin.take().context("no stdin")?;

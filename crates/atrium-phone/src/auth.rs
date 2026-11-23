@@ -17,6 +17,8 @@ use tokio::sync::Semaphore;
 pub(crate) async fn query(cli: Option<&Path>, args: &[&str]) -> Option<Value> {
     let mut cmd = tokio::process::Command::new(cli?);
     cmd.args(args).kill_on_drop(true);
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000);
     let out = tokio::time::timeout(Duration::from_secs(3), cmd.output())
         .await
         .ok()?

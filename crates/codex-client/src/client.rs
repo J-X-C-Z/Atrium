@@ -224,14 +224,21 @@ impl CodexClient {
     pub async fn start(config: CodexConfig) -> Result<(Self, mpsc::UnboundedReceiver<Incoming>)> {
         let binary = process::find_codex(config.binary.as_deref()).map_err(|e| anyhow!(e))?;
         log::info!("starting {} app-server", binary.display());
-        let mut child = Command::new(&binary)
+        let mut command = Command::new(&binary);
+        command
             .arg("app-server")
             .args(&config.extra_args)
             .env("PATH", process::effective_path())
             .envs(config.env.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0800_0000);
+        }
+        let mut child = command
             .spawn()
             .with_context(|| format!("could not start {}", binary.display()))?;
         let stdin = child.stdin.take().context("no stdin")?;
