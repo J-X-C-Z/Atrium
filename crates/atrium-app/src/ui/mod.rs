@@ -12,6 +12,8 @@ mod extras;
 mod memory;
 mod motion;
 mod overview;
+mod pages;
+pub use pages::bind_keys as bind_page_keys;
 mod preview;
 mod project;
 mod rows;

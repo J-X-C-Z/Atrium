@@ -50,6 +50,7 @@ agent-rpc = { path = "crates/agent-rpc" }
 acp-client = { path = "crates/acp-client" }
 atrium-project = { path = "crates/atrium-project" }
 atrium-office = { path = "crates/atrium-office" }
+atrium-layout = { path = "crates/atrium-layout" }
 atrium-preview = { path = "crates/atrium-preview" }
 atrium-memory = { path = "crates/atrium-memory" }
 atrium-workflow = { path = "crates/atrium-workflow" }

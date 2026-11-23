@@ -38,6 +38,10 @@ pub struct DocView {
     /// changes were last handed over.
     pub baseline: Snapshot,
     _editor_events: Option<Subscription>,
+    /// Word and PowerPoint on their pages.
+    pub(super) pages: Option<super::pages::Pages>,
+    /// Shows the blocks outline instead of the pages.
+    pub(super) outline: bool,
 }
 
 impl EventEmitter<DocEvent> for DocView {}
@@ -61,9 +65,28 @@ impl DocView {
             sheet: 0,
             baseline,
             _editor_events: None,
+            pages: None,
+            outline: false,
         };
-        view.build_editor(window, cx);
+        if matches!(view.doc.office, Office::Word(_) | Office::Slides(_)) {
+            view.pages = Some(super::pages::Pages::new(&view.doc.office, window, cx));
+        }
         view
+    }
+
+    /// Switches between the pages and the outline of blocks.
+    pub(super) fn set_outline(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.outline = on;
+        if on {
+            self.build_editor(window, cx);
+        } else {
+            self.editor = None;
+            self._editor_events = None;
+            if self.pages.is_some() {
+                self.pages = Some(super::pages::Pages::new(&self.doc.office, window, cx));
+            }
+        }
+        cx.notify()
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -314,16 +337,32 @@ impl DocView {
 }
 
 impl Render for DocView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if matches!(self.doc.office, Office::Sheet(_)) {
             return self.sheet_body(cx);
         }
+        if !self.outline && self.pages.is_some() {
+            return self.pages_body(window, cx);
+        }
+        let back = self.pages.is_some().then(|| {
+            let me = cx.entity();
+            div().px_2().pt_1().child(
+                ely_gpui_component::buttons::Button::new("doc-back-to-pages", t("Back to pages"))
+                    .variant(ely_gpui_component::buttons::ButtonVariant::Ghost)
+                    .size(ely_gpui_component::theme::ControlSize::Sm)
+                    .icon(ely_gpui_component::primitives::IconName::FileText)
+                    .on_click(move |_, window, cx| {
+                        me.update(cx, |d, cx| d.set_outline(false, window, cx))
+                    }),
+            )
+        });
         match &self.editor {
             Some(editor) => div()
                 .size_full()
-                .px_3()
-                .py_2()
-                .child(editor.clone())
+                .flex()
+                .flex_col()
+                .children(back)
+                .child(div().flex_1().min_h_0().px_3().py_2().child(editor.clone()))
                 .into_any_element(),
             None => div().into_any_element(),
         }

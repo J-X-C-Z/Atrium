@@ -11,6 +11,7 @@ mod docmap;
 mod export;
 mod links;
 mod opener;
+mod pageedit;
 mod schedule;
 mod settings;
 mod skills;
@@ -119,6 +120,8 @@ fn main() {
             KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("tab", ui::AcceptPrediction, Some("Predicting")),
         ]);
+        // After the app-wide keys, so the page editor's own win while it has focus.
+        ui::bind_page_keys(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
         ui::register_actions(cx);
         set_menus(cx);

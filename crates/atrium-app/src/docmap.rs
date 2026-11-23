@@ -491,6 +491,7 @@ mod tests {
         let image = Atom {
             id: 9,
             kind: AtomKind::Image(None),
+            look: Default::default(),
         };
         let inlines = vec![
             Inline::Text {

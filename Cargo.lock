@@ -613,6 +613,7 @@ dependencies = [
  "agent-rpc",
  "anyhow",
  "atrium-core",
+ "atrium-layout",
  "atrium-memory",
  "atrium-node",
  "atrium-office",

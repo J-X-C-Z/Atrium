@@ -23,6 +23,9 @@ fn pt(twips: i32) -> f32 {
 /// Word's default body size for Chinese documents: 五号, 10.5 pt.
 const BODY_PT: f32 = 10.5;
 const SLIDE_PT: f32 = 18.0;
+/// Lists the engine makes up for list paragraphs that have no numbering
+/// look: they restart after any other paragraph.
+const HINTED_LIST: u32 = u32::MAX - 1;
 /// Default tab stops: two characters of body text.
 const DEFAULT_TAB: f32 = 21.0;
 
@@ -165,7 +168,7 @@ fn hinted(para: &Para) -> (ParaLook, Option<f32>, bool) {
         look.left = 420 * (level as i32 + 1);
         look.first_line = -420;
         look.list = Some(atrium_office::look::ListLook {
-            list: 0,
+            list: HINTED_LIST + ordered as u32,
             level,
             pattern: format!("%{}.", level + 1),
             formats: (0..=level)
@@ -307,7 +310,14 @@ impl Ctx<'_> {
     }
 
     fn label(&mut self, look: &ParaLook) -> Option<String> {
-        let list = look.list.as_ref()?;
+        let Some(list) = look.list.as_ref() else {
+            self.counters.retain(|id, _| *id < HINTED_LIST);
+            return None;
+        };
+        if list.list >= HINTED_LIST {
+            let other = HINTED_LIST + (list.list == HINTED_LIST) as u32;
+            self.counters.remove(&other);
+        }
         let level = list.level as usize;
         let counts = self.counters.entry(list.list).or_default();
         counts.resize(level + 1, 0);
@@ -1234,8 +1244,29 @@ pub(crate) fn slide(slide: &Slide, index: usize, shaper: &dyn Shaper) -> Layout 
         items: Vec::new(),
     };
     let mut lines = Vec::new();
+    // Placeholders whose place comes from the slide's layout have no frame
+    // until the binding resolves it: stack them down the slide, the first
+    // as the title.
+    let (w, h) = (page.width, page.height);
+    let mut next_y = h * 0.08;
+    let mut first = true;
     for shape in &slide.shapes {
-        shape_items(&mut cx, shape, index, &mut page, &mut lines);
+        if shape.frame[2] > 1 && shape.frame[3] > 1 {
+            shape_items(&mut cx, shape, index, &mut page, &mut lines, None);
+            continue;
+        }
+        let size = if first { 32.0 } else { SLIDE_PT };
+        let frame = [w * 0.07, next_y, w * 0.86, 0.0];
+        let used = shape_items(
+            &mut cx,
+            shape,
+            index,
+            &mut page,
+            &mut lines,
+            Some((frame, size)),
+        );
+        next_y += used + h * 0.04;
+        first = false;
     }
     Layout {
         pages: vec![page],
@@ -1243,8 +1274,16 @@ pub(crate) fn slide(slide: &Slide, index: usize, shaper: &dyn Shaper) -> Layout 
     }
 }
 
-fn shape_items(cx: &mut Ctx, shape: &Shape, index: usize, page: &mut Page, lines: &mut Vec<Line>) {
-    let [x, y, w, h] = shape.frame.map(|v| v as f32);
+/// Draws a shape and its text; returns the height its text took.
+fn shape_items(
+    cx: &mut Ctx,
+    shape: &Shape,
+    index: usize,
+    page: &mut Page,
+    lines: &mut Vec<Line>,
+    auto: Option<([f32; 4], f32)>,
+) -> f32 {
+    let [x, y, w, h] = auto.map(|p| p.0).unwrap_or(shape.frame.map(|v| v as f32));
     let rect = Rect {
         x,
         y,
@@ -1279,11 +1318,11 @@ fn shape_items(cx: &mut Ctx, shape: &Shape, index: usize, page: &mut Page, lines
     };
     let inner = (w - insets[1] - insets[3]).max(1.0);
     let scale = look.font_scale.map(|s| s as f32 / 1000.0).unwrap_or(1.0);
-    cx.base_size = SLIDE_PT * scale;
+    cx.base_size = auto.map(|p| p.1).unwrap_or(SLIDE_PT) * scale;
     let mut placed = Vec::new();
     let mut ty = 0.0;
     for (k, p) in shape.paras.iter().enumerate() {
-        let b = cx.para(p, inner, true);
+        let b = cx.para(p, inner, auto.is_none());
         if k > 0 {
             ty += b.before;
         }
@@ -1294,6 +1333,11 @@ fn shape_items(cx: &mut Ctx, shape: &Shape, index: usize, page: &mut Page, lines
         }
         ty += b.after;
     }
+    let h = if auto.is_some() {
+        ty + insets[0] + insets[2]
+    } else {
+        h
+    };
     let free = h - insets[0] - insets[2] - ty;
     let dy = y
         + insets[0]
@@ -1317,4 +1361,5 @@ fn shape_items(cx: &mut Ctx, shape: &Shape, index: usize, page: &mut Page, lines
             furniture: false,
         });
     }
+    h
 }

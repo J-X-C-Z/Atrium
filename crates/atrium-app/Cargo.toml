@@ -16,6 +16,7 @@ atrium-sync.workspace = true
 atrium-phone = { path = "../atrium-phone" }
 atrium-project.workspace = true
 atrium-office.workspace = true
+atrium-layout.workspace = true
 atrium-workflow.workspace = true
 atrium-memory.workspace = true
 atrium-preview.workspace = true
