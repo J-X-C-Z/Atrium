@@ -454,13 +454,155 @@ pub struct ConfigOption {
 }
 
 impl ConfigOption {
-    /// The current choice's display name.
+    /// The current choice's display name. When `current` is not among the
+    /// choices as written, it is matched ignoring case, then by the part
+    /// after the last `/`; failing that, the id is made readable.
     pub fn current_name(&self) -> String {
+        if let Some(choice) = self.current_choice() {
+            return choice.name.clone();
+        }
+        static LOGGED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        if let Ok(mut logged) = LOGGED.lock()
+            && !logged.contains(&self.current)
+        {
+            log::debug!(
+                "option {} is {:?}, which is not among its {} choices",
+                self.id,
+                self.current,
+                self.choices.len()
+            );
+            logged.push(self.current.clone());
+        }
+        prettify_model_id(&self.current)
+    }
+
+    /// The choice `current` names, allowing for case and a `group/` prefix.
+    fn current_choice(&self) -> Option<&ConfigChoice> {
+        let current = self.current.as_str();
+        let tail = |v: &str| v.rsplit('/').next().unwrap_or(v).to_lowercase();
         self.choices
             .iter()
-            .find(|c| c.value == self.current)
-            .map(|c| c.name.clone())
-            .unwrap_or_else(|| self.current.clone())
+            .find(|c| c.value == current)
+            .or_else(|| {
+                self.choices
+                    .iter()
+                    .find(|c| c.value.eq_ignore_ascii_case(current))
+            })
+            .or_else(|| {
+                let want = tail(current);
+                self.choices.iter().find(|c| tail(&c.value) == want)
+            })
+    }
+}
+
+/// A model id made readable: `group/auto-deepseek-v4-1-flash` becomes
+/// "Auto DeepSeek V4.1 Flash".
+pub fn prettify_model_id(id: &str) -> String {
+    let id = id.trim();
+    let tail = id.rsplit('/').next().unwrap_or(id);
+    let tokens: Vec<&str> = tail
+        .split(['-', '_', ' '])
+        .filter(|t| !t.is_empty())
+        .collect();
+    if tokens.is_empty() {
+        return id.to_string();
+    }
+    let version_part =
+        |t: &str| !t.is_empty() && t.len() <= 2 && t.bytes().all(|b| b.is_ascii_digit());
+    let mut words: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        let token = tokens[i];
+        i += 1;
+        // A number, or `v` and a number, followed by small numbers is one
+        // dotted version: `v4-1` -> `V4.1`.
+        let number = token.strip_prefix(['v', 'V']).unwrap_or(token);
+        if version_part(number) && tokens.get(i).is_some_and(|t| version_part(t)) {
+            let mut version = capitalise_token(token);
+            while let Some(next) = tokens.get(i).filter(|t| version_part(t)) {
+                version.push('.');
+                version.push_str(next);
+                i += 1;
+            }
+            words.push(version);
+            continue;
+        }
+        words.push(capitalise_token(token));
+    }
+    words.join(" ")
+}
+
+fn capitalise_token(token: &str) -> String {
+    match token.to_lowercase().as_str() {
+        "deepseek" => return "DeepSeek".into(),
+        "gpt" => return "GPT".into(),
+        "claude" => return "Claude".into(),
+        "gemini" => return "Gemini".into(),
+        "qwen" => return "Qwen".into(),
+        "glm" => return "GLM".into(),
+        _ => {}
+    }
+    let mut chars = token.chars();
+    match chars.next() {
+        // Words with digits keep the rest as written (`4o`, `r1`).
+        Some(c) if token.chars().any(|c| c.is_ascii_digit()) => {
+            c.to_uppercase().chain(chars).collect()
+        }
+        Some(c) => c
+            .to_uppercase()
+            .chain(chars.flat_map(|c| c.to_lowercase()))
+            .collect(),
+        None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn option(current: &str, values: &[(&str, &str)]) -> ConfigOption {
+        ConfigOption {
+            id: "model".into(),
+            name: "Model".into(),
+            category: Some("model".into()),
+            current: current.into(),
+            choices: values
+                .iter()
+                .map(|(value, name)| ConfigChoice {
+                    value: (*value).into(),
+                    name: (*name).into(),
+                    description: None,
+                    group: None,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn current_name_matches_exactly_then_loosely() {
+        let o = option("a", &[("a", "Alpha")]);
+        assert_eq!(o.current_name(), "Alpha");
+        let o = option("GROUP/Auto-Flash", &[("group/auto-flash", "Auto Flash")]);
+        assert_eq!(o.current_name(), "Auto Flash");
+        let o = option("group/auto-flash", &[("other/auto-flash", "Auto Flash")]);
+        assert_eq!(o.current_name(), "Auto Flash");
+    }
+
+    #[test]
+    fn unmatched_ids_are_prettified() {
+        let o = option("group/auto-deepseek-v4-1-flash", &[("x", "X")]);
+        assert_eq!(o.current_name(), "Auto DeepSeek V4.1 Flash");
+        assert_eq!(prettify_model_id("gpt-4o-mini"), "GPT 4o Mini");
+        assert_eq!(prettify_model_id("claude-3-5-sonnet"), "Claude 3.5 Sonnet");
+        assert_eq!(prettify_model_id("qwen3_coder"), "Qwen3 Coder");
+        assert_eq!(prettify_model_id("glm-4-6"), "GLM 4.6");
+        assert_eq!(
+            prettify_model_id("claude-sonnet-4-20250514"),
+            "Claude Sonnet 4 20250514"
+        );
+        assert_eq!(prettify_model_id("gemini-2-5-pro"), "Gemini 2.5 Pro");
+        assert_eq!(prettify_model_id(""), "");
+        assert_eq!(prettify_model_id("a/"), "a/");
     }
 }
 

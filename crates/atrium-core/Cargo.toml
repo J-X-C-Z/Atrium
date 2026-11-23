@@ -9,3 +9,4 @@ description = "Backend-agnostic model of agent conversations: threads, turns, it
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+log.workspace = true
