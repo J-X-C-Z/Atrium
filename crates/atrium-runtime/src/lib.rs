@@ -218,11 +218,19 @@ impl MockRuntime {
     }
 
     pub fn started(&self) -> Vec<SessionSpec> {
-        self.inner.lock().expect("mock runtime poisoned").started.clone()
+        self.inner
+            .lock()
+            .expect("mock runtime poisoned")
+            .started
+            .clone()
     }
 
     pub fn sent(&self) -> Vec<SentMessage> {
-        self.inner.lock().expect("mock runtime poisoned").sent.clone()
+        self.inner
+            .lock()
+            .expect("mock runtime poisoned")
+            .sent
+            .clone()
     }
 }
 
@@ -339,9 +347,7 @@ mod tests {
     #[test]
     fn mock_records_what_the_project_layer_asked() {
         let runtime = MockRuntime::default();
-        let session = runtime
-            .start(spec(), Arc::new(|_| {}))
-            .expect("start");
+        let session = runtime.start(spec(), Arc::new(|_| {})).expect("start");
         let turn = runtime
             .send(&session, TurnInput::text("next"), Delivery::Start)
             .expect("send");
