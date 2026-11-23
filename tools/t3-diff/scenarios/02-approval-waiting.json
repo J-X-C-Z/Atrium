@@ -1,0 +1,10 @@
+{
+  "name": "02-approval-waiting",
+  "project": "scratch",
+  "provider": "mockcodex",
+  "model": "mock-1",
+  "turns": [
+    {"text": "run ls"}
+  ],
+  "expect": {"final_status": "waiting"}
+}
