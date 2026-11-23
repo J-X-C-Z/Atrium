@@ -5,8 +5,6 @@
 //! stdout. tools/t3-diff diffs the two streams.
 
 fn main() {
-    eprintln!(
-        "atrium-engine-driver: no scenarios wired yet; tools/t3-diff owns the harness"
-    );
+    eprintln!("atrium-engine-driver: no scenarios wired yet; tools/t3-diff owns the harness");
     std::process::exit(2);
 }
