@@ -437,6 +437,10 @@ impl Composer {
             );
             let title = match &device.status {
                 crate::workspace::DeviceStatus::Online => ws.device_label(&device.id),
+                crate::workspace::DeviceStatus::Reconnecting => tf(
+                    "{device} · reconnecting",
+                    &[("device", &ws.device_label(&device.id))],
+                ),
                 crate::workspace::DeviceStatus::Offline(_) => tf(
                     "{device} · offline",
                     &[("device", &ws.device_label(&device.id))],

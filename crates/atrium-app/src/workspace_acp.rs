@@ -304,6 +304,14 @@ impl Workspace {
     }
 
     fn apply_acp(&mut self, backend: &str, events: Vec<AgentEvent>, cx: &mut Context<Self>) {
+        if let (_, Some(device)) = crate::agents::split_backend(backend)
+            && !events
+                .iter()
+                .all(|e| matches!(e, AgentEvent::Disconnected { .. }))
+        {
+            let device = device.to_string();
+            self.device_alive(&device);
+        }
         for event in events {
             match event {
                 AgentEvent::Disconnected { reason } => {

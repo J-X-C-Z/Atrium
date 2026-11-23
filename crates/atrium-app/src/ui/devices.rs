@@ -38,7 +38,7 @@ pub fn section(
                     "nodes",
                     &ws.devices
                         .iter()
-                        .filter(|d| d.status == DeviceStatus::Online)
+                        .filter(|d| d.status.is_reachable())
                         .count(),
                 ),
             ],
@@ -77,7 +77,9 @@ pub fn section(
     );
 
     for device in &ws.devices {
-        let online = device.status == DeviceStatus::Online;
+        let state = ws.device_state(&device.id);
+        let online = state == DeviceStatus::Online;
+        let reconnecting = state == DeviceStatus::Reconnecting;
         let mut agents: Vec<String> = Vec::new();
         if device.codex_status != AgentStatus::NotInstalled {
             agents.push(match &device.codex_status {
@@ -123,6 +125,8 @@ pub fn section(
                         .text_size(small)
                         .child(div().size(px(7.)).flex_none().rounded_full().bg(if online {
                             colors.success
+                        } else if reconnecting {
+                            colors.warning
                         } else {
                             colors.fg_disabled
                         }))
@@ -164,15 +168,19 @@ pub fn section(
                         }),
                 )
                 .child(rename_row(workspace, alias, &device.id, ws, cx))
-                .child(div().text_size(tiny).text_color(colors.fg_muted).child(
-                    match &device.status {
-                        DeviceStatus::Offline(why) => {
-                            tf("Offline: {why}", &[("why", &crate::i18n::t_any(why))])
-                        }
-                        DeviceStatus::Online if agents.is_empty() => t("No agents").into(),
-                        DeviceStatus::Online => agents.join(" · "),
-                    },
-                ))
+                .child(
+                    div()
+                        .text_size(tiny)
+                        .text_color(colors.fg_muted)
+                        .child(match &state {
+                            DeviceStatus::Reconnecting => t("Reconnecting…").into(),
+                            DeviceStatus::Offline(why) => {
+                                tf("Offline: {why}", &[("why", &crate::i18n::t_any(why))])
+                            }
+                            DeviceStatus::Online if agents.is_empty() => t("No agents").into(),
+                            DeviceStatus::Online => agents.join(" · "),
+                        }),
+                )
                 .child(div().text_size(tiny).text_color(colors.fg_subtle).child(
                     match ws.device_workspace(&device.id) {
                         Some(dir) => tf("Atrium Workspace: {path}", &[("path", &dir)]),

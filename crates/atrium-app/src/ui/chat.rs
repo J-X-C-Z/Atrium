@@ -586,7 +586,20 @@ fn body(
 /// The shown chat lives on a device that is offline: what shows is the last
 /// copy, and nothing can be sent until it is back.
 fn offline_strip(workspace: &Entity<Workspace>, cx: &App) -> Option<AnyElement> {
-    let device = workspace.read(cx).offline_owner()?;
+    let text = {
+        let ws = workspace.read(cx);
+        match (ws.offline_owner(), ws.reconnecting_owner()) {
+            (Some(device), _) => tf(
+                "{device} is offline. This is the copy from when it was last seen, read-only; you can continue once it is back.",
+                &[("device", &device)],
+            ),
+            (None, Some(device)) => tf(
+                "Reconnecting to {device}… this is usually a brief interruption.",
+                &[("device", &device)],
+            ),
+            (None, None) => return None,
+        }
+    };
     let theme = cx.theme();
     let colors = theme.colors.clone();
     Some(
@@ -611,10 +624,7 @@ fn offline_strip(workspace: &Entity<Workspace>, cx: &App) -> Option<AnyElement> 
                             .size(IconSize::Xs)
                             .color(colors.warning),
                     )
-                    .child(div().flex_1().min_w_0().child(tf(
-                        "{device} is offline. This is the copy from when it was last seen, read-only; you can continue once it is back.",
-                        &[("device", &device)],
-                    ))),
+                    .child(div().flex_1().min_w_0().child(text)),
             )
             .into_any_element(),
     )
@@ -967,9 +977,7 @@ pub(super) fn backend_status(ws: &Workspace, backend: &str) -> Option<&'static s
     match crate::agents::split_backend(backend) {
         (CODEX, None) => codex_status(ws),
         (CODEX, Some(device)) => match ws.device(device) {
-            Some(device) if device.status != crate::workspace::DeviceStatus::Online => {
-                Some("offline")
-            }
+            Some(device) if !device.status.is_reachable() => Some("offline"),
             Some(device) => agent_status_text(&device.codex_status),
             None => Some("not running"),
         },

@@ -67,9 +67,9 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Worth talking to: online, or reconnecting after a blip.
     pub fn device_online(&self, device: &str) -> bool {
-        self.device(device)
-            .is_some_and(|d| d.status == DeviceStatus::Online)
+        self.device(device).is_some_and(|d| d.status.is_reachable())
     }
 
     /// Whether the chat list shows `thread_id` under the current filter.
@@ -92,6 +92,14 @@ impl Workspace {
         let id = self.active_thread_id()?;
         let device = self.chat_device(id)?;
         (!self.device_online(&device)).then_some(device)
+    }
+
+    /// The shown chat lives on a device that missed a poll or whose link is
+    /// getting back: not offline yet.
+    pub fn reconnecting_owner(&self) -> Option<String> {
+        let id = self.active_thread_id()?;
+        let device = self.chat_device(id)?;
+        (self.device_state(&device) == DeviceStatus::Reconnecting).then_some(device)
     }
 
     /// The other device that runs `root`'s scheduler, while its lease holds.

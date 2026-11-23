@@ -752,7 +752,7 @@ impl Link {
             }
             // Back off, still taking lines to send later; stop when the
             // client let go.
-            let wait = Duration::from_millis((500u64 << attempt.min(5)).min(15_000));
+            let wait = reconnect_wait(attempt, jitter_unit());
             match outgoing.recv_timeout(wait) {
                 Ok(line) => queued.push(line),
                 Err(RecvTimeoutError::Timeout) => {}
@@ -834,6 +834,9 @@ impl Link {
             }
             Err(tungstenite::Error::Http(response)) if response.status() == 404 => Err(
                 ConnectError::Gone("the process is no longer on the node".into()),
+            ),
+            Err(tungstenite::Error::Http(response)) if response.status() == 401 => Err(
+                ConnectError::Gone("the node rejected the access token".into()),
             ),
             Err(tungstenite::Error::Http(response)) if response.status() == 403 => Err(
                 ConnectError::Gone("the node does not allow this device".into()),
@@ -942,6 +945,32 @@ impl Link {
             }
         }
     }
+}
+
+/// How long to wait before reconnect attempt `attempt` (1 for the first):
+/// exponential from 0.5 s, capped at 15 s, then spread over 50-100% of that
+/// by `jitter` (0.0..1.0) so many links do not retry in step.
+pub fn reconnect_wait(attempt: u32, jitter: f64) -> Duration {
+    let base = (500u64 << attempt.min(5)).min(15_000);
+    let jitter = if jitter.is_finite() {
+        jitter.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    Duration::from_millis(((base as f64) * (0.5 + 0.5 * jitter)) as u64)
+}
+
+/// A cheap value in 0.0..1.0 that differs between links and attempts.
+fn jitter_unit() -> f64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u128(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+    );
+    (hasher.finish() % 10_000) as f64 / 10_000.0
 }
 
 enum ConnectError {
@@ -1055,6 +1084,17 @@ pub fn find_nodes(peers: &[Peer], token: Option<String>) -> Vec<(NodeClient, Nod
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reconnect_wait_grows_is_capped_and_jittered() {
+        assert_eq!(reconnect_wait(1, 1.0), Duration::from_millis(1000));
+        assert_eq!(reconnect_wait(1, 0.0), Duration::from_millis(500));
+        assert_eq!(reconnect_wait(30, 1.0), Duration::from_millis(15_000));
+        assert_eq!(reconnect_wait(30, 0.0), Duration::from_millis(7_500));
+        assert_eq!(reconnect_wait(2, f64::NAN), Duration::from_millis(1000));
+        let j = jitter_unit();
+        assert!((0.0..1.0).contains(&j));
+    }
 
     fn quota_deadline(work: impl FnOnce() + Send + 'static) {
         let (tx, rx) = mpsc::channel();

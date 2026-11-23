@@ -1264,17 +1264,9 @@ impl Workspace {
                 };
                 let _ = this.update(cx, |workspace, cx| {
                     for (id, up) in reached {
+                        let health = workspace.link_health(&id);
                         if let Some(device) = workspace.devices.iter_mut().find(|d| d.id == id) {
-                            match (&device.status, up) {
-                                (super::DeviceStatus::Online, false) => {
-                                    device.status =
-                                        super::DeviceStatus::Offline("did not answer".into());
-                                }
-                                (super::DeviceStatus::Offline(_), true) => {
-                                    device.status = super::DeviceStatus::Online;
-                                }
-                                _ => {}
-                            }
+                            device.observe(up, std::time::Instant::now(), health);
                         }
                     }
                     for (device, install, threads, applied) in rounds {
@@ -1374,7 +1366,7 @@ impl Workspace {
             return false;
         };
         self.device(&device)
-            .is_some_and(|d| d.status == super::DeviceStatus::Online)
+            .is_some_and(|d| d.status.is_reachable())
     }
 
     pub fn sync_is_remote(&self, thread_id: &str) -> bool {

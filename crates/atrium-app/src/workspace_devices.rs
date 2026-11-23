@@ -5,7 +5,7 @@
 use crate::i18n::{t, tf};
 use std::{
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use agent_rpc::node::{self, LinkState, NodeClient, NodeInfo, RemoteProc};
@@ -21,7 +21,94 @@ use crate::agents::{self, AgentProfile};
 #[derive(Clone, Debug, PartialEq)]
 pub enum DeviceStatus {
     Online,
+    /// Missed a poll or lost its link, but not for long enough to call it
+    /// offline: still tried, shown as reconnecting.
+    Reconnecting,
     Offline(String),
+}
+
+impl DeviceStatus {
+    /// Worth talking to: answers, or may be about to again.
+    pub fn is_reachable(&self) -> bool {
+        !matches!(self, DeviceStatus::Offline(_))
+    }
+}
+
+/// Consecutive missed polls after which a device is called offline.
+pub const MISS_LIMIT: u32 = 3;
+/// With at least two misses, this long without any sign of life is enough.
+pub const SILENCE_WINDOW: Duration = Duration::from_secs(45);
+
+/// What the live links to a device say.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LinkHealth {
+    /// An attach connection is up: proof the node answers.
+    pub alive: bool,
+    /// A link is trying to get back.
+    pub reconnecting: bool,
+}
+
+/// The verdict on a device.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Verdict {
+    Online,
+    Reconnecting,
+    Offline,
+}
+
+/// Decides a device's state from consecutive missed polls, how long it has
+/// been silent (no poll answered, no RPC or event) and its links.
+pub fn judge(misses: u32, silent_for: Duration, link: LinkHealth) -> Verdict {
+    if link.alive {
+        return Verdict::Online;
+    }
+    if misses == 0 {
+        return if link.reconnecting {
+            Verdict::Reconnecting
+        } else {
+            Verdict::Online
+        };
+    }
+    if misses >= MISS_LIMIT || (misses >= 2 && silent_for >= SILENCE_WINDOW) {
+        Verdict::Offline
+    } else {
+        Verdict::Reconnecting
+    }
+}
+
+/// When a device last showed life, and how many polls missed since.
+#[derive(Clone, Copy, Debug)]
+pub struct Liveness {
+    pub misses: u32,
+    pub last_seen: Instant,
+}
+
+impl Liveness {
+    pub fn new(now: Instant) -> Self {
+        Self {
+            misses: 0,
+            last_seen: now,
+        }
+    }
+
+    /// A poll, RPC, event or link proved the device is there.
+    pub fn alive(&mut self, now: Instant) {
+        self.misses = 0;
+        self.last_seen = now;
+    }
+
+    /// A poll did not find it.
+    pub fn missed(&mut self) {
+        self.misses = self.misses.saturating_add(1);
+    }
+
+    pub fn verdict(&self, now: Instant, link: LinkHealth) -> Verdict {
+        judge(
+            self.misses,
+            now.saturating_duration_since(self.last_seen),
+            link,
+        )
+    }
 }
 
 /// Another device's node and what runs there for Atrium.
@@ -31,6 +118,7 @@ pub struct Device {
     pub node: NodeClient,
     pub info: NodeInfo,
     pub status: DeviceStatus,
+    pub live: Liveness,
     pub codex: Option<CodexClient>,
     pub codex_status: AgentStatus,
     pub codex_link: Option<Arc<Mutex<LinkState>>>,
@@ -40,6 +128,26 @@ pub struct Device {
 }
 
 impl Device {
+    /// Records whether a poll or call reached the device and sets its
+    /// status. Returns true when it was offline and is back.
+    pub fn observe(&mut self, reached: bool, now: Instant, link: LinkHealth) -> bool {
+        let was_offline = !self.status.is_reachable();
+        if reached || link.alive {
+            self.live.alive(now);
+        } else {
+            self.live.missed();
+        }
+        self.status = match self.live.verdict(now, link) {
+            Verdict::Online => DeviceStatus::Online,
+            Verdict::Reconnecting => DeviceStatus::Reconnecting,
+            Verdict::Offline => match &self.status {
+                DeviceStatus::Offline(why) => DeviceStatus::Offline(why.clone()),
+                _ => DeviceStatus::Offline("did not answer".into()),
+            },
+        };
+        was_offline && self.status.is_reachable()
+    }
+
     /// The folder agents start in, and new chats run in, unless chosen.
     pub fn default_folder(&self) -> String {
         self.info
@@ -93,8 +201,19 @@ impl Workspace {
                 if this.update(cx, |ws, cx| ws.discover(cx)).is_err() {
                     break;
                 }
+                // Poll faster while a device is being doubted, so a blip
+                // clears (or is confirmed) in well under three minutes.
+                let wait = this
+                    .read_with(cx, |ws, _| {
+                        if ws.devices.iter().any(|d| d.live.misses > 0) {
+                            15
+                        } else {
+                            60
+                        }
+                    })
+                    .unwrap_or(60);
                 cx.background_executor()
-                    .timer(Duration::from_secs(60))
+                    .timer(Duration::from_secs(wait))
                     .await;
             }
         }));
@@ -171,6 +290,7 @@ impl Workspace {
     fn found_devices(&mut self, found: Found, cx: &mut Context<Self>) {
         self.discovering = false;
         self.tailnet = Some(found.tailnet);
+        let now = Instant::now();
         let mut seen = Vec::new();
         for (client, info) in found.nodes {
             let id = device_id(if info.device.name.is_empty() {
@@ -179,13 +299,12 @@ impl Workspace {
                 &info.device.name
             });
             seen.push(id.clone());
+            let health = self.link_health(&id);
             match self.devices.iter_mut().find(|d| d.id == id) {
                 Some(device) => {
-                    let was_offline = device.status != DeviceStatus::Online;
                     device.node = client;
                     device.info = info;
-                    device.status = DeviceStatus::Online;
-                    if was_offline {
+                    if device.observe(true, now, health) {
                         self.start_device(&id, cx);
                     }
                 }
@@ -196,6 +315,7 @@ impl Workspace {
                         node: client,
                         info,
                         status: DeviceStatus::Online,
+                        live: Liveness::new(now),
                         codex: None,
                         codex_status: AgentStatus::NotInstalled,
                         codex_link: None,
@@ -206,9 +326,17 @@ impl Workspace {
                 }
             }
         }
-        for device in &mut self.devices {
-            if !seen.contains(&device.id) && device.status == DeviceStatus::Online {
-                device.status = DeviceStatus::Offline("did not answer".into());
+        // A missed poll is only a miss: links and recent calls still count.
+        let missing: Vec<String> = self
+            .devices
+            .iter()
+            .filter(|d| !seen.contains(&d.id))
+            .map(|d| d.id.clone())
+            .collect();
+        for id in missing {
+            let health = self.link_health(&id);
+            if let Some(device) = self.devices.iter_mut().find(|d| d.id == id) {
+                device.observe(false, now, health);
             }
         }
         cx.notify();
@@ -231,6 +359,58 @@ impl Workspace {
         cx.notify();
     }
 
+    /// What the open attach links to `id` say about it.
+    pub fn link_health(&self, id: &str) -> LinkHealth {
+        let mut health = LinkHealth::default();
+        let links = self
+            .device(id)
+            .and_then(|d| d.codex_link.clone())
+            .into_iter()
+            .chain(
+                self.agents
+                    .iter()
+                    .filter(|a| a.remote.as_ref().is_some_and(|r| r.device == id))
+                    .filter_map(|a| a.link.clone()),
+            );
+        for link in links {
+            match &*link.lock().expect("link") {
+                LinkState::Connected => health.alive = true,
+                LinkState::Reconnecting { .. } => health.reconnecting = true,
+                _ => {}
+            }
+        }
+        health
+    }
+
+    /// A call or event from `id` just succeeded: proof of life.
+    pub fn device_alive(&mut self, id: &str) {
+        if let Some(device) = self.devices.iter_mut().find(|d| d.id == id) {
+            device.live.alive(Instant::now());
+            if device.status != DeviceStatus::Online {
+                device.status = DeviceStatus::Online;
+            }
+        }
+    }
+
+    /// The device's status with its live links applied: online, but a link
+    /// is trying to get back, shows as reconnecting.
+    pub fn device_state(&self, id: &str) -> DeviceStatus {
+        let Some(device) = self.device(id) else {
+            return DeviceStatus::Offline("did not answer".into());
+        };
+        match &device.status {
+            DeviceStatus::Online => {
+                let health = self.link_health(id);
+                if health.reconnecting && !health.alive {
+                    DeviceStatus::Reconnecting
+                } else {
+                    DeviceStatus::Online
+                }
+            }
+            other => other.clone(),
+        }
+    }
+
     pub fn device(&self, id: &str) -> Option<&Device> {
         self.devices.iter().find(|d| d.id == id)
     }
@@ -249,6 +429,7 @@ impl Workspace {
             node: client,
             info,
             status: DeviceStatus::Online,
+            live: Liveness::new(Instant::now()),
             codex: None,
             codex_status: AgentStatus::NotInstalled,
             codex_link: None,
@@ -438,6 +619,9 @@ impl Workspace {
     /// One message from a device's Codex: its threads are that device's,
     /// and account news is not this machine's.
     fn handle_remote_codex(&mut self, device: &str, incoming: Incoming, cx: &mut Context<Self>) {
+        if !matches!(incoming, Incoming::Closed) {
+            self.device_alive(device);
+        }
         let backend = agents::backend_id("codex", Some(device));
         let event = match incoming {
             Incoming::Notification { method, params } => translate::event(&method, &params),
@@ -632,6 +816,67 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    const NONE: LinkHealth = LinkHealth {
+        alive: false,
+        reconnecting: false,
+    };
+
+    #[test]
+    fn one_missed_poll_is_not_offline() {
+        assert_eq!(judge(0, Duration::ZERO, NONE), Verdict::Online);
+        assert_eq!(
+            judge(1, Duration::from_secs(60), NONE),
+            Verdict::Reconnecting
+        );
+    }
+
+    #[test]
+    fn offline_after_three_misses_or_silence() {
+        assert_eq!(judge(3, Duration::from_secs(1), NONE), Verdict::Offline);
+        assert_eq!(
+            judge(2, Duration::from_secs(10), NONE),
+            Verdict::Reconnecting
+        );
+        assert_eq!(judge(2, Duration::from_secs(45), NONE), Verdict::Offline);
+    }
+
+    #[test]
+    fn a_live_link_is_proof_of_life() {
+        let alive = LinkHealth {
+            alive: true,
+            reconnecting: false,
+        };
+        assert_eq!(judge(9, Duration::from_secs(900), alive), Verdict::Online);
+        let retrying = LinkHealth {
+            alive: false,
+            reconnecting: true,
+        };
+        assert_eq!(judge(0, Duration::ZERO, retrying), Verdict::Reconnecting);
+        assert_eq!(judge(3, Duration::ZERO, retrying), Verdict::Offline);
+    }
+
+    #[test]
+    fn liveness_resets_on_proof() {
+        let t0 = Instant::now();
+        let mut live = Liveness::new(t0);
+        live.missed();
+        live.missed();
+        let later = t0 + Duration::from_secs(50);
+        assert_eq!(live.verdict(later, NONE), Verdict::Offline);
+        live.alive(later);
+        assert_eq!(live.misses, 0);
+        assert_eq!(live.verdict(later, NONE), Verdict::Online);
+    }
+
+    #[test]
+    fn reachable_means_not_offline() {
+        assert!(DeviceStatus::Online.is_reachable());
+        assert!(DeviceStatus::Reconnecting.is_reachable());
+        assert!(!DeviceStatus::Offline("x".into()).is_reachable());
+    }
+
     #[test]
     fn device_ids_are_tidy() {
         assert_eq!(super::device_id("Studio Mac"), "studio-mac");
