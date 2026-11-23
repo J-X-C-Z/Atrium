@@ -1195,14 +1195,15 @@ pub(crate) fn stack(
             }
             Block::Table(t) => {
                 let (rows, _, height) = super::table::table(cx, t, width);
+                let mut ty = y;
                 for row in rows {
-                    let row_y = row.y;
                     for item in row.items {
-                        extra.push(super::translate(&item, 0.0, y));
+                        extra.push(super::translate(&item, 0.0, ty));
                     }
                     for (ly, line) in row.lines {
-                        placed.push((y + row_y + ly, line));
+                        placed.push((ty + ly, line));
                     }
+                    ty += row.height;
                 }
                 y += height;
                 last_style = None;

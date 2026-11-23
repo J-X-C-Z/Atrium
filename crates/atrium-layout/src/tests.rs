@@ -1,5 +1,6 @@
 use atrium_office::look::{
-    Baseline, LineSpacing, PageLook, ParaLook, Section, TabKind, TabStop, TableLook,
+    Baseline, Border, Borders, CellLook, LineSpacing, PageLook, ParaLook, Rgb, Section, TabKind,
+    TabStop, TableLook,
 };
 use atrium_office::{Align, Atom, AtomKind, Block, Inline, Marks, Para, ParaStyle, Table, WordDoc};
 
@@ -202,6 +203,259 @@ fn tables_put_cells_side_by_side_with_borders() {
         .filter(|i| matches!(i, Item::Rule { .. }))
         .count();
     assert_eq!(rules, 8);
+}
+
+fn cell(id: u64, text: &str) -> Vec<Block> {
+    vec![Block::Paragraph(plain(id, text))]
+}
+
+fn table_doc(table: Table, width: i32, height: i32) -> WordDoc {
+    looked(vec![Block::Table(table)], one_section(width, height))
+}
+
+#[test]
+fn a_table_grid_is_scaled_to_the_text_area() {
+    let table = Table {
+        id: 10,
+        rows: vec![vec![cell(11, "甲"), cell(12, "乙")]],
+        merged: vec![],
+        look: TableLook {
+            columns: vec![1000, 1000],
+            padding: [0; 4],
+            ..Default::default()
+        },
+    };
+    let out = layout(&table_doc(table, 1000, 2000), &FixedShaper);
+    assert!(out.lines[1].stops[0].1 >= 25.0);
+    assert!(out.lines[1].stops[0].1 < 30.0);
+}
+
+#[test]
+fn a_table_without_a_grid_fits_its_contents() {
+    let table = Table {
+        id: 10,
+        rows: vec![vec![cell(11, "字"), cell(12, "一二")]],
+        merged: vec![],
+        look: TableLook {
+            padding: [1, 0, 0, 0],
+            ..Default::default()
+        },
+    };
+    let out = layout(&table_doc(table, 4000, 2000), &FixedShaper);
+    assert!(
+        close(out.lines[1].stops[0].1, 10.0),
+        "{} {:?}",
+        out.lines[1].stops[0].1,
+        out.lines
+            .iter()
+            .map(|l| (l.para, l.stops[0].1))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_table_row_splits_unless_cant_split() {
+    let table = |cant| Table {
+        id: 10,
+        rows: vec![vec![cell(11, "一二三四五六")]],
+        merged: vec![],
+        look: TableLook {
+            columns: vec![400],
+            cant_split: vec![cant],
+            padding: [0; 4],
+            ..Default::default()
+        },
+    };
+    let doc = |cant| {
+        looked(
+            vec![
+                Block::Paragraph(plain(1, "一二三四")),
+                Block::Table(table(cant)),
+            ],
+            one_section(400, 800),
+        )
+    };
+    let out = layout(&doc(false), &FixedShaper);
+    assert_eq!(out.pages.len(), 2);
+    assert_eq!(
+        out.lines
+            .iter()
+            .filter(|l| l.page == 0 && l.para == 11)
+            .count(),
+        2,
+    );
+    assert_eq!(
+        out.lines
+            .iter()
+            .filter(|l| l.page == 1 && l.para == 11)
+            .count(),
+        1
+    );
+
+    let out = layout(&doc(true), &FixedShaper);
+    assert_eq!(out.pages.len(), 2);
+    assert_eq!(
+        out.lines
+            .iter()
+            .filter(|l| l.page == 1 && l.para == 11)
+            .count(),
+        3
+    );
+}
+
+#[test]
+fn header_rows_repeat_on_later_pages() {
+    let table = Table {
+        id: 10,
+        rows: vec![
+            vec![cell(100, "头")],
+            vec![cell(101, "一")],
+            vec![cell(102, "二")],
+            vec![cell(103, "三")],
+        ],
+        merged: vec![],
+        look: TableLook {
+            columns: vec![400],
+            header_rows: 1,
+            padding: [0; 4],
+            ..Default::default()
+        },
+    };
+    let out = layout(&table_doc(table, 400, 400), &FixedShaper);
+    assert_eq!(out.pages.len(), 3);
+    let pages: Vec<usize> = out
+        .lines
+        .iter()
+        .filter(|l| l.para == 100)
+        .map(|l| l.page)
+        .collect();
+    assert_eq!(pages, [0, 1, 2]);
+}
+
+#[test]
+fn a_vertical_merge_is_one_cell_with_text_in_the_first_row() {
+    let table = Table {
+        id: 10,
+        rows: vec![
+            vec![cell(11, "合"), cell(12, "一")],
+            vec![cell(13, "二"), cell(14, "三")],
+        ],
+        merged: vec![],
+        look: TableLook {
+            columns: vec![200, 200],
+            padding: [0; 4],
+            cells: vec![
+                vec![
+                    CellLook {
+                        shading: Some(Rgb(0xFF0000)),
+                        ..Default::default()
+                    },
+                    CellLook::default(),
+                ],
+                vec![
+                    CellLook {
+                        merged_up: true,
+                        ..Default::default()
+                    },
+                    CellLook::default(),
+                ],
+            ],
+            ..Default::default()
+        },
+    };
+    let out = layout(&table_doc(table, 400, 2000), &FixedShaper);
+    assert_eq!(out.lines.iter().filter(|l| l.para == 11).count(), 1);
+    assert!(out.lines.iter().all(|l| l.para != 13));
+    assert!(out.pages[0].items.iter().any(|i| matches!(
+        i,
+        Item::Fill { color, rect }
+            if *color == Rgb(0xFF0000) && close(rect.height, 20.0)
+    )));
+}
+
+#[test]
+fn nested_tables_are_laid_out_inside_their_cell() {
+    let inner = Table {
+        id: 20,
+        rows: vec![vec![cell(21, "内")]],
+        merged: vec![],
+        look: TableLook {
+            columns: vec![200],
+            padding: [0; 4],
+            ..Default::default()
+        },
+    };
+    let table = Table {
+        id: 10,
+        rows: vec![vec![vec![Block::Table(inner)]]],
+        merged: vec![],
+        look: TableLook {
+            columns: vec![400],
+            padding: [0; 4],
+            ..Default::default()
+        },
+    };
+    let out = layout(&table_doc(table, 4000, 2000), &FixedShaper);
+    let line = out.lines.iter().find(|l| l.para == 21).unwrap();
+    assert!(line.stops[0].1 >= 0.0);
+    assert!(
+        out.lines
+            .iter()
+            .any(|l| l.para == 21 && l.stops[0].1 < 200.0)
+    );
+}
+
+#[test]
+fn a_wider_border_wins_where_two_cells_meet() {
+    let wide = Border {
+        width: 40,
+        color: Rgb::BLACK,
+        space: 0,
+    };
+    let narrow = Border {
+        width: 10,
+        color: Rgb::BLACK,
+        space: 0,
+    };
+    let table = Table {
+        id: 10,
+        rows: vec![vec![cell(11, "甲"), cell(12, "乙")]],
+        merged: vec![],
+        look: TableLook {
+            columns: vec![200, 200],
+            padding: [0; 4],
+            cells: vec![vec![
+                CellLook {
+                    borders: Some(Borders {
+                        right: Some(wide),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                CellLook {
+                    borders: Some(Borders {
+                        left: Some(narrow),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            ]],
+            ..Default::default()
+        },
+    };
+    let out = layout(&table_doc(table, 400, 2000), &FixedShaper);
+    let shared: Vec<f32> = out.pages[0]
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Rule {
+                from, to, width, ..
+            } if close(from.0, 10.0) && close(to.0, 10.0) => Some(*width),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(shared.len(), 1);
+    assert!(close(shared[0], 2.0));
 }
 
 fn close(a: f32, b: f32) -> bool {

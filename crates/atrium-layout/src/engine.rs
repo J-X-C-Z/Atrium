@@ -537,31 +537,84 @@ impl Flow<'_, '_> {
     fn table(&mut self, t: &atrium_office::Table) {
         let width = self.col_width;
         let (rows, _, _) = table::table(self.cx, t, width);
-        for row in rows {
-            let h = row.height;
-            if self.y + h > self.body_bottom + 0.01 && !self.at_top() {
+        let header_count = t.look.header_rows.min(rows.len());
+        let headers: Vec<table::Row> = rows[..header_count].to_vec();
+        let mut index = 0;
+        let mut continuation: Option<table::Row> = None;
+        while let Some(row) = continuation.take().or_else(|| {
+            let row = rows.get(index).cloned();
+            index += usize::from(row.is_some());
+            row
+        }) {
+            let mut force = false;
+            loop {
+                let available = self.body_bottom - self.y;
+                if force || row.height <= available + 0.01 {
+                    self.place_row(&row);
+                    break;
+                }
+                if !row.cant_split {
+                    let cut = row.cut(available);
+                    if cut > 0.01 && cut < row.height - 0.01 {
+                        let (first, then) = row.split_at(cut);
+                        self.place_row(&first);
+                        let before = self.page;
+                        self.next_column();
+                        if self.page != before && !row.header {
+                            self.repeat_headers(&headers);
+                        }
+                        continuation = Some(then);
+                        break;
+                    }
+                }
+                if self.at_top() {
+                    self.place_row(&row);
+                    break;
+                }
+                let before = self.page;
                 self.next_column();
-            }
-            let page = self.page;
-            let x = self.column_left(self.column);
-            let y = self.y;
-            for (ly, line) in row.lines {
-                self.add_line(page, x, y + ly, line, None);
-            }
-            for item in row.items {
-                let moved = translate(&item, x, y - row.y);
-                let page_items = &mut self.layout.pages[page].items;
-                if matches!(moved, Item::Fill { .. }) {
-                    page_items.insert(0, moved);
-                } else {
-                    page_items.push(moved);
+                if self.page == before {
+                    self.place_row(&row);
+                    break;
+                }
+                if !row.header {
+                    self.repeat_headers(&headers);
+                    let avail = self.body_bottom - self.y;
+                    force = avail < row.height && (row.cant_split || row.cut(avail) <= 0.01);
                 }
             }
-            self.y += h;
         }
         self.last_style = None;
         self.last_after = 0.0;
         self.last_after_at = None;
+    }
+
+    fn place_row(&mut self, row: &table::Row) {
+        let page = self.page;
+        let x = self.column_left(self.column);
+        let y = self.y;
+        for (ly, line) in &row.lines {
+            self.add_line(page, x, y + ly, line.clone(), None);
+        }
+        for item in &row.items {
+            let moved = translate(item, x, y);
+            let page_items = &mut self.layout.pages[page].items;
+            if matches!(moved, Item::Fill { .. }) {
+                page_items.insert(0, moved);
+            } else {
+                page_items.push(moved);
+            }
+        }
+        self.y += row.height;
+    }
+
+    fn repeat_headers(&mut self, headers: &[table::Row]) {
+        for header in headers {
+            if self.y + header.height > self.body_bottom + 0.01 && !self.at_top() {
+                self.next_column();
+            }
+            self.place_row(header);
+        }
     }
 }
 
@@ -715,12 +768,12 @@ fn shape_items(
     match &shape.kind {
         ShapeKind::Table(table) => {
             let (rows, _, _) = table::table(cx, table, w);
+            let mut ty = y;
             for row in rows {
-                let row_y = row.y;
                 page.items
-                    .extend(row.items.iter().map(|i| translate(i, x, y)));
+                    .extend(row.items.iter().map(|i| translate(i, x, ty)));
                 for (ly, line) in row.lines {
-                    let top = y + row_y + ly;
+                    let top = ty + ly;
                     page.items
                         .extend(line.items.iter().map(|i| translate(i, x, top)));
                     lines.push(Line {
@@ -734,6 +787,7 @@ fn shape_items(
                         furniture: false,
                     });
                 }
+                ty += row.height;
             }
             return h;
         }
