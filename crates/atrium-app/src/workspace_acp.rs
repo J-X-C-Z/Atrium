@@ -156,6 +156,7 @@ impl Workspace {
         agent.status = AgentStatus::Starting;
         agent.client = None;
         agent.link = None;
+        self.runtime.forget_backend(&backend);
         self.warm.remove(&backend);
         cx.notify();
         let starting = backend.clone();
@@ -225,6 +226,7 @@ impl Workspace {
                 agent.client = Some(client.clone());
                 agent.status = AgentStatus::Ready;
                 agent.link = link;
+                ws.runtime.register_acp(&backend, client.clone());
                 let reopen = std::mem::take(&mut agent.reopen);
                 for session in reopen {
                     ws.acp_open(session, cx);
@@ -261,6 +263,9 @@ impl Workspace {
                             }
                             _ => None,
                         };
+                        for event in &events {
+                            ws.runtime.observe(&backend, event);
+                        }
                         ws.apply_acp(&backend, events, cx);
                         if let Some((req, wire)) = request {
                             ws.local_pilot_approval(&backend, &req, &wire, cx);
@@ -301,6 +306,21 @@ impl Workspace {
         }));
         self.threads
             .sort_by_key(|t| std::cmp::Reverse(t.updated_at));
+    }
+
+    /// Applies one event the runtime owned (a sink event), by backend kind.
+    pub(super) fn apply_runtime_event(
+        &mut self,
+        backend: &str,
+        event: AgentEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if crate::agents::is_codex(backend) {
+            self.apply(event, cx);
+        } else {
+            self.apply_acp(backend, vec![event], cx);
+        }
+        cx.notify();
     }
 
     fn apply_acp(&mut self, backend: &str, events: Vec<AgentEvent>, cx: &mut Context<Self>) {

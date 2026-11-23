@@ -12,12 +12,15 @@ use atrium_core::{
     Account, AgentCommand, AgentEvent, ApprovalDecision, ConfigOption, Goal, GoalStatus, Item,
     RateLimits, RequestId, ThreadMeta, Transcript, TurnStatus,
 };
+use atrium_runtime::{AgentRuntime, Delivery, EventSink, TurnInput};
 use codex_client::{
     AccessMode, Answers, CodexClient, CodexConfig, Incoming, ModelInfo, Prediction, ReviewTarget,
     StartThread, TurnRequest, translate,
 };
 use futures::StreamExt;
 use gpui::{AppContext, Context, EventEmitter, Task};
+
+use crate::runtime_adapters::RuntimeAdapters;
 
 use crate::i18n::{t, t_any, tf};
 use crate::settings::{Settings, ThemePref};
@@ -172,6 +175,12 @@ pub(super) struct WorkflowReview {
 pub struct Workspace {
     pub status: Status,
     client: Option<CodexClient>,
+    /// The one seam the project layer uses to start, message and stop agents.
+    pub(super) runtime: std::sync::Arc<RuntimeAdapters>,
+    /// Events the runtime itself opens and closes, for the same handler the
+    /// provider pumps use.
+    runtime_events: Option<futures::channel::mpsc::UnboundedReceiver<(String, AgentEvent)>>,
+    runtime_events_tx: futures::channel::mpsc::UnboundedSender<(String, AgentEvent)>,
     pub threads: Vec<ThreadMeta>,
     pub view: View,
     /// Counts the user's moves between chats and project views, so the
@@ -340,9 +349,13 @@ impl Workspace {
     }
 
     fn with_settings(settings: Settings) -> Self {
+        let (runtime_events_tx, runtime_events) = futures::channel::mpsc::unbounded();
         Self {
             status: Status::Connecting,
             client: None,
+            runtime: std::sync::Arc::new(RuntimeAdapters::new()),
+            runtime_events: Some(runtime_events),
+            runtime_events_tx,
             threads: Vec::new(),
             view: View::Draft,
             nav: 0,
@@ -427,6 +440,7 @@ impl Workspace {
     /// Starts (or restarts) the Codex server and pumps its events into the state.
     pub fn connect(&mut self, cx: &mut Context<Self>) {
         self.status = Status::Connecting;
+        self.runtime.forget_backend(CODEX);
         self.client = None;
         cx.notify();
         let config = CodexConfig {
@@ -444,6 +458,8 @@ impl Workspace {
                     let ok = this.update(cx, |ws, cx| {
                         log::info!("connected to {}", client.user_agent);
                         ws.backend_label = backend_label(&client.user_agent);
+                        let env = ws.session_env();
+                        ws.runtime.register_codex(CODEX, client.clone(), env);
                         ws.client = Some(client);
                         ws.status = Status::Ready;
                         ws.refresh(cx);
@@ -469,6 +485,60 @@ impl Workspace {
                 }
             }
         }));
+    }
+
+    /// Hands every connected client to the runtime seam. Cheap when nothing
+    /// changed: registration replaces the same clone.
+    pub(super) fn ensure_runtime_clients(&mut self) {
+        let env = self.session_env();
+        if let Some(client) = &self.client {
+            self.runtime
+                .register_codex(CODEX, client.clone(), env.clone());
+        }
+        for device in &self.devices {
+            if let Some(client) = &device.codex {
+                self.runtime.register_codex(
+                    &crate::agents::backend_id("codex", Some(&device.id)),
+                    client.clone(),
+                    env.clone(),
+                );
+            }
+        }
+        for agent in &self.agents {
+            if let Some(client) = &agent.client {
+                self.runtime.register_acp(&agent.profile.id, client.clone());
+            }
+        }
+    }
+
+    /// Starts the one task that carries events the runtime itself opens and
+    /// closes into the app's normal handler. Idempotent.
+    pub(super) fn ensure_runtime_events(&mut self, cx: &mut Context<Self>) {
+        let Some(mut events) = self.runtime_events.take() else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            while let Some((backend, event)) = events.next().await {
+                if this
+                    .update(cx, |ws, cx| {
+                        ws.apply_runtime_event(&backend, event, cx);
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// A sink that sends a backend's runtime-owned events into the app.
+    pub(super) fn runtime_sink(&self, backend: &str) -> EventSink {
+        let tx = self.runtime_events_tx.clone();
+        let backend = backend.to_string();
+        std::sync::Arc::new(move |event| {
+            let _ = tx.unbounded_send((backend.clone(), event));
+        })
     }
 
     /// Reloads the thread list, the models and whether Codex is signed in.
@@ -565,9 +635,18 @@ impl Workspace {
 
     fn handle(&mut self, incoming: Incoming, cx: &mut Context<Self>) {
         let event = match incoming {
-            Incoming::Notification { method, params } => translate::event(&method, &params),
+            Incoming::Notification { method, params } => {
+                let event = translate::event(&method, &params);
+                if let Some(event) = &event {
+                    self.runtime.observe(CODEX, event);
+                }
+                event
+            }
             Incoming::Request { id, method, params } => {
                 let event = translate::request(&id, &method, &params);
+                if let Some(event) = &event {
+                    self.runtime.observe(CODEX, event);
+                }
                 if let Some(AgentEvent::ApprovalRequested(req)) = &event {
                     self.apply(AgentEvent::ApprovalRequested(req.clone()), cx);
                     self.local_pilot_approval(CODEX, req, &params, cx);
@@ -582,9 +661,13 @@ impl Workspace {
                 }
                 event
             }
-            Incoming::Closed => Some(AgentEvent::Disconnected {
-                reason: "Codex exited".into(),
-            }),
+            Incoming::Closed => {
+                let event = AgentEvent::Disconnected {
+                    reason: "Codex exited".into(),
+                };
+                self.runtime.observe(CODEX, &event);
+                Some(event)
+            }
         };
         if let Some(event) = event {
             self.apply(event, cx);
@@ -1325,6 +1408,10 @@ impl Workspace {
         target: Option<&NoticeTarget>,
         cx: &mut Context<Self>,
     ) -> NoticeSendResult {
+        self.ensure_runtime_clients();
+        if self.runtime.has_session(&thread_id) {
+            return self.steer_via_runtime(thread_id, composed, target, cx);
+        }
         let Some(client) = self.thread_codex(&thread_id) else {
             return NoticeSendResult::NoDispatch;
         };
@@ -1673,6 +1760,31 @@ impl Workspace {
         {
             return NoticeSendResult::NoDispatch;
         }
+        // Project sessions talk to the agent through the runtime seam.
+        if let View::Thread(thread_id) = self.view.clone() {
+            self.ensure_runtime_clients();
+            if self.runtime.has_session(&thread_id) {
+                self.predictions.remove(&thread_id);
+                let running = self.is_running();
+                let delivery = if running {
+                    if self.runtime.capabilities(self.backend_of(&thread_id)).steer {
+                        Delivery::Steer
+                    } else {
+                        Delivery::Queue
+                    }
+                } else {
+                    Delivery::Start
+                };
+                let editing = self
+                    .editing
+                    .as_ref()
+                    .is_some_and(|(thread, _)| thread == &thread_id);
+                if delivery != Delivery::Queue && !(editing && self.is_codex_view()) {
+                    return self
+                        .send_via_runtime(thread_id, composed, target, delivery, reactivate, cx);
+                }
+            }
+        }
         if !self.is_codex_view() {
             return self.acp_send(composed, target, cx);
         }
@@ -1876,6 +1988,147 @@ impl Workspace {
         NoticeSendResult::Submitted
     }
 
+    /// Sends a message to a project session through the agent-runtime seam.
+    fn send_via_runtime(
+        &mut self,
+        thread_id: String,
+        composed: Composed,
+        target: Option<&NoticeTarget>,
+        delivery: Delivery,
+        reactivate: bool,
+        cx: &mut Context<Self>,
+    ) -> NoticeSendResult {
+        let backend = self.backend_of(&thread_id).to_string();
+        let (composed, notice_dispatch) =
+            match self.prepare_stream_notices(&thread_id, composed, target, cx) {
+                Ok(prepared) => prepared,
+                Err(outcome) => return outcome,
+            };
+        let input = TurnInput {
+            text: composed.text.clone(),
+            images: composed.images.clone(),
+            attachments: composed.mentions.clone(),
+        };
+        let steering = delivery == Delivery::Steer;
+        let checkpoint = (!steering).then(|| self.checkpoint_next_turn(&thread_id, cx));
+        if let Some(transcript) = self.transcripts.get_mut(&thread_id) {
+            let before = transcript.len();
+            transcript.push_local_user(composed.text.clone(), composed.attachments());
+            if !steering {
+                transcript.begin_pending_turn();
+            }
+            self.note_births(&thread_id, before);
+        }
+        if !steering {
+            self.turn_started.insert(thread_id.clone(), Instant::now());
+        }
+        cx.notify();
+        let runtime = self.runtime.clone();
+        let reactivate_client = if reactivate && crate::agents::is_codex(&backend) {
+            self.codex_for(&backend)
+        } else {
+            None
+        };
+        let call_id = thread_id.clone();
+        let update_id = thread_id;
+        cx.spawn(async move |this, cx| {
+            if let Some(checkpoint) = checkpoint {
+                checkpoint.await;
+            }
+            if let Some(client) = reactivate_client {
+                let _ = client
+                    .goal_set(&call_id, None, Some(GoalStatus::Active), None)
+                    .await;
+            }
+            let sent = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::runtime_adapters::send_turn(&*runtime, &call_id, input, delivery)
+                })
+                .await;
+            let outcome = match &sent {
+                Ok(turn) if !turn.trim().is_empty() => {
+                    crate::project::notice_delivery::NoticeOutcome::Accepted
+                }
+                _ => crate::project::notice_delivery::NoticeOutcome::Uncertain,
+            };
+            let _ = this.update(cx, |ws, cx| {
+                ws.settle_stream_notices(notice_dispatch, outcome, cx);
+                if let Err(error) = &sent {
+                    if !steering {
+                        if let Some(transcript) = ws.transcripts.get_mut(&update_id) {
+                            transcript.fail_pending_turn(tf(
+                                "Could not send: {error}",
+                                &[("error", &format!("{error:#}"))],
+                            ));
+                        }
+                        ws.pilot_failure(&update_id, false);
+                        ws.turn_started.remove(&update_id);
+                    }
+                    cx.emit(Notice::Error(tf(
+                        "Could not send: {error}",
+                        &[("error", &format!("{error:#}"))],
+                    )));
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        NoticeSendResult::Submitted
+    }
+
+    /// Adds a message to a project session's running turn through the seam.
+    fn steer_via_runtime(
+        &mut self,
+        thread_id: String,
+        composed: Composed,
+        target: Option<&NoticeTarget>,
+        cx: &mut Context<Self>,
+    ) -> NoticeSendResult {
+        let (composed, notice_dispatch) =
+            match self.prepare_stream_notices(&thread_id, composed, target, cx) {
+                Ok(prepared) => prepared,
+                Err(outcome) => return outcome,
+            };
+        let input = TurnInput {
+            text: composed.text.clone(),
+            images: composed.images.clone(),
+            attachments: composed.mentions.clone(),
+        };
+        if let Some(transcript) = self.transcripts.get_mut(&thread_id) {
+            let before = transcript.len();
+            transcript.push_local_user(composed.text.clone(), composed.attachments());
+            self.note_births(&thread_id, before);
+        }
+        cx.notify();
+        let runtime = self.runtime.clone();
+        let call_id = thread_id.clone();
+        cx.spawn(async move |this, cx| {
+            let steered = cx
+                .background_executor()
+                .spawn(
+                    async move { crate::runtime_adapters::steer_turn(&*runtime, &call_id, input) },
+                )
+                .await;
+            let outcome = if steered.is_ok() {
+                crate::project::notice_delivery::NoticeOutcome::Accepted
+            } else {
+                crate::project::notice_delivery::NoticeOutcome::Uncertain
+            };
+            let _ = this.update(cx, |ws, cx| {
+                ws.settle_stream_notices(notice_dispatch, outcome, cx);
+                if let Err(error) = steered {
+                    cx.emit(Notice::Error(tf(
+                        "Could not add that to the running turn: {error}",
+                        &[("error", &format!("{error:#}"))],
+                    )));
+                }
+            });
+        })
+        .detach();
+        NoticeSendResult::Submitted
+    }
+
     /// Sends the message that started `turn_id` again.
     pub fn retry(&mut self, turn_id: &str, cx: &mut Context<Self>) {
         let prompt = self
@@ -1893,6 +2146,17 @@ impl Workspace {
         };
         if self.sync_is_remote(&thread_id) {
             self.sync_remote_interrupt(&thread_id, cx);
+            return;
+        }
+        self.ensure_runtime_clients();
+        if self.runtime.has_session(&thread_id) {
+            let runtime = self.runtime.clone();
+            let id = thread_id;
+            cx.background_executor()
+                .spawn(async move {
+                    let _ = crate::runtime_adapters::interrupt_turn(&*runtime, &id);
+                })
+                .detach();
             return;
         }
         if !crate::agents::is_codex(self.backend_of(&thread_id)) {

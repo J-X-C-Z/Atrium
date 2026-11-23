@@ -13,6 +13,7 @@ mod export;
 mod links;
 mod opener;
 mod pageedit;
+mod runtime_adapters;
 mod schedule;
 mod settings;
 mod skills;

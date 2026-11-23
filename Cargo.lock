@@ -620,6 +620,7 @@ dependencies = [
  "atrium-phone",
  "atrium-preview",
  "atrium-project",
+ "atrium-runtime",
  "atrium-sync",
  "atrium-team",
  "atrium-workflow",
