@@ -1681,9 +1681,37 @@ impl Workspace {
                 item: Item::FileChange { changes, .. },
                 ..
             } => {
+                // Where the project is on the stream's computer, to read its paths there.
+                let scheduler = if self.settings.device_name.is_empty() {
+                    "this computer".to_string()
+                } else {
+                    self.settings.device_name.clone()
+                };
+                let device = self.projects.iter().find(|p| p.root == root).and_then(|p| {
+                    let backend = &p.stream(&stream)?.backend;
+                    atrium_project::spread::device_of(backend).map(str::to_string)
+                });
+                let remote = device.and_then(|d| self.project_on_device(&root, &d));
                 let Some(project) = self.project_mut(&root) else {
                     return;
                 };
+                let base = remote.unwrap_or_else(|| {
+                    project
+                        .session_checkout(&stream)
+                        .to_string_lossy()
+                        .into_owned()
+                });
+                let paths: Vec<String> = changes
+                    .iter()
+                    .filter_map(|c| atrium_project::spread::within(&c.path, &base))
+                    .collect();
+                for (to, text) in
+                    atrium_project::spread::foreign_notices(project, &stream, &paths, &scheduler)
+                {
+                    if let Err(error) = project.post(ATRIUM, to, &text) {
+                        log::warn!("could not post a notice: {error:#}");
+                    }
+                }
                 for change in changes {
                     let Some(crossing) = project.crossing(&stream, &change.path) else {
                         continue;

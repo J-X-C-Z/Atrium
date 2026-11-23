@@ -663,6 +663,9 @@ pub struct Project {
     pub notices: Vec<ProjectNotice>,
     /// Scope crossings seen this session.
     pub crossings: Vec<Crossing>,
+    /// `(stream, path)` pairs whose change to another computer's folder was
+    /// noticed this session (see `spread::foreign_notices`).
+    pub foreign_writes: Vec<(String, String)>,
     /// The newest change to the atrium's files, to reload only when needed.
     pub stamp: Option<SystemTime>,
 }

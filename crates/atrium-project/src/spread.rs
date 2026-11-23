@@ -19,7 +19,7 @@ use std::{
     path::{Component, Path},
 };
 
-use crate::{Project, Workstream, glob_match, scope_label};
+use crate::{Project, Role, Workstream, glob_match, scope_label};
 
 /// The folder's name, the same on every computer.
 pub const WORKSPACE_DIR: &str = "Atrium Workspace";
@@ -41,6 +41,22 @@ pub fn relative(project_root: &Path, workspace: &Path) -> Option<String> {
         })
         .collect::<Option<_>>()?;
     (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+/// `path` (absolute, or relative to the project) as a project-relative path
+/// with `/`, when it is inside `base`: the project's folder on the computer
+/// that made the change. Either separator works on both sides.
+pub fn within(path: &str, base: &str) -> Option<String> {
+    let path = path.replace('\\', "/");
+    let absolute = path.starts_with('/') || path.as_bytes().get(1) == Some(&b':');
+    if !absolute {
+        return Some(path.trim_start_matches("./").to_string());
+    }
+    let base = base.replace('\\', "/");
+    let rest = path
+        .strip_prefix(base.trim_end_matches('/'))?
+        .strip_prefix('/')?;
+    (!rest.is_empty()).then(|| rest.to_string())
 }
 
 /// The workspace folder of a computer, from its node's roots: the root
@@ -120,6 +136,74 @@ impl Spread {
             .filter(|p| matches!(self.owner_of(p), Some(owner) if owner != mine))
             .collect()
     }
+}
+
+/// Notices for a change `stream_id` made to folders another computer owns:
+/// `(to, text)` for each such path not yet noticed this session (kept in
+/// `project.foreign_writes`). The notice goes to the changing stream and to
+/// the owning computer's streams whose scope covers the path. Nothing is
+/// reverted. `scheduler` names this computer, as the briefing does.
+pub fn foreign_notices(
+    project: &mut Project,
+    stream_id: &str,
+    paths: &[String],
+    scheduler: &str,
+) -> Vec<(Vec<String>, String)> {
+    let spread = Spread::of(project);
+    if !spread.is_spread() {
+        return Vec::new();
+    }
+    let Some((name, foreign)) = project.stream(stream_id).map(|stream| {
+        let foreign: Vec<String> = spread
+            .foreign(stream, paths)
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        (stream.name.clone(), foreign)
+    }) else {
+        return Vec::new();
+    };
+    let mut notices = Vec::new();
+    for path in foreign {
+        let key = (stream_id.to_string(), path.clone());
+        if project.foreign_writes.contains(&key) {
+            continue;
+        }
+        project.foreign_writes.push(key);
+        let Some(owner) = spread.owner_of(&path) else {
+            continue;
+        };
+        let device = owner.unwrap_or(scheduler);
+        let on_device =
+            |s: &&Workstream| !s.retired && s.id != stream_id && device_of(&s.backend) == owner;
+        let mut owners: Vec<&Workstream> = project
+            .file
+            .streams
+            .iter()
+            .filter(on_device)
+            .filter(|s| s.scope.iter().any(|glob| glob_match(glob, &path)))
+            .collect();
+        // `.atrium/` and other folders no scope names: that computer's controller.
+        if owners.is_empty() {
+            owners = project
+                .file
+                .streams
+                .iter()
+                .filter(on_device)
+                .filter(|s| s.role == Role::Controller)
+                .collect();
+        }
+        let mut to = vec![stream_id.to_string()];
+        to.extend(owners.iter().map(|s| s.id.clone()));
+        let owner_names: Vec<&str> = owners.iter().map(|s| s.name.as_str()).collect();
+        let text = format!(
+            "{name} changed `{path}`, which `{device}` writes ({}). Nothing was reverted: \
+check it with them, or ask them to make the change.",
+            owner_names.join(", ")
+        );
+        notices.push((to, text));
+    }
+    notices
 }
 
 /// What an agent in a spread project is told about where it is and where
@@ -244,5 +328,89 @@ mod tests {
         assert!(text.contains("device_read"), "{text}");
         let alone = project(vec![s("ui", "claude", &["ui/**"])]);
         assert_eq!(briefing(&alone, &alone.file.streams[0], "linux"), "");
+    }
+
+    #[test]
+    fn changes_are_mapped_into_the_project() {
+        assert_eq!(
+            within(
+                "/home/me/Atrium Workspace/photo/perf/a.rs",
+                "/home/me/Atrium Workspace/photo"
+            ),
+            Some("perf/a.rs".into())
+        );
+        assert_eq!(
+            within(
+                r"D:\Atrium Workspace\photo\analysis\fit.py",
+                r"D:\Atrium Workspace\photo\"
+            ),
+            Some("analysis/fit.py".into())
+        );
+        assert_eq!(
+            within(
+                "/home/me/code/other/x.rs",
+                "/home/me/Atrium Workspace/photo"
+            ),
+            None
+        );
+        assert_eq!(
+            within(
+                "/home/me/Atrium Workspace/photo-2/x.rs",
+                "/home/me/Atrium Workspace/photo"
+            ),
+            None
+        );
+        assert_eq!(within("web/app.tsx", "/x"), Some("web/app.tsx".into()));
+    }
+
+    #[test]
+    fn a_foreign_write_is_noticed_once_to_both_sides() {
+        let mut p = project(vec![
+            s("ui", "claude", &["ui/**"]),
+            s("algo", "codex@win", &["analysis/**"]),
+            s("perf", "codex@win", &["perf/core/**", "perf/win/**"]),
+            s("perf-mac", "codex@mac", &["perf/mac/**"]),
+        ]);
+        p.file.streams.push(Workstream {
+            id: "boss".into(),
+            name: "boss".into(),
+            backend: "claude".into(),
+            role: Role::Controller,
+            ..Default::default()
+        });
+        // `ui` is local, so `.atrium/` (the scheduler's) is its own: no notice.
+        let paths = vec![
+            "analysis/fit.py".to_string(),
+            "ui/app.tsx".to_string(),
+            "perf/core/b.rs".to_string(),
+            ".atrium/notices.md".to_string(),
+        ];
+        let notices = foreign_notices(&mut p, "ui", &paths, "linux");
+        assert_eq!(notices.len(), 2, "{notices:?}");
+        let (to, text) = &notices[0];
+        assert_eq!(to, &vec!["ui".to_string(), "algo".to_string()]);
+        assert!(text.contains("`analysis/fit.py`"), "{text}");
+        assert!(text.contains("`win`"), "{text}");
+        assert!(text.contains("Nothing was reverted"), "{text}");
+        assert_eq!(notices[1].0, vec!["ui".to_string(), "perf".to_string()]);
+        // Once per stream and path.
+        assert!(foreign_notices(&mut p, "ui", &paths, "linux").is_empty());
+        // A remote stream writing the scheduler's folder goes to its controller.
+        let back = foreign_notices(&mut p, "algo", &[".atrium/tasks/x.md".into()], "linux");
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].0, vec!["algo".to_string(), "boss".to_string()]);
+        assert!(back[0].1.contains("`linux`"), "{}", back[0].1);
+        // Another stream's write to the same path is noticed too.
+        let mac = foreign_notices(&mut p, "perf-mac", &paths[2..3], "linux");
+        assert_eq!(mac.len(), 1);
+        assert_eq!(mac[0].0, vec!["perf-mac".to_string(), "perf".to_string()]);
+    }
+
+    #[test]
+    fn a_project_on_one_computer_has_no_foreign_writes() {
+        let mut alone = project(vec![s("ui", "claude", &["ui/**"])]);
+        let paths = vec!["ui/app.tsx".to_string(), "other/x.rs".to_string()];
+        assert!(foreign_notices(&mut alone, "ui", &paths, "linux").is_empty());
+        assert!(alone.foreign_writes.is_empty());
     }
 }

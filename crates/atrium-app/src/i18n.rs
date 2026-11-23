@@ -1195,6 +1195,8 @@ const ZH: &[(&str, &str)] = &[
     ("Sends back to {steps}", "可退回 {steps}"),
     ("Nothing to check", "没有可检查的内容"),
     ("{n} files and checks", "{n} 项文件与检查"),
+    // item 19: lanes
+    ("on {device}", "在 {device}"),
 ];
 
 #[cfg(test)]
