@@ -1,219 +1,173 @@
-# Native parity: what the official clients and T3 Code do, built into Atrium
+# Porting T3 Code's core to Rust (native parity)
 
-Items 20–31 in `AGENTS.md`. The owner's goal: using Codex, Claude Code and
-Antigravity through Atrium should feel like their own clients, the UI should
-stay uncluttered, and devices should behave like one machine. T3 Code
-(`pingdotgg/t3code`, MIT) and Agents-Anywhere (Apache-2.0) were studied as
-references; take their ideas, not their code or text. Atrium stays Rust +
-GPUI with its own `atrium-node`; nothing here depends on T3.
+Items 20–32 in `AGENTS.md`. Goal: Codex, Claude Code and Antigravity through
+Atrium feel like their own clients, on this computer and on other devices.
+T3 Code (`github.com/pingdotgg/t3code`, MIT) already solved most of this in
+TypeScript. We port its **server core** to Rust, systematically, and verify
+the port by running both on the same inputs. Atrium keeps its own UI, node,
+projects, team, memory, workflows and Office work.
 
-This is **track A**. Track B (`docs/t3-extension-plan.md`) tries running
-agents through T3 Code instead, in parallel, done on the owner's Claude
-side. Both sit under one agent-runtime seam (item 32), so the project,
-team, memory and group-chat layers are written once; the owner keeps the
-track that works better. Do not build track B.
+The earlier plan to run agents through T3 itself (`docs/t3-extension-plan.md`,
+track B) is paused. `docs/t3-spike.md` stays useful: it records how to run
+T3 headless against our mocks, which the differential tests below need.
 
-## Principles for every item
+## Licence and provenance
 
-- **Agents declare, the UI obeys.** A control is shown only when the shown
-  chat's agent supports it (item 20). Never emulate a feature the agent does
-  not have, and never show a control that silently does nothing.
-- **Quiet by default.** Show a setting when it differs from the default or
-  when the user needs to act; tuck the rest into one overflow menu.
-- **Device-agnostic.** Everything here works the same for an agent on this
-  computer and on another device through the node.
-- **GPUI-free decisions.** Put rules (what to show, when to retry, how to
-  merge) in functions that take `now` and plain data, with unit tests; the
-  UI only renders them.
-- **Mocks keep up.** Extend `mock-codex` / `mock-acp` for every protocol
-  feature you use, and test end to end against them.
+- T3 Code is MIT. Ported code is a derivative: put the MIT notice
+  (`Copyright (c) 2026 T3 Tools Inc.` and the licence text) in
+  `crates/atrium-engine/LICENSE-T3`, and a one-line header in each ported
+  file naming the T3 source file it came from.
+- `crates/atrium-engine/UPSTREAM.md` records the T3 commit or release the
+  port is based on (start from release 0.1.11, the one `docs/t3-spike.md`
+  ran) and, per ported module, its T3 source paths. Later syncs read the
+  upstream diff since that commit and port it, then bump the record.
 
-## 20. Agent capabilities (S–M)
+## What to port, what to skip
 
-One record per agent session saying what it can do, read by the UI instead
-of checking agent names.
+Port (server side): `packages/contracts` (the types and wire shapes),
+`packages/provider-core` (adapter interface, capabilities),
+`apps/server/src/orchestration-v2` (threads, turns, runs, queue, steering,
+subagents, delegation, checkpoints, selection transitions, provider
+switching, usage-limit recovery, thread streams), the Codex, Claude and
+Antigravity adapters and the generic ACP adapter (`packages/provider-acp`,
+`apps/server/src/provider/…`), usage readers
+(`providerUsageLimits`, `claudeUsageLimits`), context budget, and the MCP
+orchestration toolkits agents use (`apps/server/src/mcp/toolkits`).
+Read `docs/internals/*` in their repo first, especially the providers
+document's rules (declare only real capabilities; never emulate a
+permission mode; hide plan mode when the provider has no plan cards).
 
-- Add `atrium_core::Capabilities` (images, steer, queue, interrupt, plan
-  mode, approval modes offered, model choice, effort choice, service tiers,
-  fork, rewind, compact, review, usage/limits, context window, slash
-  commands, skills, MCP status, subagents). Fill it from Codex `initialize`
-  + `model/list` (codex-client) and from ACP `initialize` capabilities,
-  `_meta` and config options (acp-client `AgentInfo`), for local and remote
-  agents alike.
-- Composer, chat header and menus read it (`ui/composer.rs`, `ui/chat.rs`).
-- Tests: capability mapping from recorded `initialize` payloads for Codex,
-  Claude Code (ACP) and an ACP agent with nothing optional.
+Skip: the React web app, Electron, mobile apps, T3 Connect relay, pairing,
+OAuth/DPoP and remote-access auth (Atrium uses Tailscale and `atrium-node`),
+themes, MCP Apps rendering, the server's HTTP/WebSocket RPC surface (our UI
+calls the engine in-process; the node exposes it to other devices, item 29).
+Scheduled tasks, PR watch and T3 workflows overlap Atrium's own; item 31
+decides case by case.
 
-## 21. Composer: one model pill, quiet extras, shortcuts (S–M)
+## Shape in Atrium
 
-- Agent, model, effort and speed (Fast) collapse into one trigger reading
-  like "GPT-6.2 Sol · High" (agent icon in front; device tag when remote).
-  One popover with sections: agent (grouped by device), model, effort,
-  speed. Today these are `agent_picker`, `model_picker`, `effort_picker`
-  and the Fast toggle in `codex_tools`.
-- The approval/access mode shows only when it differs from the user's
-  default; otherwise it lives in an overflow "…" menu with the rest
-  (plan mode, worktree, options from ACP `config_option`s that are not
-  model/mode/effort).
-- Shortcuts: open model picker, effort up/down, cycle approval mode, toggle
-  plan mode (bind in `main.rs`, list them in the command palette).
-- Tests: the pill label and which controls are visible, per capability
-  set (pure function).
+- `crates/atrium-engine` (no GPUI): contracts, event store, projections,
+  orchestration, adapters, usage, MCP toolkit. Async, `now` injected,
+  storage in SQLite (`rusqlite`, bundled) under the app's data folder.
+- The app (`crates/atrium-app`) reads engine projections and calls engine
+  commands; the project scheduler, workflow runner and team call it through
+  the runtime seam (item 32).
+- `codex-client` and `acp-client` become the transport layers under the
+  Codex and ACP adapters (keep what works; port T3's adapter logic on top).
 
-## 22. Queue and steer (M)
+## Verification: differential tests
 
-- While a turn runs, Enter sends according to a setting: steer into the
-  running turn (when the agent can) or queue as the next turn; a modifier
-  does the other. Agents without steering always queue.
-- Queued messages show above the composer as editable, removable chips with
-  "send now" (interrupts and sends). They survive an app restart (store per
-  thread in the app's state) and are sent in order when the turn ends.
-- Slash commands typed during a turn wait for the turn to end.
-- ArrowUp in an empty composer recalls earlier prompts of this thread;
-  a draft is kept per thread when switching chats.
-- Interrupt is enabled only after the agent reported the turn started.
-- Tests: queue state machine (enqueue, edit, reorder, send-now, turn end,
-  restart) as a pure model; e2e with mock-codex and mock-acp.
+Tokens are not the bottleneck; proving the port right is. For every item:
 
-## 23. Usage limits everywhere, and recovery (M)
+1. **Port their tests.** Each ported module brings the T3 unit and
+   integration tests that cover it, rewritten as Rust tests with the same
+   cases and expected values.
+2. **Run both on the same scenario.** `tools/t3-diff/` (a small Rust or
+   Python harness) runs a scripted scenario twice: against the pinned T3
+   binary (`t3 serve` with a scratch `T3CODE_HOME`, providers pointed at our
+   mocks, driven by `t3 thread start/send/show --json`; see
+   `docs/t3-spike.md`) and against `atrium-engine` with the same mocks. It
+   dumps both normalized event streams (ids, timestamps and paths
+   replaced by placeholders) and diffs them. Because the contracts are
+   ported with T3's JSON names, the dumps compare field by field.
+3. **Mocks both can drive.** `mock-codex` gets the fields T3 requires
+   (listed in `docs/t3-spike.md`); add `mock-claude` (scripted streaming-JSON
+   lines, the `claude` CLI's format) and use `mock-acp` for ACP agents.
+   Scenarios: plain turn, tool call with approval, user-input request,
+   plan, interrupt, steer, queue, usage-limit failure and recovery,
+   subagent, compaction, rewind, resume after restart.
+4. **Real agents last.** Each adapter item ends with a short script the
+   owner runs on a real machine; record the transcripts (no secrets) as
+   new fixtures.
 
-Builds on the per-backend limits already in `workspace.rs` (`limits_for`,
-`note_limits`) and the Claude usage reader (`agent_rpc::claude_usage`).
+CI runs the ported tests on all three systems; the differential suite runs
+on Linux (it needs the T3 binary, cached by version).
 
-- A banner above the composer when the shown agent is near (≥90 %) or at
-  its limit, with the reset time; a popover with every window (5-hour,
-  weekly, per model) for every agent and device.
-- Classify a failed turn as a usage-limit error (`atrium_team::quota::
-  is_limit_message` plus structured codes where the agent gives them) with
-  its reset time. Offer "continue when it resets": the app sends "continue"
-  to that thread after the reset (persisted, survives restart). Projects
-  under the autopilot do this automatically.
-- Antigravity: find what usage it exposes (ACP `_meta`, its own files or
-  CLI) and feed the same model; if nothing, say so in the popover.
-- Context window: show used/total for every agent that reports it
-  (Codex token usage, ACP `usage_update`); warn near the limit and offer
-  compact where supported.
-- Tests: parse and classification fixtures, reset scheduling (pure, `now`).
+## Items, in order
 
-## 24. Settings that apply mid-thread (S–M)
+**32. Runtime seam (M).** One trait in a GPUI-free crate (`atrium-runtime`)
+for what the project layer needs from an agent: start a session (agent,
+model, effort, folder, worktree, device, MCP servers, first message), send,
+steer, interrupt, wait for the turn, read, list, limits. Implement it with
+today's clients; the scheduler (`workspace_project*.rs`), workflow runner
+and team pick call it. Existing scheduler e2e checks pass through it.
+The engine plugs in under this trait in item 22.
 
-- Codex: apply model, effort, tier and approval changes to a loaded thread
-  with the app-server's settings update method instead of waiting for the
-  next `turn/start`.
-- ACP: `session/set_config_option` / `set_mode` immediately (already used;
-  make sure the UI reflects the agent's `config_option_update` reply).
-- When a change cannot apply mid-thread, say what happens ("from the next
-  turn" / "starts a new session"), decided by one pure function.
-- Tests: transition table per capability set.
+**20. Contracts (M).** Port `packages/contracts` that the core uses
+(orchestration v2 events, items, commands, capabilities, model selection,
+usage limits, provider instances) as serde types with identical JSON. Golden
+tests: T3's fixtures and JSON from the spike round-trip unchanged. Set up
+`LICENSE-T3`, `UPSTREAM.md` and `tools/t3-diff` here.
 
-## 25. Codex protocol completeness (M)
+**21. Event store, projections, thread streams (M).** Append-only events
+per thread with sequence numbers, projections the UI reads, stream replay
+from `after=<seq>` with T3's caps and snapshot fallback. Restart recovery.
 
-Compare against the current `codex-rs/app-server` README and implement the
-user-visible gaps (see the audit in this item's PR description):
+**22. Adapter interface and the Codex adapter (L).** Port the adapter
+interface and capability record, then the Codex adapter over `codex-client`
+(thread settings applied mid-thread, read-vs-write so a Codex desktop app
+keeps its writer lock, MCP elicitation, skills, config). Wire the engine
+under the runtime seam. First differential scenarios green.
 
-- MCP: server status list (a panel in Settings and a chip when a server is
-  failing), OAuth login for MCP servers, and **elicitation requests**
-  (today rejected; map onto the existing user-input UI).
-- `skills/list` shown in the `/` and `$` menus; `config/read` for
-  defaults.
-- Thread delete, read state, `model/rerouted` notice, `command/exec` for
-  `!command` in the composer.
-- Read vs write: views and sync use `thread/read`; only sending in a
-  thread resumes it, so Atrium does not take the writer lock from a Codex
-  desktop app that has the thread open.
-- Extend `mock-codex` for each, with e2e tests.
+**23. Claude adapter (L).** T3 uses the Claude Agent SDK, which drives the
+`claude` CLI in streaming-JSON mode. Port the adapter and implement the
+SDK's side of that protocol in a `claude-client` crate (spawn, user turns
+with images, partial messages, permission requests on the control channel,
+interrupt, resume, model and effort, skills, subagents and background tasks,
+usage-limit events). ACP stays as a fallback per agent profile.
+`mock-claude` plus differential scenarios; a real-machine script.
 
-## 26. Claude Code natively (L)
+**24. ACP adapter and Antigravity (M).** Port the generic ACP adapter rules
+(strict compliance, degrade through capabilities) and the Antigravity
+flavor (sign-in, usage reader, skills, child work) onto `acp-client`.
 
-ACP through the adapter loses Claude Code's own subagents, background
-tasks, skills, usage and hooks. Add a direct backend that runs the
-`claude` CLI in streaming JSON mode (input and output as JSON lines, with
-partial messages and the permission-prompt control channel), as the
-official Agent SDK does:
+**25. Turn orchestration (M).** Queue vs steer per send (user setting, a
+modifier for the other; queued runs stored and editable; slash commands
+wait), interrupt gated on the turn-started signal, selection transitions
+(apply next turn / restart session / hand off / reject), provider switch
+with context handoff, subagent and delegation bookkeeping, the rule that
+every terminal path settles open tools, subagents and requests.
 
-- New crate `claude-client`: spawn, handshake, send user turns (text and
-  images), stream assistant/thinking/tool events, permission requests
-  answered from Atrium's approval UI, interrupt, resume by session id,
-  model and effort per turn, slash commands and skills list, usage and
-  rate-limit events, subagent and background-task events shown as child
-  items (`ui/steps.rs`, right panel subagents).
-- Translate into `atrium_core::AgentEvent` like `codex-client::translate`.
-- Works through the node like other agents (stdio is bridged already).
-- Keep the ACP route as the fallback; the user picks per agent profile.
-- `mock-claude` (scripted JSON lines) and e2e tests. Record real
-  transcripts for fixtures on the owner's machine (no secrets).
+**26. Usage, limits, context (M).** Usage readers per provider into one
+report, usage-limit classification with reset time, recovery worker that
+continues after the reset (persisted), context budget and idle
+auto-compaction. Replaces the interim code in `workspace.rs`
+(`limits_for`, `note_limits`) and `agent_rpc::claude_usage`.
 
-## 27. Antigravity specifics (M)
+**27. Checkpoints, rewind, fork (M).** Port checkpoint services and "edit
+from here"; reuse Atrium's git checkpoint code where it already does the
+same thing.
 
-Find what Antigravity offers beyond plain ACP (sign-in flow, usage, skills,
-child work) and surface it through items 20 and 23. Document what you
-found in this file.
+**28. MCP orchestration toolkit (M).** The tools agents call to launch,
+message, wait on and read other threads and to delegate tasks. Merge with
+Atrium's `atrium` MCP server (`crates/atrium-project/src/mcp.rs`): one
+server, project task files stay the way projects divide work; delegation
+is for ad-hoc help. Kickoffs say which to use when.
 
-## 28. Chat list by state (M)
+**29. Engine on the node (L).** `atrium-node` hosts an engine for the
+agents it runs, so a thread lives on the device that runs it and any
+Atrium attaches to it (stream from a sequence number; one writer). Replaces
+pass-through stdio and conversation replication for those threads. Presence
+from the live link with heartbeat and a probe after wake. Update
+`docs/node-protocol.md`; mock-node tests with two clients on one thread.
 
-- Sections: Pinned, Working (a turn or background task running, or
-  waiting on the user — those first), Recent (by day), Archived. Waiting
-  on the user shows a dot and sorts to the top.
-- Every state change (archive, pin, delete) shows an Undo toast.
-- Optional grouping by project/folder (a toggle).
-- `ui/chat_list.rs`, `ui/sidebar.rs`. Pure tests for sectioning and order.
+**30. App on the engine (L).** The UI reads engine projections. Bring the
+everyday experience in line, as T3 shows it: one model · effort · speed
+pill with the agent icon and device tag; approval mode shown only when not
+the default; an overflow menu for the rest; shortcuts for these; queued
+messages as editable chips; prompt recall and per-thread drafts; usage
+banner above the composer; chat list by state (Pinned, Working, Recent,
+Archived) with undo; changed-files panel with diffs; grouped tool rows
+with timers and an inspector; plan and todo cards; controls shown only
+when the capability exists. Remove the app-side code the engine replaces.
 
-## 29. Changes panel and work log (M)
-
-- A changed-files tree for the thread (and per turn) in the right panel,
-  with a side-by-side or unified diff view; open in editor; revert file
-  or hunk (reuse `ui/changes.rs` and the git panel).
-- Tool steps: grouped rows with icon, short summary and a live timer;
-  details open in an inspector instead of expanding inline
-  (`ui/steps.rs`).
-- Todo lists and plans as cards that update in place.
-
-## 30. Rewind: edit from here (S–M)
-
-Edit an earlier user message and continue from there: restore files with
-`workspace_checkpoints.rs`, roll the agent back (Codex `thread/revert`;
-ACP where supported, else start a new session with a summary), then send
-the edited message. Hidden when the capability is missing.
-
-## 31. Devices: live presence and threads that follow you (M–L)
-
-- Presence from the live link: node heartbeat (the 15 s WebSocket ping),
-  an immediate probe after the computer wakes from sleep, "reconnecting"
-  while the link retries (state exists since a147ab8; finish the wake
-  probe and heartbeat timeout).
-- Per-device results for multi-device calls (`ok | offline | timeout |
-  error`) so one slow device never blocks a list.
-- Threads continue from any device: the node keeps an append-only event
-  log per thread it runs, with a sequence number; any Atrium attaches with
-  `after=<seq>` and gets a snapshot only when the log cannot cover the gap.
-  Sending from a second device goes to the owning node, which writes to
-  the agent (one writer). This replaces conversation replication for
-  threads that run on a node. Update `docs/node-protocol.md`.
-- Windows drive roots in folder browsing; preview files on a device with
-  their media type.
-- Tests: node log replay and gap → snapshot; two clients on one thread
-  against mock-node.
-
-## 32. Agent-runtime seam (M) — shared with track B
-
-Move what the project layer needs from an agent behind one trait in a
-GPUI-free crate (`atrium-runtime`): start a session (agent, model, effort,
-folder, worktree, device, MCP servers, first message), send, steer,
-interrupt, wait for the turn to end, read the transcript, list sessions,
-limits. Implement it with today's clients (codex-client, acp-client, the
-node). The scheduler in `workspace_project*.rs`, the workflow runner and
-the team pick call the trait, not the clients. Tests: the scheduler's
-existing e2e checks pass through the trait with mocks. Do this item first
-or second; track B adds a T3 implementation of the same trait.
-
-## Order
-
-32 → 20 → 21 → 22 → 23 → 24 → 25 → 28 → 29 → 30 → 26 → 27 → 31. Items 20–24 are
-what the owner sees every day; 26 is the largest and can run in parallel
-after 20.
+**31. Overlaps (S–M each).** Compare T3's scheduled tasks, PR watch and
+workflows with Atrium's scheduled chats, PR/CI polling and workflows; port
+what Atrium lacks into Atrium's versions rather than keeping two.
 
 ## Done means
 
-Each PR: the item's tests, `cargo test --workspace`, clippy and fmt clean,
-an Xvfb screenshot of any UI change in Chinese and English, zh strings for
-every new `t()`, and the row in `AGENTS.md` ticked.
+Per item: ported tests and the item's differential scenarios pass,
+`cargo test --workspace`, clippy and fmt clean, `UPSTREAM.md` updated, an
+Xvfb screenshot (Chinese and English) for UI changes, zh strings for every
+new `t()`, and the row in `AGENTS.md` ticked.
