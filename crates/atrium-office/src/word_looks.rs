@@ -593,6 +593,7 @@ impl<'a> Looks<'a> {
                             merged_up: pr.and_then(|p| child(p, ns, "vMerge")).is_some_and(|n| {
                                 matches!(attr(n, ns, "val"), None | Some("continue"))
                             }),
+                            padding: [0; 4],
                         }
                     })
                     .collect()

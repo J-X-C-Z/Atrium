@@ -15,9 +15,11 @@ use std::path::PathBuf;
 use atrium_office::look::Rgb;
 use atrium_office::{Deck, NodeId, Slide, WordDoc};
 
+mod chart;
 mod engine;
 mod nav;
 mod sheet;
+mod slide;
 
 pub use nav::Pos;
 pub use sheet::layout_sheet_drawings;
@@ -125,6 +127,9 @@ pub enum Item {
         text: String,
         font: FontKey,
         color: Rgb,
+        /// Degrees clockwise around `center`.
+        rotation: f32,
+        center: (f32, f32),
     },
     Fill {
         rect: Rect,
@@ -148,6 +153,9 @@ pub enum Item {
         /// Colour and opacity, 0 to 255.
         fill: Option<(Rgb, u8)>,
         stroke: Option<Pen>,
+        /// Degrees clockwise around `center`.
+        rotation: f32,
+        center: (f32, f32),
     },
     /// A rectangle filled with a linear gradient.
     Gradient {
@@ -239,19 +247,19 @@ pub fn relayout(
 
 /// Lays out one slide as a page.
 pub fn layout_slide(slide: &Slide, shaper: &dyn Shaper) -> Layout {
-    engine::slide(slide, 0, shaper)
+    slide::layout(slide, 0, shaper)
 }
 
 /// A chart drawn into `rect`, from its cached values.
 pub fn chart(chart: &atrium_office::look::Chart, rect: Rect, shaper: &dyn Shaper) -> Vec<Item> {
-    engine::chart(chart, rect, shaper)
+    chart::draw(chart, rect, shaper)
 }
 
 /// Lays out every slide, one page each, hidden ones included.
 pub fn layout_deck(deck: &Deck, shaper: &dyn Shaper) -> Layout {
     let mut out = Layout::default();
     for (i, slide) in deck.slides().iter().enumerate() {
-        let one = engine::slide(slide, i, shaper);
+        let one = slide::layout(slide, i, shaper);
         out.pages.extend(one.pages);
         out.lines.extend(one.lines);
     }

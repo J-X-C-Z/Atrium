@@ -933,6 +933,8 @@ fn make_line(
                             text: ch.repeat(count),
                             font: unit.font.clone(),
                             color: unit.color,
+                            rotation: 0.0,
+                            center: (0.0, 0.0),
                         });
                     }
                 }
@@ -1009,6 +1011,8 @@ fn flush_run(run: &mut Option<(f32, String, FontKey, Rgb, f32)>, items: &mut Vec
             text,
             font,
             color,
+            rotation: 0.0,
+            center: (0.0, 0.0),
         });
     }
 }

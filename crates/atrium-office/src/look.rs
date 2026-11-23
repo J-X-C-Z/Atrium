@@ -283,6 +283,8 @@ pub struct CellLook {
     /// Overrides the table's borders for this cell.
     pub borders: Option<Borders>,
     pub v_align: VAlign,
+    /// Padding: top, right, bottom, left.
+    pub padding: [Twips; 4],
     /// Continues the merged cell above (`vMerge`): drawn as one with it.
     pub merged_up: bool,
 }
@@ -458,6 +460,8 @@ pub struct Chart {
     /// Stacked to 100 %.
     pub percent: bool,
     pub legend: bool,
+    /// The file turns the series' data labels on.
+    pub data_labels: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -499,6 +503,22 @@ pub struct ShapeLook {
     pub rotation: i32,
     /// Shrinks text to fit, to this scale in thousandths (`normAutofit`).
     pub font_scale: Option<u16>,
+    /// How the text runs: left to right, or rotated inside the shape (`vert`).
+    pub vert: VText,
+    /// Grows the shape to fit its text (`spAutoFit`).
+    pub auto_grow: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VText {
+    #[default]
+    Horizontal,
+    /// 90 degrees clockwise.
+    Vertical,
+    /// 270 degrees clockwise.
+    Vertical270,
+    /// Letters stacked with their tops to the left.
+    WordArtVertical,
 }
 
 // ---------------------------------------------------------------- sheets
