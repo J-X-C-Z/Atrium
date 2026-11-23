@@ -120,9 +120,30 @@ pub struct Settings {
     /// Other computers' Atrium Workspace folders, by device id, when their
     /// node's roots do not name one.
     pub device_workspaces: std::collections::HashMap<String, String>,
+    /// What the user calls each other device, by device id (a 备注名).
+    pub device_names: std::collections::HashMap<String, String>,
 }
 
 impl Settings {
+    /// What to call `device`: the name given to it, else its id.
+    pub fn device_label(&self, device: &str) -> String {
+        match self.device_names.get(device).map(|n| n.trim()) {
+            Some(name) if !name.is_empty() => name.to_string(),
+            _ => device.to_string(),
+        }
+    }
+
+    /// Names `device`; an empty name clears it.
+    pub fn set_device_alias(&mut self, device: &str, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            self.device_names.remove(device);
+        } else {
+            self.device_names
+                .insert(device.to_string(), name.to_string());
+        }
+    }
+
     fn path() -> Option<PathBuf> {
         Some(dirs::config_dir()?.join("Atrium").join("settings.json"))
     }
@@ -207,6 +228,16 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn devices_show_their_alias_or_id() {
+        let mut settings = super::Settings::default();
+        assert_eq!(settings.device_label("jxcz-pc"), "jxcz-pc");
+        settings.set_device_alias("jxcz-pc", "  Office PC ");
+        assert_eq!(settings.device_label("jxcz-pc"), "Office PC");
+        settings.set_device_alias("jxcz-pc", "  ");
+        assert_eq!(settings.device_label("jxcz-pc"), "jxcz-pc");
+    }
+
     use super::*;
 
     #[test]

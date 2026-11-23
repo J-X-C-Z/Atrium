@@ -4,11 +4,13 @@
 mod activity;
 mod changes;
 mod chat;
+mod chat_list;
 mod composer;
 mod context;
 mod devices;
 mod document;
 mod extras;
+mod folder_picker;
 mod grid;
 mod memory;
 mod motion;
@@ -74,6 +76,7 @@ actions!(
         ShowContext,
         ToggleChanges,
         CycleTranscript,
+        OpenFolderPicker,
     ]
 );
 
@@ -130,6 +133,7 @@ pub fn register_actions(cx: &mut App) {
         };
         cx.notify();
     });
+    forward::<OpenFolderPicker>(cx, |this, window, cx| this.open_folder_picker(window, cx));
     forward::<OpenSettings>(cx, |this, window, cx| this.open_settings(window, cx));
     forward::<ShowContext>(cx, |this, _, cx| {
         if matches!(this.overlay, Some(Overlay::Context)) {
@@ -180,6 +184,11 @@ enum Overlay {
         thread_id: String,
         field: Entity<TextInput>,
     },
+    RenameDevice {
+        device: String,
+        field: Entity<TextInput>,
+    },
+    Folder(folder_picker::FolderPicker),
     NewStream {
         name: Entity<TextInput>,
         goal: Entity<TextInput>,
@@ -382,6 +391,28 @@ impl RootView {
         let field = cx.new(|cx| TextInput::new(window, cx).placeholder(t("Chat name")));
         field.update(cx, |input, cx| input.set_text(title, cx));
         self.overlay = Some(Overlay::Rename { thread_id, field });
+        cx.notify();
+    }
+
+    /// Asks for a name of the user's own for `device`.
+    pub fn start_rename_device(
+        &mut self,
+        device: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self
+            .workspace
+            .read(cx)
+            .settings
+            .device_names
+            .get(&device)
+            .cloned();
+        let field = cx.new(|cx| TextInput::new(window, cx).placeholder(device.clone()));
+        field.update(cx, |input, cx| {
+            input.set_text(current.unwrap_or_default(), cx)
+        });
+        self.overlay = Some(Overlay::RenameDevice { device, field });
         cx.notify();
     }
 
@@ -821,16 +852,11 @@ impl RootView {
                 ws.agents
                     .iter()
                     .filter(|a| a.status != crate::workspace::AgentStatus::NotInstalled)
-                    .map(|a| {
-                        (
-                            a.profile.id.clone(),
-                            crate::agents::backend_label(&a.profile.id),
-                        )
-                    }),
+                    .map(|a| (a.profile.id.clone(), ws.backend_label(&a.profile.id))),
             )
             .chain(ws.devices.iter().filter(|d| d.codex.is_some()).map(|d| {
                 let id = crate::agents::backend_id("codex", Some(&d.id));
-                let label = crate::agents::backend_label(&id);
+                let label = ws.backend_label(&id);
                 (id, label)
             }))
             .map(|(id, name)| {
@@ -877,7 +903,7 @@ impl RootView {
             "attach" => self
                 .composer
                 .update(cx, |composer, cx| composer.pick_files(cx)),
-            "folder" => composer::choose_folder(workspace, cx),
+            "folder" => self.open_folder_picker(window, cx),
             "sidebar" => window.dispatch_action(Box::new(ToggleSidebar), cx),
             "settings" => self.open_settings(window, cx),
             "restart" => workspace.update(cx, |ws, cx| ws.connect(cx)),
@@ -956,7 +982,12 @@ impl RootView {
             .flex_col()
             .gap_4()
             .child(devices::this_computer(&self.workspace, &self.extras, cx))
-            .child(devices::section(&self.workspace, node_address, cx))
+            .child(devices::section(
+                &self.workspace,
+                node_address,
+                &self.extras.device_alias,
+                cx,
+            ))
             .into_any_element();
         let phone = self.phone_section(cx);
         let schedules = self.schedules_section(cx);
@@ -1376,6 +1407,28 @@ impl Render for RootView {
                     *role,
                 );
                 Some(self.new_stream_dialog(&name, &goal, &scope, &backend, role, cx))
+            }
+            Some(Overlay::Folder(picker)) => Some(self.folder_dialog(picker, cx)),
+            Some(Overlay::RenameDevice { device, field }) => {
+                let (close, submit) = (cx.entity(), cx.entity());
+                let (device, workspace) = (device.clone(), self.workspace.clone());
+                Some(
+                    PromptDialog::new(
+                        "rename-device",
+                        tf("Name for {device}", &[("device", &device)]),
+                        field,
+                        move |window, cx| {
+                            close.update(cx, |this, cx| this.close_overlay(window, cx))
+                        },
+                    )
+                    .submit(t("Save"))
+                    .on_submit(move |text, window, cx| {
+                        let (id, name) = (device.clone(), text.to_string());
+                        workspace.update(cx, |ws, cx| ws.set_device_alias(&id, &name, cx));
+                        submit.update(cx, |this, cx| this.close_overlay(window, cx));
+                    })
+                    .into_any_element(),
+                )
             }
             Some(Overlay::Rename { thread_id, field }) => {
                 let (close, submit) = (cx.entity(), cx.entity());

@@ -127,8 +127,13 @@ pub fn is_codex(id: &str) -> bool {
 
 /// "Claude Code", or "Claude Code · studio" on another device.
 pub fn backend_label(id: &str) -> String {
+    backend_label_with(id, |device| device.to_string())
+}
+
+/// [`backend_label`] with `name` giving what to call each device.
+pub fn backend_label_with(id: &str, name: impl Fn(&str) -> String) -> String {
     match split_backend(id) {
-        (agent, Some(device)) => format!("{} · {device}", backend_name(agent)),
+        (agent, Some(device)) => format!("{} · {}", backend_name(agent), name(device)),
         (agent, None) => backend_name(agent).to_string(),
     }
 }

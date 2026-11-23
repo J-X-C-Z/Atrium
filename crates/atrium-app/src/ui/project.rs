@@ -114,14 +114,14 @@ fn agent_short(ws: &Workspace, backend: &str) -> String {
 }
 
 /// "on win" after a lane's agent when the lane runs on another computer.
-fn device_note(backend: &str, cx: &App) -> Option<AnyElement> {
+fn device_note(ws: &Workspace, backend: &str, cx: &App) -> Option<AnyElement> {
     let device = agents::split_backend(backend).1?;
     let theme = cx.theme();
     Some(
         div()
             .text_size(theme.text_size(TextSize::Xs))
             .text_color(theme.colors.fg_muted)
-            .child(tf("on {device}", &[("device", &device)]))
+            .child(tf("on {device}", &[("device", &ws.device_label(device))]))
             .into_any_element(),
     )
 }
@@ -904,7 +904,7 @@ fn stream_card(
                         .child(view.stream.name.clone()),
                 )
                 .child(Badge::new(agent_short(ws, &view.stream.backend)))
-                .children(device_note(&view.stream.backend, cx))
+                .children(device_note(workspace.read(cx), &view.stream.backend, cx))
                 .children(stand_in_badge(view))
                 .when(
                     view.goal_status == Some(atrium_core::GoalStatus::Complete),
@@ -1124,7 +1124,7 @@ fn controller_card(
                         .child(t("Controller")),
                 )
                 .child(Badge::new(agent_short(ws, &view.stream.backend)))
-                .children(device_note(&view.stream.backend, cx))
+                .children(device_note(workspace.read(cx), &view.stream.backend, cx))
                 .child(div().flex_1())
                 .child(
                     div()
@@ -1262,7 +1262,7 @@ fn flow_view(workspace: &Entity<Workspace>, views: &[StreamView], cx: &App) -> A
                     .child(lead.stream.name.clone()),
             )
             .child(Badge::new(agent_short(ws, &lead.stream.backend)))
-            .children(device_note(&lead.stream.backend, cx))
+            .children(device_note(workspace.read(cx), &lead.stream.backend, cx))
             .children(stand_in_badge(lead))
             .children(lead.stream.pr.as_ref().map(|pr| pr_badge(pr, cx)))
             .children(merge_button(ws, &lead.stream.id, workspace))
@@ -1524,7 +1524,7 @@ fn proposals_strip(workspace: &Entity<Workspace>, cx: &App) -> Option<AnyElement
         let agent = task
             .agent
             .clone()
-            .map(|a| crate::agents::backend_label(&a))
+            .map(|a| workspace.read(cx).backend_label(&a))
             .unwrap_or_else(|| t("same agent").into());
         let steps: Vec<String> = task.roadmap.iter().map(|m| m.text.clone()).collect();
         strip = strip.child(
@@ -1950,7 +1950,7 @@ fn sub_agents(
                         .child(worker.stream.name.clone()),
                 )
                 .child(Badge::new(agent_short(ws, &worker.stream.backend)))
-                .children(device_note(&worker.stream.backend, cx))
+                .children(device_note(workspace.read(cx), &worker.stream.backend, cx))
                 .children(stand_in_badge(worker))
                 .child(
                     div()

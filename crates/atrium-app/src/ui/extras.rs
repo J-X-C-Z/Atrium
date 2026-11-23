@@ -28,6 +28,7 @@ pub struct ExtrasInputs {
     pub schedule_prompt: Entity<TextInput>,
     pub schedule_days: crate::schedule::Days,
     pub device_name: Entity<TextInput>,
+    pub device_alias: Entity<TextInput>,
     pub workspace_dir: Entity<TextInput>,
     pub pair_address: Entity<TextInput>,
     pub pair_code: Entity<TextInput>,
@@ -54,6 +55,8 @@ impl ExtrasInputs {
             device_name: cx.new(|cx| {
                 TextInput::new(window, cx).placeholder(t("Name, such as studio or laptop"))
             }),
+            device_alias: cx
+                .new(|cx| TextInput::new(window, cx).placeholder(t("A name you will recognize"))),
             workspace_dir: cx.new(|cx| {
                 TextInput::new(window, cx).placeholder(t("A folder, such as ~/Atrium Workspace"))
             }),
@@ -170,7 +173,7 @@ impl RootView {
                                 t(s.days.label()),
                                 s.time,
                                 folder,
-                                crate::agents::backend_label(&s.backend)
+                                self.workspace.read(cx).backend_label(&s.backend)
                             )),
                     )
                     .child(
@@ -275,7 +278,7 @@ impl RootView {
                                     "Runs in {folder} with {agent}",
                                     &[
                                         ("folder", &crate::ui::composer::short_path(&folder)),
-                                        ("agent", &crate::agents::backend_label(&backend)),
+                                        ("agent", &self.workspace.read(cx).backend_label(&backend)),
                                     ],
                                 )),
                         )

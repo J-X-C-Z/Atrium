@@ -287,6 +287,8 @@ pub struct Workspace {
     pub discovering: bool,
     /// Folders on devices, by `device:path`, for the folder menu.
     remote_dirs: HashMap<String, Vec<String>>,
+    /// The device whose card in Settings is being renamed.
+    pub renaming_device: Option<String>,
     /// How many tailnet devices are online, or why the tailnet could not be read.
     pub tailnet: Option<Result<usize, String>>,
     _discovery: Option<Task<()>>,
@@ -406,6 +408,7 @@ impl Workspace {
             devices: Vec::new(),
             discovering: false,
             remote_dirs: HashMap::new(),
+            renaming_device: None,
             tailnet: None,
             _discovery: None,
             _pump: None,

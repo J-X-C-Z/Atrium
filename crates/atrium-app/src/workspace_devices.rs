@@ -591,6 +591,11 @@ impl Workspace {
         self.remote_dirs.get(&format!("{device}:{path}"))
     }
 
+    /// Drops what was fetched for `path` on `device`, so the next look asks again.
+    pub fn forget_children(&mut self, device: &str, path: &str) {
+        self.remote_dirs.remove(&format!("{device}:{path}"));
+    }
+
     /// Fetches the folders in `path` on `device` for the folder menu.
     pub fn fetch_children(&mut self, device: &str, path: String, cx: &mut Context<Self>) {
         let key = format!("{device}:{path}");

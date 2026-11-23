@@ -50,6 +50,23 @@ impl Workspace {
         out
     }
 
+    /// What to call `device` on screen: the name the user gave it, else its id.
+    pub fn device_label(&self, device: &str) -> String {
+        self.settings.device_label(device)
+    }
+
+    /// A backend's name with the device's display name: `Claude Code · office`.
+    pub fn backend_label(&self, backend: &str) -> String {
+        crate::agents::backend_label_with(backend, |device| self.device_label(device))
+    }
+
+    /// Gives `device` a display name; an empty one clears it.
+    pub fn set_device_alias(&mut self, device: &str, name: &str, cx: &mut Context<Self>) {
+        self.settings.set_device_alias(device, name);
+        self.settings.save();
+        cx.notify();
+    }
+
     pub fn device_online(&self, device: &str) -> bool {
         self.device(device)
             .is_some_and(|d| d.status == DeviceStatus::Online)

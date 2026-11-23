@@ -16,7 +16,12 @@ use gpui::{
 use crate::i18n::{t, tf};
 use crate::workspace::{AgentStatus, DeviceStatus, Workspace};
 
-pub fn section(workspace: &Entity<Workspace>, address: &Entity<TextInput>, cx: &App) -> AnyElement {
+pub fn section(
+    workspace: &Entity<Workspace>,
+    address: &Entity<TextInput>,
+    alias: &Entity<TextInput>,
+    cx: &App,
+) -> AnyElement {
     let theme = cx.theme();
     let colors = theme.colors.clone();
     let ws = workspace.read(cx);
@@ -129,8 +134,16 @@ pub fn section(workspace: &Entity<Workspace>, address: &Entity<TextInput>, cx: &
                         .child(
                             div()
                                 .font_weight(gpui::FontWeight::MEDIUM)
-                                .child(device.id.clone()),
+                                .child(ws.device_label(&device.id)),
                         )
+                        .when(ws.settings.device_names.contains_key(&device.id), |row| {
+                            row.child(
+                                div()
+                                    .text_size(tiny)
+                                    .text_color(colors.fg_subtle)
+                                    .child(device.id.clone()),
+                            )
+                        })
                         .child(
                             div()
                                 .flex_1()
@@ -150,6 +163,7 @@ pub fn section(workspace: &Entity<Workspace>, address: &Entity<TextInput>, cx: &
                             )
                         }),
                 )
+                .child(rename_row(workspace, alias, &device.id, ws, cx))
                 .child(div().text_size(tiny).text_color(colors.fg_muted).child(
                     match &device.status {
                         DeviceStatus::Offline(why) => {
@@ -410,6 +424,85 @@ pub fn this_computer(
                             code.update(cx, |input, cx| input.set_text("", cx));
                         }),
                 ),
+        )
+        .into_any_element()
+}
+
+/// The device's own name for it: a "Rename" button, or while renaming a
+/// field to type the name in. An empty name clears it.
+fn rename_row(
+    workspace: &Entity<Workspace>,
+    alias: &Entity<TextInput>,
+    id: &str,
+    ws: &Workspace,
+    cx: &App,
+) -> AnyElement {
+    let editing = ws.renaming_device.as_deref() == Some(id);
+    let (start, field) = (workspace.clone(), alias.clone());
+    let current = ws
+        .settings
+        .device_names
+        .get(id)
+        .cloned()
+        .unwrap_or_default();
+    let key = SharedString::from(id.to_string());
+    if !editing {
+        let _ = cx;
+        let device = id.to_string();
+        return div()
+            .flex()
+            .child(
+                Button::new(SharedString::from(format!("rename-{key}")), t("Rename"))
+                    .size(ControlSize::Sm)
+                    .variant(ButtonVariant::Ghost)
+                    .icon(IconName::Pencil)
+                    .on_click(move |_, _, cx| {
+                        field.update(cx, |input, cx| input.set_text(current.clone(), cx));
+                        let device = device.clone();
+                        start.update(cx, |ws, cx| {
+                            ws.renaming_device = Some(device);
+                            cx.notify();
+                        })
+                    }),
+            )
+            .into_any_element();
+    }
+    let (save, cancel, input, device) = (
+        workspace.clone(),
+        workspace.clone(),
+        alias.clone(),
+        id.to_string(),
+    );
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(div().flex_1().child(Input::new(alias)))
+        .child(
+            Button::new(SharedString::from(format!("rename-save-{key}")), t("Save"))
+                .size(ControlSize::Sm)
+                .on_click(move |_, _, cx| {
+                    let text = input.read(cx).text().to_string();
+                    let device = device.clone();
+                    save.update(cx, |ws, cx| {
+                        ws.set_device_alias(&device, &text, cx);
+                        ws.renaming_device = None;
+                    });
+                }),
+        )
+        .child(
+            Button::new(
+                SharedString::from(format!("rename-cancel-{key}")),
+                t("Cancel"),
+            )
+            .size(ControlSize::Sm)
+            .variant(ButtonVariant::Ghost)
+            .on_click(move |_, _, cx| {
+                cancel.update(cx, |ws, cx| {
+                    ws.renaming_device = None;
+                    cx.notify();
+                })
+            }),
         )
         .into_any_element()
 }

@@ -306,8 +306,8 @@ fn header(
         .and_then(|state| {
             let device = crate::agents::split_backend(ws.view_backend())
                 .1
-                .unwrap_or_default()
-                .to_string();
+                .unwrap_or_default();
+            let device = ws.device_label(device);
             match state {
                 agent_rpc::node::LinkState::Reconnecting { attempt, .. } => Some((
                     colors.warning,
@@ -991,11 +991,11 @@ fn readiness(ws: &Workspace, folder: &str) -> String {
     if let Some(id) = ws.active_thread_id()
         && ws.sync_is_remote(id)
     {
-        let device = ws.chat_device(id).unwrap_or_default();
+        let device = ws.device_label(&ws.chat_device(id).unwrap_or_default());
         return tf("Runs on {device}", &[("device", &device)]);
     }
     let backend = ws.view_backend();
-    let name = crate::agents::backend_label(backend);
+    let name = ws.backend_label(backend);
     match backend_status(ws, backend) {
         None => tf(
             "{name} is ready in {folder}",

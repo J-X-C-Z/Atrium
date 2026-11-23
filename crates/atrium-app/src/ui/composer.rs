@@ -9,7 +9,7 @@ use ely_gpui_component::{
     buttons::{Button, ButtonVariant, IconButton, ToggleButton, ToggleItem},
     chat::{ContextChips, PromptInput},
     forms::{Choice, TextInput},
-    menus::{DropdownMenu, Menu, MenuItem},
+    menus::{DropdownMenu, Menu, MenuItem, OverflowMenu},
     primitives::{Icon, IconName},
     theme::{ActiveTheme, ControlSize, IconSize, TextSize},
 };
@@ -320,10 +320,17 @@ impl Composer {
             tools.push(
                 ToggleButton::new(
                     "fast",
-                    ToggleItem::new("fast")
-                        .label(t("Fast"))
-                        .icon(IconName::Zap)
-                        .tooltip(t("About twice the speed; uses more of your plan's usage")),
+                    ToggleItem::new("fast").icon(IconName::Zap).tooltip(tf(
+                        "Speed: {state}. Fast is about twice the speed and uses more of your plan's usage",
+                        &[(
+                            "state",
+                            &if ws.settings.fast {
+                                t("Fast")
+                            } else {
+                                t("Standard")
+                            },
+                        )],
+                    )),
                     ws.settings.fast,
                 )
                 .size(ControlSize::Sm)
@@ -357,9 +364,9 @@ impl Composer {
             AccessMode::FullAccess => IconName::LockOpen,
         };
         tools.push(
-            DropdownMenu::new("mode", t(current.label()), menu)
+            OverflowMenu::new("mode", menu)
                 .icon(icon)
-                .variant(ButtonVariant::Ghost)
+                .tooltip(tf("Approval: {mode}", &[("mode", &t(current.label()))]))
                 .into_any_element(),
         );
     }
@@ -372,7 +379,7 @@ impl Composer {
         let ws = self.workspace.read(cx);
         let workspace = &self.workspace;
         let backend = ws.view_backend().to_string();
-        let label = crate::agents::backend_label(&backend);
+        let label = ws.backend_label(&backend);
         let icon = if ws.is_remote_view() {
             IconName::Monitor
         } else {
@@ -429,10 +436,11 @@ impl Composer {
                     .map(|a| item(a.profile.id.clone(), a.profile.name.clone())),
             );
             let title = match &device.status {
-                crate::workspace::DeviceStatus::Online => device.id.clone(),
-                crate::workspace::DeviceStatus::Offline(_) => {
-                    tf("{device} · offline", &[("device", &device.id)])
-                }
+                crate::workspace::DeviceStatus::Online => ws.device_label(&device.id),
+                crate::workspace::DeviceStatus::Offline(_) => tf(
+                    "{device} · offline",
+                    &[("device", &ws.device_label(&device.id))],
+                ),
             };
             if items.is_empty() {
                 items.push(MenuItem::new(t("No agents there")).disabled(true));
@@ -525,16 +533,19 @@ impl Composer {
                 Some("model") => IconName::Sparkles,
                 _ => IconName::Gauge,
             };
-            tools.push(
-                DropdownMenu::new(
-                    SharedString::from(format!("agent-option-{}", option.id)),
-                    option.current_name(),
-                    self.choices_menu(option),
-                )
-                .icon(icon)
-                .variant(ButtonVariant::Ghost)
-                .into_any_element(),
-            );
+            let id = SharedString::from(format!("agent-option-{}", option.id));
+            tools.push(if option.category.as_deref() == Some("mode") {
+                // The approval mode is a setting to glance at, not read.
+                OverflowMenu::new(id, self.choices_menu(option))
+                    .icon(icon)
+                    .tooltip(format!("{}: {}", option.name, option.current_name()))
+                    .into_any_element()
+            } else {
+                DropdownMenu::new(id, option.current_name(), self.choices_menu(option))
+                    .icon(icon)
+                    .variant(ButtonVariant::Ghost)
+                    .into_any_element()
+            });
         }
         // Everything else the agent offers shares one menu, each by name.
         let rest: Vec<&ConfigOption> = options.iter().filter(|o| !primary(o)).collect();
@@ -632,102 +643,21 @@ impl Composer {
                 .unwrap_or_default()
                 .to_string();
             let folder = ws.folder_for(&backend);
-            let pick = |path: String, label: String, icon: IconName, selected: bool| {
-                let (workspace, device) = (self.workspace.clone(), device.clone());
-                MenuItem::radio(label, selected)
-                    .icon(icon)
-                    .on_click(move |_, cx| {
-                        let (device, path) = (device.clone(), path.clone());
-                        workspace.update(cx, |ws, cx| ws.set_device_folder(&device, path, cx))
-                    })
-            };
-            let mut menu = Menu::new();
-            if let Some(device) = ws.device(&device) {
-                let roots: Vec<MenuItem> = device
-                    .info
-                    .roots
-                    .iter()
-                    .map(|root| {
-                        let label = folder_name(Path::new(root));
-                        pick(root.clone(), label, IconName::House, *root == folder)
-                    })
-                    .collect();
-                menu = menu.group(t("Roots"), roots);
-            }
-            let parent = std::path::Path::new(&folder)
-                .parent()
-                .map(|p| p.display().to_string());
-            let inside_roots = |path: &str| {
-                ws.device(&device)
-                    .is_some_and(|d| d.info.roots.iter().any(|r| path.starts_with(r.as_str())))
-            };
-            let mut here = Vec::new();
-            if let Some(parent) = parent.filter(|p| inside_roots(p)) {
-                here.push(pick(
-                    parent,
-                    t("Up one level").into(),
-                    IconName::ChevronLeft,
-                    false,
-                ));
-            }
-            match ws.remote_children(&device, &folder) {
-                Some(children) => here.extend(children.iter().map(|name| {
-                    let path = format!("{}/{name}", folder.trim_end_matches('/'));
-                    pick(path, name.clone(), IconName::Folder, false)
-                })),
-                None => here.push(MenuItem::new(t("Loading…")).disabled(true)),
-            }
-            menu = menu.group(
-                tf(
-                    "In {folder}",
-                    &[("folder", &folder_name(Path::new(&folder)))],
+            tools.push(folder_button(
+                format!(
+                    "{}:{}",
+                    ws.device_label(&device),
+                    folder_name(Path::new(&folder))
                 ),
-                here,
-            );
-            tools.push(
-                DropdownMenu::new(
-                    "folder",
-                    format!("{device}:{}", folder_name(Path::new(&folder))),
-                    menu,
-                )
-                .icon(IconName::Monitor)
-                .variant(ButtonVariant::Ghost)
-                .into_any_element(),
-            );
+                false,
+                true,
+            ));
         }
 
         // Folder: chosen for a new chat; fixed once the chat exists.
         if ws.active_thread().is_none() && !ws.is_remote_view() {
             let folder = ws.settings.working_dir();
-            let mut menu = Menu::new();
-            for recent in ws.settings.recent_folders.iter().filter(|dir| dir.is_dir()) {
-                let workspace = self.workspace.clone();
-                let dir = recent.clone();
-                menu = menu.item(
-                    MenuItem::radio(short_path(recent), *recent == folder)
-                        .icon(IconName::Folder)
-                        .on_click(move |_, cx| {
-                            workspace.update(cx, |ws, cx| ws.set_working_dir(dir.clone(), cx))
-                        }),
-                );
-            }
-            let workspace = self.workspace.clone();
-            menu = menu.separator().item(
-                MenuItem::new(t("Choose a folder…"))
-                    .icon(IconName::FolderOpen)
-                    .on_click(move |_, cx| choose_folder(workspace.clone(), cx)),
-            );
             let isolated = ws.settings.chat_worktrees;
-            let toggle = self.workspace.clone();
-            menu = menu.separator().item(
-                MenuItem::check(t("Start in its own worktree"), isolated).on_click(move |_, cx| {
-                    toggle.update(cx, |ws, cx| {
-                        ws.settings.chat_worktrees = !ws.settings.chat_worktrees;
-                        ws.settings.save();
-                        cx.notify();
-                    })
-                }),
-            );
             let label = if isolated {
                 tf(
                     "{folder} · own worktree",
@@ -736,19 +666,24 @@ impl Composer {
             } else {
                 folder_name(&folder)
             };
-            tools.push(
-                DropdownMenu::new("folder", label, menu)
-                    .icon(if isolated {
-                        IconName::GitBranch
-                    } else {
-                        IconName::Folder
-                    })
-                    .variant(ButtonVariant::Ghost)
-                    .into_any_element(),
-            );
+            tools.push(folder_button(label, isolated, false));
         }
         tools
     }
+}
+
+/// The button that opens the folder dialog, showing where new chats run.
+fn folder_button(label: String, worktree: bool, remote: bool) -> AnyElement {
+    Button::new("folder", label)
+        .icon(match (remote, worktree) {
+            (true, _) => IconName::Monitor,
+            (_, true) => IconName::GitBranch,
+            _ => IconName::Folder,
+        })
+        .trailing_icon(IconName::ChevronDown)
+        .variant(ButtonVariant::Ghost)
+        .on_click(|_, window, cx| window.dispatch_action(Box::new(super::OpenFolderPicker), cx))
+        .into_any_element()
 }
 
 pub fn choose_folder(workspace: Entity<Workspace>, cx: &mut App) {

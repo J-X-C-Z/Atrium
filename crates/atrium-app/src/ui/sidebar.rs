@@ -4,7 +4,7 @@
 use atrium_core::{Account, plan_label};
 use ely_gpui_component::{
     buttons::{Button, ButtonVariant, IconButton, SegmentedControl},
-    chat::{Conversation, ConversationList, new_chat_button},
+    chat::new_chat_button,
     data_display::{Avatar, Badge, Tone},
     forms::{SearchInput, TextInput},
     layout::Sidebar,
@@ -19,6 +19,7 @@ use gpui::{
 };
 use jiff::{Timestamp, tz::TimeZone};
 
+use super::chat_list::{ChatList, ChatRow};
 use super::{NewChat, OpenPalette, OpenSettings, RootView, TITLE_BAR_HEIGHT, ToggleSidebar};
 use crate::i18n::{t, tf};
 use crate::workspace::{Status, View, Workspace};
@@ -118,27 +119,21 @@ pub fn render(
     let in_workflows = matches!(ws.room, crate::workspace::Room::Workflows { .. });
     // Workstreams' sessions live in their project, not among the chats.
     let project_threads = ws.project_threads();
-    let conversations: Vec<Conversation> = ws
+    let conversations: Vec<ChatRow> = ws
         .threads
         .iter()
         .filter(|thread| !project_threads.contains(&thread.id) && ws.chat_shown(&thread.id))
-        .map(|thread| Conversation {
+        .map(|thread| ChatRow {
             key: thread.id.clone().into(),
-            // Other agents' chats say whose they are.
-            title: match (
-                ws.agent(&thread.backend),
-                crate::agents::split_backend(&thread.backend),
-            ) {
-                (Some(agent), (_, Some(device))) => {
-                    format!("{}@{device} · {}", agent.profile.short, thread.title()).into()
-                }
-                (Some(agent), _) => format!("{} · {}", agent.profile.short, thread.title()).into(),
-                (None, (_, Some(device))) => format!("Codex@{device} · {}", thread.title()).into(),
-                (None, _) => thread.title().into(),
-            },
+            title: thread.title(),
             at: Timestamp::from_second(thread.updated_at).unwrap_or(now),
             pinned: ws.settings.is_pinned(&thread.id),
             status: ws.chat_status(&thread.id),
+            agent: crate::agents::split_backend(&thread.backend).0.to_string(),
+            // Chats on other devices carry the device's name.
+            device: ws
+                .chat_device(&thread.id)
+                .map(|device| ws.device_label(&device)),
         })
         .collect();
     let active: Option<SharedString> = match &ws.view {
@@ -175,50 +170,56 @@ pub fn render(
     let retry = workspace.clone();
     let pin = workspace.clone();
     let archive = workspace.clone();
-    let list = ConversationList::new("conversations", conversations, today)
-        .query(query)
-        .active(active, move |key, _, cx| {
+    let extra = {
+        // A conversation another device owns can be moved here.
+        let remote: std::collections::HashSet<String> = ws
+            .threads
+            .iter()
+            .filter(|thread| ws.sync_is_remote(&thread.id))
+            .map(|thread| thread.id.clone())
+            .collect();
+        let mover = workspace.clone();
+        move |key: &SharedString| {
+            if !remote.contains(key.as_ref()) {
+                return Vec::new();
+            }
+            let mover = mover.clone();
+            vec![(
+                t("Move to this computer").into(),
+                IconName::Monitor,
+                std::rc::Rc::new(move |key: &SharedString, _: &mut Window, cx: &mut App| {
+                    let id = key.to_string();
+                    mover.update(cx, |ws, cx| ws.move_to_this_computer(id, cx));
+                }) as std::rc::Rc<dyn Fn(&SharedString, &mut Window, &mut App)>,
+            )]
+        }
+    };
+    let list = ChatList::new(
+        conversations,
+        active,
+        query,
+        today,
+        move |key, _, cx| {
             let id = key.to_string();
             open.update(cx, |ws, cx| ws.open_thread(id, cx));
-        })
-        .actions(
+        },
+        {
+            let root = root.clone();
             move |key, window, cx| {
                 let id = key.to_string();
                 root.update(cx, |root, cx| root.start_rename(id, window, cx));
-            },
-            move |key, _, cx| {
-                let id = key.to_string();
-                pin.update(cx, |ws, cx| ws.toggle_pin(&id, cx));
-            },
-            move |key, _, cx| {
-                let id = key.to_string();
-                archive.update(cx, |ws, cx| ws.archive(id, cx));
-            },
-        )
-        .extra_actions({
-            // A conversation another device owns can be moved here.
-            let remote: std::collections::HashSet<String> = ws
-                .threads
-                .iter()
-                .filter(|thread| ws.sync_is_remote(&thread.id))
-                .map(|thread| thread.id.clone())
-                .collect();
-            let mover = workspace.clone();
-            move |key| {
-                if !remote.contains(key.as_ref()) {
-                    return Vec::new();
-                }
-                let mover = mover.clone();
-                vec![(
-                    t("Move to this computer").into(),
-                    IconName::Monitor,
-                    std::rc::Rc::new(move |key: &SharedString, _: &mut Window, cx: &mut App| {
-                        let id = key.to_string();
-                        mover.update(cx, |ws, cx| ws.move_to_this_computer(id, cx));
-                    }),
-                )]
             }
-        });
+        },
+        move |key, _, cx| {
+            let id = key.to_string();
+            pin.update(cx, |ws, cx| ws.toggle_pin(&id, cx));
+        },
+        move |key, _, cx| {
+            let id = key.to_string();
+            archive.update(cx, |ws, cx| ws.archive(id, cx));
+        },
+        extra,
+    );
 
     Sidebar::new("sidebar", false)
         .child(
@@ -372,7 +373,7 @@ pub fn render(
                         .pb_2()
                         .child(SearchInput::new("search", search).size(ControlSize::Sm)),
                 )
-                .children(device_chips(workspace, cx))
+                .children(device_chips(workspace, &account_root, cx))
                 .child(super::motion::enter(
                     div().flex_1().min_h_0().flex().flex_col().child(
                         div()
@@ -599,7 +600,20 @@ pub fn render(
 
 /// Chips over the chat list to show one device's chats, when chats from
 /// other devices are in it. Each device's dot says whether it is online.
-fn device_chips(workspace: &Entity<Workspace>, cx: &App) -> Option<AnyElement> {
+/// A chip: its id, label, filter, whether its device is online, and the device.
+type Chip = (
+    SharedString,
+    String,
+    crate::workspace::DeviceFilter,
+    Option<bool>,
+    Option<String>,
+);
+
+fn device_chips(
+    workspace: &Entity<Workspace>,
+    root: &Entity<RootView>,
+    cx: &App,
+) -> Option<AnyElement> {
     use crate::workspace::DeviceFilter;
     let ws = workspace.read(cx);
     let devices = ws.chat_devices();
@@ -609,12 +623,19 @@ fn device_chips(workspace: &Entity<Workspace>, cx: &App) -> Option<AnyElement> {
     let theme = cx.theme();
     let colors = theme.colors.clone();
     let current = ws.device_filter.clone();
-    let mut chips: Vec<(SharedString, String, DeviceFilter, Option<bool>)> = vec![
-        ("chip-all".into(), t("All").into(), DeviceFilter::All, None),
+    let mut chips: Vec<Chip> = vec![
+        (
+            "chip-all".into(),
+            t("All").into(),
+            DeviceFilter::All,
+            None,
+            None,
+        ),
         (
             "chip-here".into(),
             t("This computer").into(),
             DeviceFilter::Here,
+            None,
             None,
         ),
     ];
@@ -622,9 +643,10 @@ fn device_chips(workspace: &Entity<Workspace>, cx: &App) -> Option<AnyElement> {
         let online = ws.device_online(&device);
         chips.push((
             format!("chip-{device}").into(),
-            device.clone(),
-            DeviceFilter::Device(device),
+            ws.device_label(&device),
+            DeviceFilter::Device(device.clone()),
             Some(online),
+            Some(device),
         ));
     }
     let row = div()
@@ -634,41 +656,61 @@ fn device_chips(workspace: &Entity<Workspace>, cx: &App) -> Option<AnyElement> {
         .gap_1()
         .px_3()
         .pb_2()
-        .children(chips.into_iter().map(|(id, label, filter, online)| {
-            let on = filter == current;
-            let pick = workspace.clone();
-            div()
-                .id(id)
-                .flex()
-                .items_center()
-                .gap_1()
-                .px_2()
-                .py_0p5()
-                .rounded_full()
-                .cursor_pointer()
-                .text_size(theme.text_size(TextSize::Xs))
-                .border_1()
-                .border_color(if on {
-                    colors.border_strong
-                } else {
-                    colors.border
-                })
-                .when(on, |c| c.bg(colors.active).text_color(colors.fg))
-                .when(!on, |c| {
-                    c.text_color(colors.fg_muted).hover(|c| c.bg(colors.hover))
-                })
-                .children(online.map(|online| {
-                    div().size(px(6.)).rounded_full().bg(if online {
-                        colors.success
-                    } else {
-                        colors.fg_subtle
-                    })
-                }))
-                .child(label)
-                .on_click(move |_, _, cx| {
-                    let filter = filter.clone();
-                    pick.update(cx, |ws, cx| ws.set_device_filter(filter, cx))
-                })
-        }));
+        .children(
+            chips
+                .into_iter()
+                .map(|(id, label, filter, online, device)| {
+                    let root = root.clone();
+                    let on = filter == current;
+                    let pick = workspace.clone();
+                    div()
+                        .id(id)
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_full()
+                        .cursor_pointer()
+                        .text_size(theme.text_size(TextSize::Xs))
+                        .border_1()
+                        .border_color(if on {
+                            colors.border_strong
+                        } else {
+                            colors.border
+                        })
+                        .when(on, |c| c.bg(colors.active).text_color(colors.fg))
+                        .when(!on, |c| {
+                            c.text_color(colors.fg_muted).hover(|c| c.bg(colors.hover))
+                        })
+                        .children(online.map(|online| {
+                            div().size(px(6.)).rounded_full().bg(if online {
+                                colors.success
+                            } else {
+                                colors.fg_subtle
+                            })
+                        }))
+                        .child(label)
+                        // Right-click a device to give it a name of your own.
+                        .when_some(device, |chip, device| {
+                            chip.tooltip(ely_gpui_component::primitives::Tooltip::text(t(
+                                "Right-click to rename",
+                            )))
+                            .on_mouse_down(
+                                gpui::MouseButton::Right,
+                                move |_, window, cx| {
+                                    let device = device.clone();
+                                    root.update(cx, |root, cx| {
+                                        root.start_rename_device(device, window, cx)
+                                    })
+                                },
+                            )
+                        })
+                        .on_click(move |_, _, cx| {
+                            let filter = filter.clone();
+                            pick.update(cx, |ws, cx| ws.set_device_filter(filter, cx))
+                        })
+                }),
+        );
     Some(row.into_any_element())
 }
