@@ -98,6 +98,7 @@ struct Spec {
     content: Vec<(f32, Laid)>,
     extra: Vec<Item>,
     content_h: f32,
+    pad: [f32; 4],
     look: CellLook,
 }
 
@@ -188,6 +189,8 @@ fn clip(item: &Item, from: f32, to: f32, shift: f32) -> Option<Item> {
             segments,
             fill,
             stroke,
+            rotation,
+            center,
         } => {
             let first = segments.iter().find_map(|s| match s {
                 Seg::Move(_, y) | Seg::Line(_, y) => Some(*y),
@@ -197,6 +200,8 @@ fn clip(item: &Item, from: f32, to: f32, shift: f32) -> Option<Item> {
                 segments: segments.clone(),
                 fill: *fill,
                 stroke: *stroke,
+                rotation: *rotation,
+                center: *center,
             })
         }
         Item::Text {
@@ -205,12 +210,16 @@ fn clip(item: &Item, from: f32, to: f32, shift: f32) -> Option<Item> {
             text,
             font,
             color,
+            rotation,
+            center,
         } => (*baseline >= from && *baseline < to).then(|| Item::Text {
             x: *x,
             baseline: baseline - from + shift,
             text: text.clone(),
             font: font.clone(),
             color: *color,
+            rotation: *rotation,
+            center: (center.0, center.1 - from + shift),
         }),
     }
 }
@@ -330,7 +339,12 @@ pub(crate) fn table(cx: &mut Ctx<'_>, t: &Table, width: f32) -> (Vec<Row>, Vec<I
                 .iter()
                 .sum();
             let x: f32 = cols[..c.min(cols.len())].iter().sum();
-            let inner = (width - pad[1] - pad[3]).max(1.0);
+            let cell_pad = if look.padding == [0; 4] {
+                pad
+            } else {
+                look.padding.map(pt)
+            };
+            let inner = (width - cell_pad[1] - cell_pad[3]).max(1.0);
             let (placed, extra, content_h) = lines::stack(cx, &row[c], inner);
             let index = specs.len();
             for row in &mut cover[r..(r + vspan).min(rows_n)] {
@@ -348,6 +362,7 @@ pub(crate) fn table(cx: &mut Ctx<'_>, t: &Table, width: f32) -> (Vec<Row>, Vec<I
                 content: placed,
                 extra,
                 content_h,
+                pad: cell_pad,
                 look,
             });
             c += colspan;
@@ -357,7 +372,7 @@ pub(crate) fn table(cx: &mut Ctx<'_>, t: &Table, width: f32) -> (Vec<Row>, Vec<I
     // Row heights: single-row cells first, then make room for merged spans.
     for spec in &specs {
         if spec.vspan == 1 {
-            heights[spec.row] = heights[spec.row].max(spec.content_h + pad[0] + pad[2]);
+            heights[spec.row] = heights[spec.row].max(spec.content_h + spec.pad[0] + spec.pad[2]);
         }
     }
     for (r, height) in heights.iter_mut().enumerate() {
@@ -369,7 +384,7 @@ pub(crate) fn table(cx: &mut Ctx<'_>, t: &Table, width: f32) -> (Vec<Row>, Vec<I
         if spec.vspan <= 1 {
             continue;
         }
-        let need = spec.content_h + pad[0] + pad[2];
+        let need = spec.content_h + spec.pad[0] + spec.pad[2];
         let last = (spec.row + spec.vspan - 1).min(rows_n - 1);
         let total: f32 = heights[spec.row..=last].iter().sum();
         if total < need {
@@ -396,11 +411,15 @@ pub(crate) fn table(cx: &mut Ctx<'_>, t: &Table, width: f32) -> (Vec<Row>, Vec<I
             });
         }
         for item in &spec.extra {
-            items.push(super::translate(item, spec.x + pad[3], y0 + pad[0]));
+            items.push(super::translate(
+                item,
+                spec.x + spec.pad[3],
+                y0 + spec.pad[0],
+            ));
         }
-        let free = cell_h - pad[0] - pad[2] - spec.content_h;
+        let free = cell_h - spec.pad[0] - spec.pad[2] - spec.content_h;
         let dy = y0
-            + pad[0]
+            + spec.pad[0]
             + match spec.look.v_align {
                 VAlign::Top => 0.0,
                 VAlign::Center => free / 2.0,
@@ -410,10 +429,10 @@ pub(crate) fn table(cx: &mut Ctx<'_>, t: &Table, width: f32) -> (Vec<Row>, Vec<I
             line.items = line
                 .items
                 .iter()
-                .map(|i| super::translate(i, spec.x + pad[3], 0.0))
+                .map(|i| super::translate(i, spec.x + spec.pad[3], 0.0))
                 .collect();
             for s in line.stops.iter_mut() {
-                s.1 += spec.x + pad[3];
+                s.1 += spec.x + spec.pad[3];
             }
             row_lines[spec.row].push((dy + ly, line));
         }

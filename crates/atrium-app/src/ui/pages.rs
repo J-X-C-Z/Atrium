@@ -958,6 +958,7 @@ impl DocView {
                                 text,
                                 font,
                                 color: c,
+                                ..
                             } => {
                                 let run = shaper.run(font, text.len(), color(*c));
                                 let size = px(font.size * z);
@@ -979,6 +980,7 @@ impl DocView {
                                 segments,
                                 fill,
                                 stroke,
+                                ..
                             } => {
                                 let build = |mut b: gpui::PathBuilder| {
                                     for seg in segments {

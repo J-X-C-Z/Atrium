@@ -2,18 +2,16 @@
 //! [`lines`], tables in [`table`]; this module walks the document, fills
 //! pages, numbers them and draws headers, footers, footnotes and floats.
 
-mod lines;
-mod table;
+pub(crate) mod lines;
+pub(crate) mod table;
 
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-use atrium_office::look::{
-    Chart, ChartKind, Fill, NumFormat, Origin, PathCmd, Rgb, Section, ShapeKind, Wrap,
-};
-use atrium_office::{AtomKind, Block, Inline, Marks, NodeId, Shape, Slide, WordDoc};
+use atrium_office::look::{NumFormat, Origin, Rgb, Section, Wrap};
+use atrium_office::{AtomKind, Block, Inline, Marks, NodeId, Shape, WordDoc};
 
-use crate::{FontKey, Item, Layout, Line, Metrics, Page, Pen, Rect, Seg, Shaper};
+use crate::{Item, Layout, Line, Metrics, Page, Rect, Seg, Shaper};
 
 pub(crate) use lines::Laid;
 
@@ -46,7 +44,12 @@ pub(crate) struct Ctx<'a> {
 }
 
 impl<'a> Ctx<'a> {
-    fn new(shaper: &'a dyn Shaper, defaults: &'a Marks, base_size: f32, tab: i32) -> Self {
+    pub(crate) fn new(
+        shaper: &'a dyn Shaper,
+        defaults: &'a Marks,
+        base_size: f32,
+        tab: i32,
+    ) -> Self {
         Self {
             shaper,
             defaults,
@@ -71,12 +74,16 @@ pub(crate) fn translate(item: &Item, dx: f32, dy: f32) -> Item {
             text,
             font,
             color,
+            rotation,
+            center,
         } => Item::Text {
             x: x + dx,
             baseline: baseline + dy,
             text,
             font,
             color,
+            rotation,
+            center: (center.0 + dx, center.1 + dy),
         },
         Item::Fill { rect, color } => Item::Fill {
             rect: Rect {
@@ -109,6 +116,8 @@ pub(crate) fn translate(item: &Item, dx: f32, dy: f32) -> Item {
             segments,
             fill,
             stroke,
+            rotation,
+            center,
         } => Item::Path {
             segments: segments
                 .into_iter()
@@ -124,6 +133,8 @@ pub(crate) fn translate(item: &Item, dx: f32, dy: f32) -> Item {
                 .collect(),
             fill,
             stroke,
+            rotation,
+            center: (center.0 + dx, center.1 + dy),
         },
         Item::Gradient { rect, angle, stops } => Item::Gradient {
             rect: Rect {
@@ -998,371 +1009,7 @@ pub(crate) fn document(doc: &WordDoc, shaper: &dyn Shaper) -> Layout {
     document_pass(doc, shaper, total)
 }
 
-pub(crate) fn slide(slide: &Slide, index: usize, shaper: &dyn Shaper) -> Layout {
-    let defaults = Marks::default();
-    let mut cx = Ctx::new(shaper, &defaults, SLIDE_PT, 420);
-    cx.page_number = index as u32 + 1;
-    let mut page = Page {
-        width: slide.size.0 as f32,
-        height: slide.size.1 as f32,
-        number: index as u32 + 1,
-        section: 0,
-        background: slide.background.or(Some(Rgb::WHITE)),
-        items: Vec::new(),
-    };
-    let mut lines = Vec::new();
-    let (w, h) = (page.width, page.height);
-    let mut next_y = h * 0.08;
-    let mut first = true;
-    for shape in &slide.shapes {
-        if shape.frame[2] > 1 && shape.frame[3] > 1 {
-            shape_items(&mut cx, shape, index, &mut page, &mut lines, None);
-            continue;
-        }
-        let size = if first { 32.0 } else { SLIDE_PT };
-        let frame = [w * 0.07, next_y, w * 0.86, 0.0];
-        let used = shape_items(
-            &mut cx,
-            shape,
-            index,
-            &mut page,
-            &mut lines,
-            Some((frame, size)),
-        );
-        next_y += used + h * 0.04;
-        first = false;
-    }
-    Layout {
-        pages: vec![page],
-        lines,
-    }
-}
-
 /// Draws one shape at `rect`; used by sheet drawings.
 pub(crate) fn shape_at(shape: &Shape, rect: Rect, shaper: &dyn Shaper) -> Vec<Item> {
-    let defaults = Marks::default();
-    let mut cx = Ctx::new(shaper, &defaults, SLIDE_PT, 420);
-    let mut page = Page {
-        width: rect.x + rect.width,
-        height: rect.y + rect.height,
-        number: 1,
-        section: 0,
-        background: None,
-        items: Vec::new(),
-    };
-    let mut shape = shape.clone();
-    shape.frame = [
-        rect.x.round() as i32,
-        rect.y.round() as i32,
-        rect.width.round() as i32,
-        rect.height.round() as i32,
-    ];
-    let mut lines = Vec::new();
-    shape_items(&mut cx, &shape, 0, &mut page, &mut lines, None);
-    page.items
-}
-
-/// Draws a shape and its text; returns the height its text took.
-fn shape_items(
-    cx: &mut Ctx,
-    shape: &Shape,
-    index: usize,
-    page: &mut Page,
-    lines: &mut Vec<Line>,
-    auto: Option<([f32; 4], f32)>,
-) -> f32 {
-    let [x, y, w, h] = auto.map(|p| p.0).unwrap_or(shape.frame.map(|v| v as f32));
-    let rect = Rect {
-        x,
-        y,
-        width: w,
-        height: h,
-    };
-    let look = &shape.look;
-    shape_paint(shape, rect, page);
-    match &shape.kind {
-        ShapeKind::Table(table) => {
-            let (rows, _, _) = table::table(cx, table, w);
-            let mut ty = y;
-            for row in rows {
-                page.items
-                    .extend(row.items.iter().map(|i| translate(i, x, ty)));
-                for (ly, line) in row.lines {
-                    let top = ty + ly;
-                    page.items
-                        .extend(line.items.iter().map(|i| translate(i, x, top)));
-                    lines.push(Line {
-                        page: index,
-                        para: line.para,
-                        range: line.range,
-                        top,
-                        height: line.height,
-                        baseline: top + line.baseline,
-                        stops: line.stops.iter().map(|(o, sx)| (*o, sx + x)).collect(),
-                        furniture: false,
-                    });
-                }
-                ty += row.height;
-            }
-            return h;
-        }
-        ShapeKind::Chart(c) => {
-            page.items.extend(chart(c, rect, cx.shaper));
-            return h;
-        }
-        ShapeKind::Fallback(path) => {
-            page.items.push(Item::Picture {
-                rect,
-                path: path.clone(),
-            });
-            return h;
-        }
-        ShapeKind::Text | ShapeKind::Picture => {}
-    }
-    let insets = if look.insets == [0; 4] {
-        [3.6, 7.2, 3.6, 7.2]
-    } else {
-        look.insets.map(pt)
-    };
-    let inner = (w - insets[1] - insets[3]).max(1.0);
-    let scale = look.font_scale.map(|s| s as f32 / 1000.0).unwrap_or(1.0);
-    cx.base_size = auto.map(|p| p.1).unwrap_or(SLIDE_PT) * scale;
-    cx.line_pitch = None;
-    let mut placed = Vec::new();
-    let mut ty = 0.0;
-    for p in &shape.paras {
-        let b = lines::para(cx, p, inner, auto.is_none());
-        ty += b.before;
-        let para_start = ty;
-        for line in b.lines {
-            let lh = line.height;
-            let ly = para_start + line.y;
-            placed.push((ly, line));
-            ty = ly + lh;
-        }
-        ty += b.after;
-    }
-    let h = if auto.is_some() {
-        ty + insets[0] + insets[2]
-    } else {
-        h
-    };
-    let free = h - insets[0] - insets[2] - ty;
-    let dy = y
-        + insets[0]
-        + match look.v_align {
-            atrium_office::look::VAlign::Top => 0.0,
-            atrium_office::look::VAlign::Center => free / 2.0,
-            atrium_office::look::VAlign::Bottom => free,
-        };
-    let dx = x + insets[3];
-    for (ly, line) in placed {
-        page.items
-            .extend(line.items.iter().map(|i| translate(i, dx, dy + ly)));
-        lines.push(Line {
-            page: index,
-            para: line.para,
-            range: line.range,
-            top: dy + ly,
-            height: line.height,
-            baseline: dy + ly + line.baseline,
-            stops: line.stops.iter().map(|(o, sx)| (*o, sx + dx)).collect(),
-            furniture: false,
-        });
-    }
-    h
-}
-
-/// A shape's fill and outline: its own path, or its frame.
-fn shape_paint(shape: &Shape, rect: Rect, page: &mut Page) {
-    let look = &shape.look;
-    let (x, y) = (rect.x, rect.y);
-    let segments: Vec<Seg> = if look.path.is_empty() {
-        vec![
-            Seg::Move(x, y),
-            Seg::Line(x + rect.width, y),
-            Seg::Line(x + rect.width, y + rect.height),
-            Seg::Line(x, y + rect.height),
-            Seg::Close,
-        ]
-    } else {
-        look.path
-            .iter()
-            .map(|c| match *c {
-                PathCmd::Move(a, b) => Seg::Move(x + pt(a), y + pt(b)),
-                PathCmd::Line(a, b) => Seg::Line(x + pt(a), y + pt(b)),
-                PathCmd::Quad(a, b, c, d) => Seg::Quad(x + pt(a), y + pt(b), x + pt(c), y + pt(d)),
-                PathCmd::Cubic(a, b, c, d, e, f) => Seg::Cubic(
-                    x + pt(a),
-                    y + pt(b),
-                    x + pt(c),
-                    y + pt(d),
-                    x + pt(e),
-                    y + pt(f),
-                ),
-                PathCmd::Close => Seg::Close,
-            })
-            .collect()
-    };
-    let plain = look.path.is_empty();
-    match &look.fill {
-        Fill::None => {}
-        Fill::Solid(color, 255) if plain => page.items.push(Item::Fill {
-            rect,
-            color: *color,
-        }),
-        Fill::Solid(color, alpha) => page.items.push(Item::Path {
-            segments: segments.clone(),
-            fill: Some((*color, *alpha)),
-            stroke: None,
-        }),
-        Fill::Gradient { stops, angle, .. } if plain => page.items.push(Item::Gradient {
-            rect,
-            angle: *angle as f32,
-            stops: stops
-                .iter()
-                .map(|(at, c, a)| (*at as f32 / 1000.0, *c, *a))
-                .collect(),
-        }),
-        Fill::Gradient { stops, .. } => {
-            if let Some((_, c, a)) = stops.first() {
-                page.items.push(Item::Path {
-                    segments: segments.clone(),
-                    fill: Some((*c, *a)),
-                    stroke: None,
-                });
-            }
-        }
-        Fill::Picture { path, .. } => page.items.push(Item::Picture {
-            rect,
-            path: Some(path.clone()),
-        }),
-    }
-    if let Some(stroke) = look.line {
-        page.items.push(Item::Path {
-            segments,
-            fill: None,
-            stroke: Some(Pen {
-                width: pt(stroke.width).max(0.5),
-                color: stroke.color,
-                alpha: stroke.alpha,
-                dash: stroke.dash,
-            }),
-        });
-    }
-}
-
-/// The reference chart: a frame, the title, and columns, bars or lines for
-/// the series; other kinds show their name. The full engine replaces it.
-pub(crate) fn chart(c: &Chart, rect: Rect, shaper: &dyn Shaper) -> Vec<Item> {
-    const PALETTE: [u32; 6] = [0x4472C4, 0xED7D31, 0xA5A5A5, 0xFFC000, 0x5B9BD5, 0x70AD47];
-    let mut out = vec![Item::Rule {
-        from: (rect.x, rect.y + rect.height),
-        to: (rect.x + rect.width, rect.y + rect.height),
-        width: 0.75,
-        color: Rgb(0x808080),
-    }];
-    let font = FontKey {
-        family: String::new(),
-        size: 12.0,
-        bold: false,
-        italic: false,
-        cjk: true,
-    };
-    let mut top = rect.y + 4.0;
-    if let Some(title) = &c.title {
-        let width: f32 = shaper.shape(title, &font).iter().map(|c| c.advance).sum();
-        out.push(Item::Text {
-            x: rect.x + (rect.width - width) / 2.0,
-            baseline: top + 12.0,
-            text: title.clone(),
-            font: font.clone(),
-            color: Rgb(0x404040),
-        });
-        top += 20.0;
-    }
-    let plot = Rect {
-        x: rect.x + 8.0,
-        y: top,
-        width: rect.width - 16.0,
-        height: (rect.y + rect.height - top - 4.0).max(1.0),
-    };
-    let max = c
-        .series
-        .iter()
-        .flat_map(|s| s.values.iter().flatten())
-        .fold(0.0f64, |m, v| m.max(*v))
-        .max(f64::EPSILON);
-    let count = c
-        .series
-        .iter()
-        .map(|s| s.values.len())
-        .max()
-        .unwrap_or(0)
-        .max(1);
-    let color = |i: usize, s: &atrium_office::look::Series| {
-        s.color.unwrap_or(Rgb(PALETTE[i % PALETTE.len()]))
-    };
-    match c.kind {
-        ChartKind::Column | ChartKind::Bar => {
-            let groups = c.series.len().max(1);
-            let slot = plot.width / count as f32;
-            let bar = slot * 0.7 / groups as f32;
-            for (si, s) in c.series.iter().enumerate() {
-                for (k, v) in s.values.iter().enumerate() {
-                    let Some(v) = v else { continue };
-                    let h = (*v / max) as f32 * plot.height;
-                    out.push(Item::Fill {
-                        rect: Rect {
-                            x: plot.x + slot * k as f32 + slot * 0.15 + bar * si as f32,
-                            y: plot.y + plot.height - h,
-                            width: bar,
-                            height: h,
-                        },
-                        color: color(si, s),
-                    });
-                }
-            }
-        }
-        ChartKind::Line | ChartKind::Area => {
-            let step = plot.width / count as f32;
-            for (si, s) in c.series.iter().enumerate() {
-                let mut segments = Vec::new();
-                for (k, v) in s.values.iter().enumerate() {
-                    let Some(v) = v else { continue };
-                    let px = plot.x + step * (k as f32 + 0.5);
-                    let py = plot.y + plot.height - (*v / max) as f32 * plot.height;
-                    segments.push(if segments.is_empty() {
-                        Seg::Move(px, py)
-                    } else {
-                        Seg::Line(px, py)
-                    });
-                }
-                out.push(Item::Path {
-                    segments,
-                    fill: None,
-                    stroke: Some(Pen {
-                        width: 2.0,
-                        color: color(si, s),
-                        alpha: 255,
-                        dash: Default::default(),
-                    }),
-                });
-            }
-        }
-        _ => {
-            let label = match &c.kind {
-                ChartKind::Other(name) => name.clone(),
-                other => format!("{other:?}"),
-            };
-            out.push(Item::Text {
-                x: plot.x,
-                baseline: plot.y + 14.0,
-                text: label,
-                font,
-                color: Rgb(0x808080),
-            });
-        }
-    }
-    out
+    crate::slide::shape_at(shape, rect, shaper)
 }

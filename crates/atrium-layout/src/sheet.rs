@@ -161,7 +161,8 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(text, "备注");
+        // The chart draws its axis labels too; the note is the last text.
+        assert!(text.ends_with("备注"), "{text}");
     }
 
     #[test]
