@@ -2,16 +2,17 @@
 
 use crate::word::{EditError, Inline, NodeId, Para};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Shape {
     pub id: NodeId,
     /// Position and size in points: x, y, width, height.
     pub frame: [i32; 4],
     pub paras: Vec<Para>,
     pub look: crate::look::ShapeLook,
+    pub kind: crate::look::ShapeKind,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Slide {
     pub hidden: bool,
     /// Width and height in points.

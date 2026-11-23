@@ -265,6 +265,7 @@ impl SlidesBinding {
             frame,
             paras,
             look: Default::default(),
+            kind: Default::default(),
         }
     }
 

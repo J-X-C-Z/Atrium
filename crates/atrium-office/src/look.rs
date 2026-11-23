@@ -318,11 +318,141 @@ pub struct AtomLook {
     pub shown: Option<String>,
 }
 
+/// How a slide shape is filled. Theme colours arrive resolved.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Fill {
+    #[default]
+    None,
+    /// A colour and its opacity, 0 to 255.
+    Solid(Rgb, u8),
+    Gradient {
+        /// Positions from 0 to 1000, colour, opacity.
+        stops: Vec<(u16, Rgb, u8)>,
+        /// Degrees, clockwise from left to right.
+        angle: i32,
+        radial: bool,
+    },
+    Picture {
+        path: std::path::PathBuf,
+        /// Cropped off each side, in thousandths: top, right, bottom, left.
+        crop: [i32; 4],
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Dash {
+    #[default]
+    Solid,
+    Dot,
+    Dash,
+    DashDot,
+    LongDash,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Arrow {
+    #[default]
+    None,
+    Triangle,
+    Stealth,
+    Oval,
+    Diamond,
+    Open,
+}
+
+/// A shape's outline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Stroke {
+    pub width: Twips,
+    pub color: Rgb,
+    pub alpha: u8,
+    pub dash: Dash,
+    /// At the path's start and end.
+    pub head: Arrow,
+    pub tail: Arrow,
+}
+
+/// One step of a shape's outline, in twips from the shape's top-left
+/// corner, after flips; the frame's size is the shape's size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathCmd {
+    Move(Twips, Twips),
+    Line(Twips, Twips),
+    Quad(Twips, Twips, Twips, Twips),
+    Cubic(Twips, Twips, Twips, Twips, Twips, Twips),
+    Close,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Shadow {
+    pub color: Rgb,
+    pub alpha: u8,
+    pub blur: Twips,
+    pub distance: Twips,
+    /// Degrees, clockwise from right.
+    pub direction: i32,
+}
+
+/// What a slide shape is, besides its text.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum ShapeKind {
+    /// A text box or a drawn shape (its text in `Shape::paras`).
+    #[default]
+    Text,
+    /// A picture: its file is in `ShapeLook::fill` as `Fill::Picture`.
+    Picture,
+    /// A table: its cells' paragraphs are editable like a Word table's.
+    Table(Box<crate::Table>),
+    Chart(Box<Chart>),
+    /// A diagram or object shown by the picture the file keeps for it.
+    Fallback(Option<std::path::PathBuf>),
+}
+
+/// A chart from its cached values: enough to draw it, not to edit its data.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Chart {
+    pub kind: ChartKind,
+    pub title: Option<String>,
+    pub categories: Vec<String>,
+    pub series: Vec<Series>,
+    pub stacked: bool,
+    /// Stacked to 100 %.
+    pub percent: bool,
+    pub legend: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ChartKind {
+    #[default]
+    Column,
+    Bar,
+    Line,
+    Area,
+    Pie,
+    Doughnut,
+    Scatter,
+    /// Another kind, by its element name: drawn as a placeholder.
+    Other(String),
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Series {
+    pub name: String,
+    pub values: Vec<Option<f64>>,
+    /// X values, for scatter charts.
+    pub x: Vec<Option<f64>>,
+    pub color: Option<Rgb>,
+}
+
 /// A slide shape's own look, apart from its text.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ShapeLook {
-    pub fill: Option<Rgb>,
-    pub line: Option<Border>,
+    pub fill: Fill,
+    pub line: Option<Stroke>,
+    /// The outline; empty means the frame's rectangle.
+    pub path: Vec<PathCmd>,
+    pub flip: (bool, bool),
+    pub shadow: Option<Shadow>,
     /// Text insets: top, right, bottom, left.
     pub insets: [Twips; 4],
     pub v_align: VAlign,
@@ -330,6 +460,171 @@ pub struct ShapeLook {
     pub rotation: i32,
     /// Shrinks text to fit, to this scale in thousandths (`normAutofit`).
     pub font_scale: Option<u16>,
-    /// A picture filling the shape.
-    pub picture: Option<std::path::PathBuf>,
+}
+
+// ---------------------------------------------------------------- sheets
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HAlign {
+    /// Text left, numbers right, as Excel does.
+    #[default]
+    General,
+    Left,
+    Center,
+    Right,
+    /// Repeats the text to fill the cell.
+    Fill,
+    Justify,
+    CenterAcross,
+    Distributed,
+}
+
+/// How a cell looks. A workbook keeps each distinct style once; cells,
+/// rows and columns refer to it by index, 0 being the default.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CellStyle {
+    /// Font, size, colour, bold, italic, underline, strike.
+    pub font: crate::Marks,
+    pub fill: Option<Rgb>,
+    pub borders: Borders,
+    pub h_align: HAlign,
+    pub v_align: VAlign,
+    pub wrap: bool,
+    pub shrink: bool,
+    /// Indent steps of about three characters each.
+    pub indent: u8,
+    /// Degrees counter-clockwise, -90 to 90; 255 stacks letters vertically.
+    pub rotation: i16,
+    /// The number format code, as `0.00%` or `yyyy"年"m"月"d"日"`.
+    pub number_format: String,
+}
+
+impl Default for CellStyle {
+    fn default() -> Self {
+        Self {
+            font: crate::Marks::default(),
+            fill: None,
+            borders: Borders::default(),
+            h_align: HAlign::General,
+            v_align: VAlign::Bottom,
+            wrap: false,
+            shrink: false,
+            indent: 0,
+            rotation: 0,
+            number_format: "General".into(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Compare {
+    Between(f64, f64),
+    NotBetween(f64, f64),
+    Equal(f64),
+    NotEqual(f64),
+    Greater(f64),
+    Less(f64),
+    AtLeast(f64),
+    AtMost(f64),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum CondKind {
+    /// Compares the cell's value; `style` applies when it holds.
+    CellIs(Compare),
+    /// Text containing this.
+    Contains(String),
+    /// The top or bottom `n` values, or `n` percent.
+    Top {
+        n: u32,
+        bottom: bool,
+        percent: bool,
+    },
+    AboveAverage {
+        below: bool,
+    },
+    Duplicate {
+        unique: bool,
+    },
+    /// Colours from the lowest to the highest value: two or three stops.
+    ColorScale(Vec<Rgb>),
+    /// A bar across the cell, as long as the value is large.
+    DataBar(Rgb),
+    /// A rule this model does not evaluate, by its type: it never applies.
+    Other(String),
+}
+
+/// A conditional format over a range.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CondRule {
+    /// First row, first column, last row, last column.
+    pub range: (u32, u32, u32, u32),
+    pub kind: CondKind,
+    /// What changes when the rule holds (`dxf`): only the set fields count.
+    pub style: Option<CellStyle>,
+    /// Lower runs first; `stop_if_true` stops later rules.
+    pub priority: u32,
+    pub stop_if_true: bool,
+}
+
+/// Something drawn over a sheet, anchored to cells.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Anchored {
+    /// Row, column, and offsets in points into that cell.
+    pub from: (u32, u32, f32, f32),
+    pub to: (u32, u32, f32, f32),
+    pub what: Drawing,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Drawing {
+    Picture(std::path::PathBuf),
+    Chart(Chart),
+    /// A text box or drawn shape, laid out like a slide shape.
+    Shape(Box<crate::Shape>),
+}
+
+/// How a sheet is laid out. Sizes are in points.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SheetLook {
+    /// Column widths where the file sets them.
+    pub columns: std::collections::BTreeMap<u32, f32>,
+    pub default_width: f32,
+    pub rows: std::collections::BTreeMap<u32, f32>,
+    pub default_height: f32,
+    pub hidden_rows: std::collections::BTreeSet<u32>,
+    pub hidden_columns: std::collections::BTreeSet<u32>,
+    /// Style indexes for whole rows and columns.
+    pub row_styles: std::collections::BTreeMap<u32, u32>,
+    pub column_styles: std::collections::BTreeMap<u32, u32>,
+    /// Rows and columns frozen at the top and left.
+    pub frozen: (u32, u32),
+    pub gridlines: bool,
+    /// Percent.
+    pub zoom: u16,
+    pub conditional: Vec<CondRule>,
+    pub drawings: Vec<Anchored>,
+    pub tab_color: Option<Rgb>,
+}
+
+impl Default for SheetLook {
+    /// Excel's defaults: 8.43 characters of Calibri 11 wide, 15 points high.
+    fn default() -> Self {
+        Self {
+            columns: Default::default(),
+            default_width: 48.0,
+            rows: Default::default(),
+            default_height: 15.0,
+            hidden_rows: Default::default(),
+            hidden_columns: Default::default(),
+            row_styles: Default::default(),
+            column_styles: Default::default(),
+            frozen: (0, 0),
+            gridlines: true,
+            zoom: 100,
+            conditional: Vec::new(),
+            drawings: Vec::new(),
+            tab_color: None,
+        }
+    }
 }

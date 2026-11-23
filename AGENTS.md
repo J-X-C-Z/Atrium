@@ -15,8 +15,8 @@ existing functions to call, the tests to write and when it is done.
 
 ## Backlog
 
-**Next up: 14**, then 15 — editing Word and PowerPoint on their real
-pages. Real-device acceptance (multi-device items 12/13 and workflow W1 in
+**Next up: 14**, then 15, 16, 17 — Word, PowerPoint and Excel shown and
+edited as their apps show them. Real-device acceptance (multi-device items 12/13 and workflow W1 in
 `docs/backend-acceptance-matrix.md`) is run by the owner on real machines;
 do not mark it done from mocks.
 
@@ -37,6 +37,8 @@ do not mark it done from mocks.
 | 13 | ✓ done in #5. **Workflow runner, after a restart**: re-attach a step whose turn is still running instead of retrying it (the one runner limit left in the brief) | [`docs/workflow-implementation.md`](docs/workflow-implementation.md) "Yours" 2 | 11 |
 | 14 | **Document looks in the file binding** (`look.rs` types and `WordOp::SetLook` built): read every font, size, spacing, indent, list, section, header/footer, table and picture value into the model, resolved through styles, numbering and theme; write formatting back as minimal `rPr`/`pPr`; the same for slides. Three PRs: 14a read Word, 14b write Word, 14c slides | [`docs/layout-engine-implementation.md`](docs/layout-engine-implementation.md) | 9 |
 | 15 | **Layout engine** (`atrium-layout` API, navigation and a reference engine built; the page editor on the UI side): lay documents out as Word does — line breaking with Chinese rules, justification, tabs, line spacing and grid, keeps and widows, sections and columns, tables across pages, floating pictures, footnotes — and relayout fast enough for typing. Five PRs, 15a–15e | [`docs/layout-engine-implementation.md`](docs/layout-engine-implementation.md) | 14 |
+| 16 | **Slides in full** (`ShapeLook` fill/stroke/path/shadow, `ShapeKind`, `Chart`, `Item::Path`/`Gradient` and their painting built): every shape in z-order with group transforms, preset and custom outlines, gradient and picture fills, lines with dashes and arrows, theme style references, backgrounds and master graphics; slide tables with table styles; charts drawn from cached values; SmartArt from its drawing part; rotation. Four PRs, 16a–16d | [`docs/slides-sheets-implementation.md`](docs/slides-sheets-implementation.md) | 14c, 15a |
+| 17 | **Sheets in full** (`CellStyle`, `Workbook::styles`, `Cell::style`, `SheetLook`, conditional rules, `SheetOp::SetStyle`, `Workbook::shown` built; the grid on the UI side): read cell styles, number formats, column widths, row heights, hidden rows/columns, frozen panes, conditional formats and drawings; show values through their number formats and conditional rules; write formatting, sizes and panes back. Three PRs, 17a–17c | [`docs/slides-sheets-implementation.md`](docs/slides-sheets-implementation.md) | 16c for charts |
 
 Do one item per pull request. In each PR, tick its row here (add "✓ done in
 #N") and list which of the brief's tests and end-to-end checks you ran.

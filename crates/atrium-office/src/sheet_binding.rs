@@ -441,6 +441,7 @@ impl SheetBinding {
                                         .get(v.style as usize)
                                         .copied()
                                         .unwrap_or(false),
+                                    style: 0,
                                     edited: false,
                                 },
                             )
@@ -470,6 +471,7 @@ impl SheetBinding {
                         merged,
                         widths,
                         locked,
+                        look: Default::default(),
                     }
                 })
                 .collect(),
@@ -487,6 +489,12 @@ impl SheetBinding {
                 None,
             ),
             sheet::SheetOp::Restore { sheet, r, c, cell } => (*sheet, *r, *c, None, cell.as_ref()),
+            // Written back in backlog item 17 (docs/slides-sheets-implementation.md).
+            sheet::SheetOp::SetStyle { .. } => {
+                return Err(EditError::Invalid(
+                    "cell formatting cannot be saved yet".into(),
+                ));
+            }
         };
         if r >= 1_048_576 || c >= 16_384 || s >= self.sheets.len() {
             return Err(EditError::Missing);

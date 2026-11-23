@@ -975,6 +975,65 @@ impl DocView {
                                     line.paint(origin, height, TextAlign::Left, None, window, cx);
                             }
                             Item::Picture { .. } => {}
+                            Item::Path {
+                                segments,
+                                fill,
+                                stroke,
+                            } => {
+                                let build = |mut b: gpui::PathBuilder| {
+                                    for seg in segments {
+                                        match *seg {
+                                            atrium_layout::Seg::Move(x, y) => b.move_to(at(x, y)),
+                                            atrium_layout::Seg::Line(x, y) => b.line_to(at(x, y)),
+                                            atrium_layout::Seg::Quad(cx_, cy, x, y) => {
+                                                b.curve_to(at(x, y), at(cx_, cy))
+                                            }
+                                            atrium_layout::Seg::Cubic(a, b2, c, d, x, y) => {
+                                                b.cubic_bezier_to(at(x, y), at(a, b2), at(c, d))
+                                            }
+                                            atrium_layout::Seg::Close => b.close(),
+                                        }
+                                    }
+                                    b.build().ok()
+                                };
+                                if let Some((c, a)) = fill
+                                    && let Some(path) = build(gpui::PathBuilder::fill())
+                                {
+                                    window.paint_path(path, color(*c).opacity(*a as f32 / 255.0));
+                                }
+                                if let Some(pen) = stroke
+                                    && let Some(path) = build(gpui::PathBuilder::stroke(px((pen
+                                        .width
+                                        * z)
+                                        .max(1.0))))
+                                {
+                                    window.paint_path(
+                                        path,
+                                        color(pen.color).opacity(pen.alpha as f32 / 255.0),
+                                    );
+                                }
+                            }
+                            Item::Gradient {
+                                rect: r,
+                                angle,
+                                stops,
+                            } => {
+                                if let (Some(first), Some(last)) = (stops.first(), stops.last()) {
+                                    let stop = |s: &(f32, Rgb, u8)| {
+                                        gpui::linear_color_stop(
+                                            color(s.1).opacity(s.2 as f32 / 255.0),
+                                            s.0,
+                                        )
+                                    };
+                                    // GPUI's angle runs from bottom to top; the model's from left to right.
+                                    let bg = gpui::linear_gradient(
+                                        angle + 90.0,
+                                        stop(first),
+                                        stop(last),
+                                    );
+                                    window.paint_quad(gpui::fill(rect(r), bg));
+                                }
+                            }
                         }
                     }
                     for r in &marks {

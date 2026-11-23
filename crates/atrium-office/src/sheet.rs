@@ -21,6 +21,8 @@ pub struct Cell {
     /// The value as the cell's number format shows it.
     pub display: String,
     pub bold: bool,
+    /// Index into `Workbook::styles`; 0 is the default style.
+    pub style: u32,
     /// Typed here since the file was opened; its formula is recalculated when
     /// the file next opens in a spreadsheet app.
     pub edited: bool,
@@ -51,6 +53,7 @@ pub struct Sheet {
     pub widths: BTreeMap<u32, f32>,
     /// Pivot table areas and the like: shown, not edited.
     pub locked: Vec<(u32, u32, u32, u32)>,
+    pub look: crate::look::SheetLook,
 }
 
 impl Sheet {
@@ -62,7 +65,19 @@ impl Sheet {
             merged: Vec::new(),
             widths: BTreeMap::new(),
             locked: Vec::new(),
+            look: Default::default(),
         }
+    }
+
+    /// The style index of a cell: its own, else its row's, else its column's.
+    pub fn style_index(&self, r: u32, c: u32) -> u32 {
+        self.cells
+            .get(&(r, c))
+            .map(|cell| cell.style)
+            .filter(|s| *s != 0)
+            .or_else(|| self.look.row_styles.get(&r).copied())
+            .or_else(|| self.look.column_styles.get(&c).copied())
+            .unwrap_or(0)
     }
 
     /// Rows and columns in use.
@@ -100,6 +115,13 @@ pub enum SheetOp {
         c: u32,
         input: String,
     },
+    /// Gives a cell another style from `Workbook::styles`, keeping its value.
+    SetStyle {
+        sheet: usize,
+        r: u32,
+        c: u32,
+        style: u32,
+    },
     /// Puts a cell back exactly; the inverse of an edit.
     Restore {
         sheet: usize,
@@ -112,11 +134,24 @@ pub enum SheetOp {
 #[derive(Clone, Debug, Default)]
 pub struct Workbook {
     pub(crate) sheets: Vec<Sheet>,
+    /// Each distinct cell style once; index 0 is the default.
+    pub(crate) styles: Vec<crate::look::CellStyle>,
+}
+
+/// How a cell shows once its style and conditional formats apply.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Shown {
+    pub style: crate::look::CellStyle,
+    /// The value as its number format writes it.
+    pub text: String,
+    /// A data bar: how much of the cell it fills, from 0 to 1, and its colour.
+    pub bar: Option<(f32, crate::look::Rgb)>,
 }
 
 /// The cell `input` makes, keeping `old`'s style.
 pub fn parse_input(input: &str, old: Option<&Cell>) -> Option<Cell> {
     let bold = old.is_some_and(|c| c.bold);
+    let style = old.map(|c| c.style).unwrap_or(0);
     let input = input.trim_end_matches(['\n', '\r']);
     if input.is_empty() {
         return None;
@@ -135,13 +170,73 @@ pub fn parse_input(input: &str, old: Option<&Cell>) -> Option<Cell> {
         formula,
         display: input.to_string(),
         bold,
+        style,
         edited: true,
     })
 }
 
 impl Workbook {
     pub fn from_sheets(sheets: Vec<Sheet>) -> Self {
-        Self { sheets }
+        Self {
+            sheets,
+            styles: vec![crate::look::CellStyle::default()],
+        }
+    }
+
+    /// Sets the workbook's styles; the loader calls this after `from_sheets`.
+    pub fn with_styles(mut self, styles: Vec<crate::look::CellStyle>) -> Self {
+        if !styles.is_empty() {
+            self.styles = styles;
+        }
+        self
+    }
+
+    pub fn styles(&self) -> &[crate::look::CellStyle] {
+        &self.styles
+    }
+
+    /// The index of `style`, added if the workbook does not have it yet.
+    pub fn add_style(&mut self, style: crate::look::CellStyle) -> u32 {
+        if let Some(i) = self.styles.iter().position(|s| *s == style) {
+            return i as u32;
+        }
+        self.styles.push(style);
+        (self.styles.len() - 1) as u32
+    }
+
+    /// How a cell shows: its style, number format and conditional formats.
+    /// This first version applies the style alone; backlog item 17 adds the
+    /// rest (docs/slides-sheets-implementation.md).
+    pub fn shown(&self, sheet: usize, r: u32, c: u32) -> Shown {
+        let Some(s) = self.sheets.get(sheet) else {
+            return Shown {
+                style: Default::default(),
+                text: String::new(),
+                bar: None,
+            };
+        };
+        let style = self
+            .styles
+            .get(s.style_index(r, c) as usize)
+            .cloned()
+            .unwrap_or_default();
+        let text = s
+            .cells
+            .get(&(r, c))
+            .map(|cell| {
+                // Formulas show the result the file keeps until Excel recalculates.
+                if cell.formula.is_some() && !cell.edited {
+                    cell.display.clone()
+                } else {
+                    cell.input()
+                }
+            })
+            .unwrap_or_default();
+        Shown {
+            style,
+            text,
+            bar: None,
+        }
     }
 
     pub fn sheets(&self) -> &[Sheet] {
@@ -160,6 +255,22 @@ impl Workbook {
                 (sheet, r, c, parse_input(&input, old))
             }
             SheetOp::Restore { sheet, r, c, cell } => (sheet, r, c, cell),
+            SheetOp::SetStyle { sheet, r, c, style } => {
+                if style as usize >= self.styles.len() {
+                    return Err(EditError::Invalid("no such style".into()));
+                }
+                let s = self.sheets.get(sheet).ok_or(EditError::Missing)?;
+                let mut cell = s.cells.get(&(r, c)).cloned().unwrap_or(Cell {
+                    value: Value::Empty,
+                    formula: None,
+                    display: String::new(),
+                    bold: false,
+                    style: 0,
+                    edited: false,
+                });
+                cell.style = style;
+                (sheet, r, c, Some(cell))
+            }
         };
         let s = self.sheets.get_mut(sheet).ok_or(EditError::Missing)?;
         if s.is_locked(r, c) {

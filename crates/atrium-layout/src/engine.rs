@@ -10,11 +10,12 @@ use atrium_office::look::{
     Border, LabelSuffix, LineSpacing, NumFormat, ParaLook, Rgb, Section, TWIPS_PER_PT, TabKind,
     VAlign,
 };
+use atrium_office::look::{Chart, ChartKind, Fill, PathCmd, ShapeKind};
 use atrium_office::{
     Align, AtomKind, Block, Inline, Marks, NodeId, Para, ParaStyle, Shape, Slide, Table, WordDoc,
 };
 
-use crate::{FontKey, Item, Layout, Line, Metrics, Page, Rect, Shaper};
+use crate::{FontKey, Item, Layout, Line, Metrics, Page, Pen, Rect, Seg, Shaper};
 
 fn pt(twips: i32) -> f32 {
     twips as f32 / TWIPS_PER_PT as f32
@@ -140,6 +141,35 @@ fn translate(item: &Item, dx: f32, dy: f32) -> Item {
                 ..rect
             },
             path,
+        },
+        Item::Path {
+            segments,
+            fill,
+            stroke,
+        } => Item::Path {
+            segments: segments
+                .into_iter()
+                .map(|s| match s {
+                    Seg::Move(x, y) => Seg::Move(x + dx, y + dy),
+                    Seg::Line(x, y) => Seg::Line(x + dx, y + dy),
+                    Seg::Quad(a, b, x, y) => Seg::Quad(a + dx, b + dy, x + dx, y + dy),
+                    Seg::Cubic(a, b, c, d, x, y) => {
+                        Seg::Cubic(a + dx, b + dy, c + dx, d + dy, x + dx, y + dy)
+                    }
+                    Seg::Close => Seg::Close,
+                })
+                .collect(),
+            fill,
+            stroke,
+        },
+        Item::Gradient { rect, angle, stops } => Item::Gradient {
+            rect: Rect {
+                x: rect.x + dx,
+                y: rect.y + dy,
+                ..rect
+            },
+            angle,
+            stops,
         },
     }
 }
@@ -1132,7 +1162,16 @@ pub(crate) fn document(doc: &WordDoc, shaper: &dyn Shaper) -> Layout {
                 // Place each fill or border with the row it starts in.
                 for item in items {
                     let y = match &item {
-                        Item::Fill { rect, .. } | Item::Picture { rect, .. } => rect.y,
+                        Item::Fill { rect, .. }
+                        | Item::Picture { rect, .. }
+                        | Item::Gradient { rect, .. } => rect.y,
+                        Item::Path { segments, .. } => segments
+                            .iter()
+                            .filter_map(|s| match s {
+                                Seg::Move(_, y) | Seg::Line(_, y) => Some(*y),
+                                _ => None,
+                            })
+                            .fold(f32::MAX, f32::min),
                         Item::Rule { from, to, .. } => from.1.min(to.1),
                         Item::Text { baseline, .. } => *baseline,
                     };
@@ -1291,25 +1330,42 @@ fn shape_items(
         height: h,
     };
     let look = &shape.look;
-    if let Some(path) = &look.picture {
-        page.items.push(Item::Picture {
-            rect,
-            path: Some(path.clone()),
-        });
-    }
-    if let Some(color) = look.fill {
-        page.items.push(Item::Fill { rect, color });
-    }
-    if let Some(b) = look.line {
-        let corners = [(x, y), (x + w, y), (x + w, y + h), (x, y + h), (x, y)];
-        for pair in corners.windows(2) {
-            page.items.push(Item::Rule {
-                from: pair[0],
-                to: pair[1],
-                width: pt(b.width).max(0.5),
-                color: b.color,
-            });
+    shape_paint(shape, rect, page);
+    match &shape.kind {
+        ShapeKind::Table(table) => {
+            let (rows, items) = cx.table(table, w);
+            page.items.extend(items.iter().map(|i| translate(i, x, y)));
+            for (row_y, laid) in rows {
+                for (ly, line) in laid {
+                    let top = y + row_y + ly;
+                    page.items
+                        .extend(line.items.iter().map(|i| translate(i, x, top)));
+                    lines.push(Line {
+                        page: index,
+                        para: line.para,
+                        range: line.range,
+                        top,
+                        height: line.height,
+                        baseline: top + line.baseline,
+                        stops: line.stops.iter().map(|(o, sx)| (*o, sx + x)).collect(),
+                        furniture: false,
+                    });
+                }
+            }
+            return h;
         }
+        ShapeKind::Chart(c) => {
+            page.items.extend(chart(c, rect, cx.shaper));
+            return h;
+        }
+        ShapeKind::Fallback(path) => {
+            page.items.push(Item::Picture {
+                rect,
+                path: path.clone(),
+            });
+            return h;
+        }
+        ShapeKind::Text | ShapeKind::Picture => {}
     }
     let insets = if look.insets == [0; 4] {
         [3.6, 7.2, 3.6, 7.2]
@@ -1362,4 +1418,199 @@ fn shape_items(
         });
     }
     h
+}
+
+/// A shape's fill and outline: its own path, or its frame.
+fn shape_paint(shape: &Shape, rect: Rect, page: &mut Page) {
+    let look = &shape.look;
+    let (x, y) = (rect.x, rect.y);
+    let segments: Vec<Seg> = if look.path.is_empty() {
+        vec![
+            Seg::Move(x, y),
+            Seg::Line(x + rect.width, y),
+            Seg::Line(x + rect.width, y + rect.height),
+            Seg::Line(x, y + rect.height),
+            Seg::Close,
+        ]
+    } else {
+        look.path
+            .iter()
+            .map(|c| match *c {
+                PathCmd::Move(a, b) => Seg::Move(x + pt(a), y + pt(b)),
+                PathCmd::Line(a, b) => Seg::Line(x + pt(a), y + pt(b)),
+                PathCmd::Quad(a, b, c, d) => Seg::Quad(x + pt(a), y + pt(b), x + pt(c), y + pt(d)),
+                PathCmd::Cubic(a, b, c, d, e, f) => Seg::Cubic(
+                    x + pt(a),
+                    y + pt(b),
+                    x + pt(c),
+                    y + pt(d),
+                    x + pt(e),
+                    y + pt(f),
+                ),
+                PathCmd::Close => Seg::Close,
+            })
+            .collect()
+    };
+    let plain = look.path.is_empty();
+    match &look.fill {
+        Fill::None => {}
+        Fill::Solid(color, 255) if plain => page.items.push(Item::Fill {
+            rect,
+            color: *color,
+        }),
+        Fill::Solid(color, alpha) => page.items.push(Item::Path {
+            segments: segments.clone(),
+            fill: Some((*color, *alpha)),
+            stroke: None,
+        }),
+        Fill::Gradient { stops, angle, .. } if plain => page.items.push(Item::Gradient {
+            rect,
+            angle: *angle as f32,
+            stops: stops
+                .iter()
+                .map(|(at, c, a)| (*at as f32 / 1000.0, *c, *a))
+                .collect(),
+        }),
+        // A gradient in a drawn outline: its first colour, until the painter does more.
+        Fill::Gradient { stops, .. } => {
+            if let Some((_, c, a)) = stops.first() {
+                page.items.push(Item::Path {
+                    segments: segments.clone(),
+                    fill: Some((*c, *a)),
+                    stroke: None,
+                });
+            }
+        }
+        Fill::Picture { path, .. } => page.items.push(Item::Picture {
+            rect,
+            path: Some(path.clone()),
+        }),
+    }
+    if let Some(stroke) = look.line {
+        page.items.push(Item::Path {
+            segments,
+            fill: None,
+            stroke: Some(Pen {
+                width: pt(stroke.width).max(0.5),
+                color: stroke.color,
+                alpha: stroke.alpha,
+                dash: stroke.dash,
+            }),
+        });
+    }
+}
+
+/// The reference chart: a frame, the title, and columns, bars or lines for
+/// the series; other kinds show their name. The full engine replaces it.
+pub(crate) fn chart(c: &Chart, rect: Rect, shaper: &dyn Shaper) -> Vec<Item> {
+    const PALETTE: [u32; 6] = [0x4472C4, 0xED7D31, 0xA5A5A5, 0xFFC000, 0x5B9BD5, 0x70AD47];
+    let mut out = vec![Item::Rule {
+        from: (rect.x, rect.y + rect.height),
+        to: (rect.x + rect.width, rect.y + rect.height),
+        width: 0.75,
+        color: Rgb(0x808080),
+    }];
+    let font = FontKey {
+        family: String::new(),
+        size: 12.0,
+        bold: false,
+        italic: false,
+        cjk: true,
+    };
+    let mut top = rect.y + 4.0;
+    if let Some(title) = &c.title {
+        let width: f32 = shaper.shape(title, &font).iter().map(|c| c.advance).sum();
+        out.push(Item::Text {
+            x: rect.x + (rect.width - width) / 2.0,
+            baseline: top + 12.0,
+            text: title.clone(),
+            font: font.clone(),
+            color: Rgb(0x404040),
+        });
+        top += 20.0;
+    }
+    let plot = Rect {
+        x: rect.x + 8.0,
+        y: top,
+        width: rect.width - 16.0,
+        height: (rect.y + rect.height - top - 4.0).max(1.0),
+    };
+    let max = c
+        .series
+        .iter()
+        .flat_map(|s| s.values.iter().flatten())
+        .fold(0.0f64, |m, v| m.max(*v))
+        .max(f64::EPSILON);
+    let count = c
+        .series
+        .iter()
+        .map(|s| s.values.len())
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let color = |i: usize, s: &atrium_office::look::Series| {
+        s.color.unwrap_or(Rgb(PALETTE[i % PALETTE.len()]))
+    };
+    match c.kind {
+        ChartKind::Column | ChartKind::Bar => {
+            let groups = c.series.len().max(1);
+            let slot = plot.width / count as f32;
+            let bar = slot * 0.7 / groups as f32;
+            for (si, s) in c.series.iter().enumerate() {
+                for (k, v) in s.values.iter().enumerate() {
+                    let Some(v) = v else { continue };
+                    let h = (*v / max) as f32 * plot.height;
+                    out.push(Item::Fill {
+                        rect: Rect {
+                            x: plot.x + slot * k as f32 + slot * 0.15 + bar * si as f32,
+                            y: plot.y + plot.height - h,
+                            width: bar,
+                            height: h,
+                        },
+                        color: color(si, s),
+                    });
+                }
+            }
+        }
+        ChartKind::Line | ChartKind::Area => {
+            let step = plot.width / count as f32;
+            for (si, s) in c.series.iter().enumerate() {
+                let mut segments = Vec::new();
+                for (k, v) in s.values.iter().enumerate() {
+                    let Some(v) = v else { continue };
+                    let px = plot.x + step * (k as f32 + 0.5);
+                    let py = plot.y + plot.height - (*v / max) as f32 * plot.height;
+                    segments.push(if segments.is_empty() {
+                        Seg::Move(px, py)
+                    } else {
+                        Seg::Line(px, py)
+                    });
+                }
+                out.push(Item::Path {
+                    segments,
+                    fill: None,
+                    stroke: Some(Pen {
+                        width: 2.0,
+                        color: color(si, s),
+                        alpha: 255,
+                        dash: Default::default(),
+                    }),
+                });
+            }
+        }
+        _ => {
+            let label = match &c.kind {
+                ChartKind::Other(name) => name.clone(),
+                other => format!("{other:?}"),
+            };
+            out.push(Item::Text {
+                x: plot.x,
+                baseline: plot.y + 14.0,
+                text: label,
+                font,
+                color: Rgb(0x808080),
+            });
+        }
+    }
+    out
 }
