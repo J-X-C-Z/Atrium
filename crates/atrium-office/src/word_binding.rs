@@ -118,6 +118,7 @@ fn relationship_part_name(document: &str) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn attach_headers(
     package: &Package,
     document_name: &str,
@@ -1896,10 +1897,10 @@ fn render_tokens(
                 if let Some(color) = marks.color {
                     props.push_str(&format!(r#"<w:color w:val="{:06X}"/>"#, color.0));
                 }
-                if let Some(highlight) = marks.highlight {
-                    if let Some(name) = highlight_name(highlight) {
-                        props.push_str(&format!(r#"<w:highlight w:val="{name}"/>"#));
-                    }
+                if let Some(highlight) = marks.highlight
+                    && let Some(name) = highlight_name(highlight)
+                {
+                    props.push_str(&format!(r#"<w:highlight w:val="{name}"/>"#));
                 }
                 if matches!(marks.baseline, crate::look::Baseline::Superscript) {
                     props.push_str(r#"<w:vertAlign w:val="superscript"/>"#);

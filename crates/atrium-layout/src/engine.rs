@@ -261,7 +261,10 @@ struct Flow<'a, 'b> {
     note_height: f32,
     footnotes: HashMap<NodeId, Vec<Block>>,
     previous: Option<&'a Layout>,
+    // Incremental relayout (15e) records these for reusing pages; not read yet.
+    #[allow(dead_code)]
     changed: HashSet<NodeId>,
+    #[allow(dead_code)]
     start_page: usize,
     start_block: usize,
     block_index: usize,

@@ -18,6 +18,7 @@ const AS: &str = "http://purl.oclc.org/ooxml/drawingml/main";
 #[derive(Debug)]
 pub(crate) struct Looks<'a> {
     ns: &'a str,
+    #[allow(dead_code)] // read by `style_chain`
     styles: HashMap<&'a str, &'a XmlNode>,
     abstracts: HashMap<&'a str, &'a XmlNode>,
     numbers: HashMap<&'a str, &'a XmlNode>,
@@ -135,6 +136,7 @@ impl<'a> Looks<'a> {
         self.defaults.clone()
     }
 
+    #[allow(dead_code)] // kept for resolving a style by id outside a paragraph
     pub(crate) fn style_chain(&self, id: &str) -> Vec<&'a XmlNode> {
         let mut next = Some(id);
         let mut seen = HashSet::new();
@@ -286,11 +288,11 @@ impl<'a> Looks<'a> {
         if let Some(v) = attr(n, ns, "eastAsia") {
             fonts.east_asia = v.to_string();
         }
-        if fonts.latin.is_empty() {
-            if let Some(slot) = attr(n, ns, "asciiTheme").or_else(|| attr(n, ns, "hAnsiTheme")) {
-                let major = slot.starts_with("major");
-                fonts.latin = self.theme_font("latin", major).unwrap_or_default();
-            }
+        if fonts.latin.is_empty()
+            && let Some(slot) = attr(n, ns, "asciiTheme").or_else(|| attr(n, ns, "hAnsiTheme"))
+        {
+            let major = slot.starts_with("major");
+            fonts.latin = self.theme_font("latin", major).unwrap_or_default();
         }
         if fonts.east_asia.is_empty()
             && let Some(slot) = attr(n, ns, "eastAsiaTheme")
