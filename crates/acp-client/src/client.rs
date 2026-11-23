@@ -703,17 +703,58 @@ mod prompt_outcome_tests {
     }
 }
 
-/// `servers` as ACP's stdio `McpServer` entries.
+/// `servers` as ACP `McpServer` entries: stdio, or `http` for a server with
+/// a URL.
 fn mcp_json(servers: &[McpServer]) -> Value {
+    let pairs = |list: &[(String, String)]| -> Vec<Value> {
+        list.iter()
+            .map(|(k, v)| json!({ "name": k, "value": v }))
+            .collect()
+    };
     servers
         .iter()
-        .map(|s| {
-            json!({
+        .map(|s| match &s.url {
+            Some(url) => json!({
+                "type": "http",
+                "name": s.name,
+                "url": url,
+                "headers": pairs(&s.headers),
+            }),
+            None => json!({
                 "name": s.name,
                 "command": s.command,
                 "args": s.args,
-                "env": s.env.iter().map(|(k, v)| json!({ "name": k, "value": v })).collect::<Vec<_>>(),
-            })
+                "env": pairs(&s.env),
+            }),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod mcp_json_tests {
+    use super::*;
+
+    #[test]
+    fn http_servers_are_passed_as_http_entries() {
+        let json = mcp_json(&[
+            McpServer {
+                name: "local".into(),
+                command: "atrium".into(),
+                ..Default::default()
+            },
+            McpServer::http(
+                "atrium",
+                "http://100.64.0.1:7381/v1/mcp",
+                vec![("Authorization".into(), "Bearer t".into())],
+            ),
+        ]);
+        assert_eq!(json[0]["command"], "atrium");
+        assert!(json[0]["type"].is_null());
+        assert_eq!(json[1]["type"], "http");
+        assert_eq!(json[1]["url"], "http://100.64.0.1:7381/v1/mcp");
+        assert_eq!(
+            json[1]["headers"],
+            json!([{ "name": "Authorization", "value": "Bearer t" }])
+        );
+    }
 }

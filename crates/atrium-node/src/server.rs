@@ -158,6 +158,7 @@ pub fn router(s: Arc<State>) -> Router {
         .route("/v1/procs", get(list).post(spawn))
         .route("/v1/procs/{id}", delete(stop))
         .route("/v1/procs/{id}/attach", get(attach))
+        .route("/v1/mcp", post(mcp).get(mcp_stream))
         .route("/v1/fs/list", get(fs_list))
         .route("/v1/fs/stat", get(fs_stat))
         .route("/v1/fs/read", get(fs_read))
@@ -403,6 +404,44 @@ async fn thread_events_loop(
             }
         }
     }
+}
+
+#[derive(Deserialize)]
+struct McpQuery {
+    project: String,
+    stream: String,
+}
+
+/// The `atrium` MCP server over Streamable HTTP: one JSON-RPC message in the
+/// body, answered with JSON (or 202 for a notification). It is behind the
+/// same transport checks as every route, and the Atrium that embeds the node
+/// decides which projects it serves.
+async fn mcp(
+    AxState(s): AxState<Arc<State>>,
+    Query(q): Query<McpQuery>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let sync = sync_or_error(&s)?;
+    let host = sync.host().ok_or_else(no_sync)?;
+    let message: Value = serde_json::from_slice(&body)
+        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, "bad_request", e.to_string()))?;
+    match host
+        .mcp(&q.project, &q.stream, message)
+        .await
+        .map_err(ApiError::from)?
+    {
+        Some(reply) => Ok(Json(reply).into_response()),
+        None => Ok(StatusCode::ACCEPTED.into_response()),
+    }
+}
+
+/// A server-to-client stream is optional in Streamable HTTP; this one has none.
+async fn mcp_stream() -> ApiError {
+    ApiError(
+        StatusCode::METHOD_NOT_ALLOWED,
+        "bad_request",
+        "this server only answers POST".into(),
+    )
 }
 
 async fn sync_turn(

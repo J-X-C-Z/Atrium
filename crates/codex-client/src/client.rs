@@ -54,15 +54,20 @@ fn mcp_config(servers: &[McpServer]) -> Option<Value> {
     (!servers.is_empty()).then(|| {
         let mut config = serde_json::Map::new();
         for server in servers {
-            let env: serde_json::Map<String, Value> = server
-                .env
-                .iter()
-                .map(|(k, v)| (k.clone(), Value::String(v.clone())))
-                .collect();
-            config.insert(
-                format!("mcp_servers.{}", server.name),
-                json!({ "command": server.command, "args": server.args, "env": env }),
-            );
+            let pairs = |list: &[(String, String)]| -> serde_json::Map<String, Value> {
+                list.iter()
+                    .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                    .collect()
+            };
+            let entry = match &server.url {
+                Some(url) => json!({ "url": url, "http_headers": pairs(&server.headers) }),
+                None => json!({
+                    "command": server.command,
+                    "args": server.args,
+                    "env": pairs(&server.env),
+                }),
+            };
+            config.insert(format!("mcp_servers.{}", server.name), entry);
         }
         Value::Object(config)
     })
@@ -931,6 +936,34 @@ fn strip_ansi(line: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn an_http_server_is_passed_by_url() {
+        let config = mcp_config(&[
+            McpServer {
+                name: "local".into(),
+                command: "atrium".into(),
+                args: vec!["mcp".into()],
+                ..Default::default()
+            },
+            McpServer::http(
+                "atrium",
+                "http://100.64.0.1:7381/v1/mcp?project=%2Fp&stream=s",
+                vec![("Authorization".into(), "Bearer t".into())],
+            ),
+        ])
+        .unwrap();
+        assert_eq!(config["mcp_servers.local"]["command"], "atrium");
+        assert_eq!(
+            config["mcp_servers.atrium"],
+            json!({
+                "url": "http://100.64.0.1:7381/v1/mcp?project=%2Fp&stream=s",
+                "http_headers": { "Authorization": "Bearer t" },
+            })
+        );
+    }
+
     #[test]
     fn ansi_codes_are_removed() {
         assert_eq!(

@@ -206,6 +206,19 @@ Every `path` is absolute (or starts with `~`) and inside the roots.
 | `POST /v1/fs/mkdir?path=P` | creates it and its parents; `204` |
 | `GET /v1/fs/changes?path=P&since=<ms>` | `{"now": <ms>, "changed": [<paths under P modified after since>]}`, recursing at most 3 levels, for polling a project's atrium |
 
+## The `atrium` tools over the network
+
+An Atrium that embeds the node serves its projects' `atrium` MCP server on
+`POST /v1/mcp?project=<root>&stream=<id>` (Streamable HTTP: one JSON-RPC
+message in the body, answered with `application/json`, or `202` for a
+notification; `GET` is `405`, there is no server-to-client stream). Agents on
+other computers get this URL as their `atrium` server. The route sits behind
+the same checks as every other (loopback or tailnet only, Tailscale identity
+or a token); the Atrium decides which projects and workstreams it serves and
+answers `400` for others. A standalone node answers `404`. In spread projects
+the server adds `device_list`, `device_read` and `device_copy`, which go
+through the `/v1/fs/*` routes of the other computers' nodes.
+
 ## Acceptance
 
 Run Atrium's node tests against a node on this machine:
