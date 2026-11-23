@@ -184,6 +184,8 @@ pub struct StreamView {
     pub context: Option<f64>,
     /// The task it was started for: a lead's roadmap, a worker's job.
     pub task: Option<Task>,
+    /// The team member it runs as, when standing in for another.
+    pub stand_in: Option<String>,
 }
 
 #[derive(Default)]
@@ -355,6 +357,9 @@ impl Workspace {
                 });
             let scheduler_allowed = !wants_scheduler || self.sync_scheduler_allowed(&root);
             let changed = self.project_mut(&root).is_some_and(Project::reload);
+            self.refresh_project_team(&root);
+            self.tick_roster(&root);
+            self.prune_team_marks(&root);
             self.load_streams(&root, cx);
             self.tick_worktrees(&root, cx);
             let Some(project) = self.projects.iter().find(|p| p.root == root) else {
@@ -410,8 +415,13 @@ impl Workspace {
                     let Some(owner) = project.stream(&task.owner) else {
                         return false;
                     };
-                    let backend = task.agent.as_deref().unwrap_or(&owner.backend);
-                    !self.scheduler_backend_known(backend) || self.backend_ready(backend)
+                    let wanted = task.agent.as_deref().unwrap_or(&owner.backend);
+                    // A spent or unavailable member's stand-in takes the task;
+                    // with nobody free it stays open until the next tick.
+                    self.place_task(&root, wanted).is_ok_and(|placed| {
+                        !self.scheduler_backend_known(&placed.agent)
+                            || self.backend_ready(&placed.agent)
+                    })
                 })
                 .into_iter()
                 .cloned()
@@ -424,7 +434,14 @@ impl Workspace {
                 let Some(owner) = project.stream(&task.owner) else {
                     continue;
                 };
-                let backend = task.agent.as_deref().unwrap_or(&owner.backend).to_string();
+                let wanted = task.agent.as_deref().unwrap_or(&owner.backend);
+                // Nobody can take it now: leave it open and ask again next tick.
+                let Ok(placed) = self.place_task(&root, wanted) else {
+                    continue;
+                };
+                // The pick's model and effort are not passed on: sessions start
+                // with the app's model setting.
+                let backend = placed.agent.clone();
                 let known = self.scheduler_backend_known(&backend);
                 let decision = start_decision(known, self.backend_ready(&backend), running);
                 if decision == StartDecision::Unknown {
@@ -455,7 +472,21 @@ impl Workspace {
                     log::warn!("cannot claim task {}: {e:#}", task.key());
                     continue;
                 }
+                let stream_id = stream.id.clone();
                 self.start_stream(&root, stream, cx);
+                if placed.instead_of.is_some() {
+                    self.team
+                        .stand_ins
+                        .insert((root.clone(), stream_id), placed.member.clone());
+                }
+                if let Some(text) = Self::stand_in_notice(&task.id, &placed) {
+                    if let Some(project) = self.project_mut(&root)
+                        && let Err(e) = project.post(ATRIUM, vec![task.owner.clone()], &text)
+                    {
+                        log::warn!("could not post a notice: {e:#}");
+                    }
+                    self.queue_wake(&root, task.owner.clone());
+                }
             }
             self.tick_task_pools(&root, cx);
             let reports: Vec<_> = self
@@ -575,6 +606,12 @@ impl Workspace {
                 self.project_schedule.last_wake.insert(key, Instant::now());
             }
         }
+    }
+
+    pub(super) fn queue_wake(&mut self, root: &Path, stream: String) {
+        self.project_schedule
+            .pending
+            .insert((root.to_path_buf(), stream));
     }
 
     fn update_sleep_request(&mut self) {
@@ -1029,6 +1066,7 @@ impl Workspace {
 
     fn start_stream(&mut self, root: &Path, stream: Workstream, cx: &mut Context<Self>) {
         let root = root.to_path_buf();
+        let team_extras = self.team_kickoff_extras(&root, stream.role, &stream.backend);
         let here = if self.settings.device_name.is_empty() {
             "this computer".to_string()
         } else {
@@ -1062,6 +1100,7 @@ impl Workspace {
             }
             project.kickoff(&stream)
         };
+        let kickoff = format!("{kickoff}{team_extras}");
         let place = atrium_project::spread::briefing(project, &stream, &here);
         let kickoff = if place.is_empty() {
             kickoff
@@ -1676,6 +1715,7 @@ impl Workspace {
         else {
             return;
         };
+        self.team_observe(event, &root, &stream);
         match event {
             AgentEvent::ItemCompleted {
                 item: Item::FileChange { changes, .. },
@@ -1717,11 +1757,14 @@ impl Workspace {
                     }
                 }
             }
-            AgentEvent::TurnCompleted { status, .. } => {
+            AgentEvent::TurnCompleted { status, error, .. } => {
                 if let Some(project) = self.project_mut(&root) {
                     project.reload();
                 }
                 if *status == TurnStatus::Failed {
+                    if let Some(error) = error {
+                        self.team_turn_failed(&root, &stream, error);
+                    }
                     let name = self
                         .projects
                         .iter()
@@ -1854,6 +1897,11 @@ impl Workspace {
                         .and_then(|t| t.usage())
                         .and_then(|u| u.context_share()),
                     task: project.task_of(stream).cloned(),
+                    stand_in: self
+                        .team
+                        .stand_ins
+                        .get(&(root.clone(), stream.id.clone()))
+                        .cloned(),
                     stream: stream.clone(),
                     state,
                     plan,

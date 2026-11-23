@@ -113,6 +113,13 @@ fn agent_short(ws: &Workspace, backend: &str) -> String {
     }
 }
 
+/// "Stand-in · gemini" on a stream that runs for a spent member.
+fn stand_in_badge(view: &StreamView) -> Option<Badge> {
+    view.stand_in
+        .as_ref()
+        .map(|member| Badge::new(tf("Stand-in · {member}", &[("member", member)])))
+}
+
 /// Asks for a folder and opens it as a project.
 pub fn choose_project(workspace: Entity<Workspace>, cx: &mut App) {
     let picked = cx.prompt_for_paths(PathPromptOptions {
@@ -882,6 +889,7 @@ fn stream_card(
                         .child(view.stream.name.clone()),
                 )
                 .child(Badge::new(agent_short(ws, &view.stream.backend)))
+                .children(stand_in_badge(view))
                 .when(
                     view.goal_status == Some(atrium_core::GoalStatus::Complete),
                     |row| row.child(Badge::new(t("Goal done")).tone(Tone::Success)),
@@ -1237,6 +1245,7 @@ fn flow_view(workspace: &Entity<Workspace>, views: &[StreamView], cx: &App) -> A
                     .child(lead.stream.name.clone()),
             )
             .child(Badge::new(agent_short(ws, &lead.stream.backend)))
+            .children(stand_in_badge(lead))
             .children(lead.stream.pr.as_ref().map(|pr| pr_badge(pr, cx)))
             .children(merge_button(ws, &lead.stream.id, workspace))
             .child(
@@ -1923,6 +1932,7 @@ fn sub_agents(
                         .child(worker.stream.name.clone()),
                 )
                 .child(Badge::new(agent_short(ws, &worker.stream.backend)))
+                .children(stand_in_badge(worker))
                 .child(
                     div()
                         .max_w(px(160.))

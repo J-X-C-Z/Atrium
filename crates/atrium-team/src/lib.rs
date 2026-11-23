@@ -18,6 +18,7 @@
 //! `now` (see `docs/team-implementation.md`).
 
 pub mod quota;
+pub mod schedule;
 pub mod watch;
 
 use std::{collections::BTreeMap, path::Path};
