@@ -122,12 +122,41 @@ pub enum SheetOp {
         c: u32,
         style: u32,
     },
+    /// Formats a rectangle in one undo step.
+    SetStyles {
+        sheet: usize,
+        from: (u32, u32),
+        to: (u32, u32),
+        style: u32,
+    },
+    /// Sets a column's width in points; `RestoreSheet` undoes it.
+    SetColumnWidth {
+        sheet: usize,
+        column: u32,
+        width: f32,
+    },
+    /// Sets a row's height in points; `RestoreSheet` undoes it.
+    SetRowHeight { sheet: usize, row: u32, height: f32 },
+    /// Freezes `rows` rows and `cols` columns.
+    SetFrozen { sheet: usize, rows: u32, cols: u32 },
     /// Puts a cell back exactly; the inverse of an edit.
     Restore {
         sheet: usize,
         r: u32,
         c: u32,
         cell: Option<Cell>,
+    },
+    /// Puts a rectangle back; the inverse of `SetStyles`.
+    RestoreRange {
+        sheet: usize,
+        from: (u32, u32),
+        to: (u32, u32),
+        cells: Vec<Option<Cell>>,
+    },
+    /// Puts a sheet's layout back; the inverse of the size and pane edits.
+    RestoreSheet {
+        sheet: usize,
+        look: Box<crate::look::SheetLook>,
     },
 }
 
@@ -136,6 +165,8 @@ pub struct Workbook {
     pub(crate) sheets: Vec<Sheet>,
     /// Each distinct cell style once; index 0 is the default.
     pub(crate) styles: Vec<crate::look::CellStyle>,
+    /// The workbook's date system: 1904 (Mac) instead of 1900.
+    pub(crate) date1904: bool,
 }
 
 /// How a cell shows once its style and conditional formats apply.
@@ -180,7 +211,18 @@ impl Workbook {
         Self {
             sheets,
             styles: vec![crate::look::CellStyle::default()],
+            date1904: false,
         }
+    }
+
+    /// Sets the workbook's date system; the loader calls this after `from_sheets`.
+    pub fn with_date1904(mut self, date1904: bool) -> Self {
+        self.date1904 = date1904;
+        self
+    }
+
+    pub fn date1904(&self) -> bool {
+        self.date1904
     }
 
     /// Sets the workbook's styles; the loader calls this after `from_sheets`.
@@ -205,8 +247,6 @@ impl Workbook {
     }
 
     /// How a cell shows: its style, number format and conditional formats.
-    /// This first version applies the style alone; backlog item 17 adds the
-    /// rest (docs/slides-sheets-implementation.md).
     pub fn shown(&self, sheet: usize, r: u32, c: u32) -> Shown {
         let Some(s) = self.sheets.get(sheet) else {
             return Shown {
@@ -215,28 +255,70 @@ impl Workbook {
                 bar: None,
             };
         };
-        let style = self
+        let mut style = self
             .styles
             .get(s.style_index(r, c) as usize)
             .cloned()
             .unwrap_or_default();
-        let text = s
-            .cells
-            .get(&(r, c))
-            .map(|cell| {
-                // Formulas show the result the file keeps until Excel recalculates.
-                if cell.formula.is_some() && !cell.edited {
-                    cell.display.clone()
-                } else {
-                    cell.input()
-                }
-            })
+        let base_format = style.number_format.clone();
+        let cell = s.cells.get(&(r, c));
+        let formatted = cell
+            .map(|c| crate::numfmt::format_value(&c.value, &style.number_format, self.date1904))
             .unwrap_or_default();
-        Shown {
-            style,
-            text,
-            bar: None,
+        if let Some(color) = formatted.color {
+            style.font.color = Some(color);
         }
+        let mut text = match cell {
+            // Formulas show the result the file keeps until Excel recalculates.
+            Some(c) if c.formula.is_some() && !c.edited => c.display.clone(),
+            Some(_) => formatted.text.clone(),
+            None => String::new(),
+        };
+        let mut bar = None;
+        let mut rules: Vec<(usize, &crate::look::CondRule)> = s
+            .look
+            .conditional
+            .iter()
+            .enumerate()
+            .filter(|(_, rule)| contains(rule.range, r, c))
+            .collect();
+        rules.sort_by_key(|(i, rule)| (rule.priority, *i));
+        for (_, rule) in rules {
+            if !rule_applies(s, rule, r, c, cell) {
+                continue;
+            }
+            if let Some(dxf) = &rule.style {
+                dxf.merge_into(&mut style);
+            }
+            match &rule.kind {
+                crate::look::CondKind::ColorScale(colors) => {
+                    if let Some(color) = scale_color(s, rule.range, cell, colors) {
+                        style.fill = Some(color);
+                    }
+                }
+                crate::look::CondKind::DataBar(color) => {
+                    if let Some(t) = bar_fraction(s, rule.range, cell) {
+                        bar = Some((t, *color));
+                    }
+                }
+                _ => {}
+            }
+            if rule.stop_if_true {
+                break;
+            }
+        }
+        if let Some(c) = cell
+            && !(c.formula.is_some() && !c.edited)
+            && style.number_format != base_format
+        {
+            let formatted =
+                crate::numfmt::format_value(&c.value, &style.number_format, self.date1904);
+            text = formatted.text;
+            if let Some(color) = formatted.color {
+                style.font.color = Some(color);
+            }
+        }
+        Shown { style, text, bar }
     }
 
     pub fn sheets(&self) -> &[Sheet] {
@@ -244,6 +326,142 @@ impl Workbook {
     }
 
     pub fn apply(&mut self, op: SheetOp) -> Result<SheetOp, EditError> {
+        if let SheetOp::RestoreSheet { sheet, look } = &op {
+            let s = self.sheets.get_mut(*sheet).ok_or(EditError::Missing)?;
+            let old = std::mem::replace(&mut s.look, (**look).clone());
+            return Ok(SheetOp::RestoreSheet {
+                sheet: *sheet,
+                look: Box::new(old),
+            });
+        }
+        if let SheetOp::SetColumnWidth {
+            sheet,
+            column,
+            width,
+        } = &op
+        {
+            if !width.is_finite() || *width < 0.0 || *column >= 16_384 {
+                return Err(EditError::Invalid("invalid column width".into()));
+            }
+            let s = self.sheets.get_mut(*sheet).ok_or(EditError::Missing)?;
+            let old = Box::new(s.look.clone());
+            s.look.columns.insert(*column, *width);
+            return Ok(SheetOp::RestoreSheet {
+                sheet: *sheet,
+                look: old,
+            });
+        }
+        if let SheetOp::SetRowHeight { sheet, row, height } = &op {
+            if !height.is_finite() || *height < 0.0 || *row >= 1_048_576 {
+                return Err(EditError::Invalid("invalid row height".into()));
+            }
+            let s = self.sheets.get_mut(*sheet).ok_or(EditError::Missing)?;
+            let old = Box::new(s.look.clone());
+            s.look.rows.insert(*row, *height);
+            return Ok(SheetOp::RestoreSheet {
+                sheet: *sheet,
+                look: old,
+            });
+        }
+        if let SheetOp::SetFrozen { sheet, rows, cols } = &op {
+            if *rows >= 1_048_576 || *cols >= 16_384 {
+                return Err(EditError::Invalid("invalid frozen pane".into()));
+            }
+            let s = self.sheets.get_mut(*sheet).ok_or(EditError::Missing)?;
+            let old = Box::new(s.look.clone());
+            s.look.frozen = (*rows, *cols);
+            return Ok(SheetOp::RestoreSheet {
+                sheet: *sheet,
+                look: old,
+            });
+        }
+        if let SheetOp::RestoreRange {
+            sheet,
+            from,
+            to,
+            cells,
+        } = &op
+        {
+            let s = self.sheets.get_mut(*sheet).ok_or(EditError::Missing)?;
+            if from.0 > to.0 || from.1 > to.1 {
+                return Err(EditError::Invalid("reversed range".into()));
+            }
+            if cells.len() != range_len(*from, *to) {
+                return Err(EditError::Invalid("range size changed".into()));
+            }
+            let mut old = Vec::with_capacity(cells.len());
+            let mut i = 0;
+            for r in from.0..=to.0 {
+                for c in from.1..=to.1 {
+                    if s.is_locked(r, c) {
+                        return Err(EditError::Locked);
+                    }
+                    old.push(s.cells.get(&(r, c)).cloned());
+                    match &cells[i] {
+                        Some(cell) => {
+                            s.cells.insert((r, c), cell.clone());
+                        }
+                        None => {
+                            s.cells.remove(&(r, c));
+                        }
+                    }
+                    i += 1;
+                }
+            }
+            return Ok(SheetOp::RestoreRange {
+                sheet: *sheet,
+                from: *from,
+                to: *to,
+                cells: old,
+            });
+        }
+        if let SheetOp::SetStyles {
+            sheet,
+            from,
+            to,
+            style,
+        } = &op
+        {
+            if *style as usize >= self.styles.len() {
+                return Err(EditError::Invalid("no such style".into()));
+            }
+            if from.0 > to.0 || from.1 > to.1 {
+                return Err(EditError::Invalid("reversed range".into()));
+            }
+            let s = self.sheets.get_mut(*sheet).ok_or(EditError::Missing)?;
+            let mut old = Vec::with_capacity(range_len(*from, *to));
+            for r in from.0..=to.0 {
+                for c in from.1..=to.1 {
+                    if s.is_locked(r, c) {
+                        return Err(EditError::Locked);
+                    }
+                    old.push(s.cells.get(&(r, c)).cloned());
+                }
+            }
+            let mut i = 0;
+            for r in from.0..=to.0 {
+                for c in from.1..=to.1 {
+                    let mut cell = s.cells.get(&(r, c)).cloned().unwrap_or(Cell {
+                        value: Value::Empty,
+                        formula: None,
+                        display: String::new(),
+                        bold: false,
+                        style: 0,
+                        edited: false,
+                    });
+                    cell.style = *style;
+                    s.cells.insert((r, c), cell);
+                    i += 1;
+                }
+            }
+            let _ = i;
+            return Ok(SheetOp::RestoreRange {
+                sheet: *sheet,
+                from: *from,
+                to: *to,
+                cells: old,
+            });
+        }
         let (sheet, r, c, new) = match op {
             SheetOp::SetCell { sheet, r, c, input } => {
                 let old = self
@@ -271,6 +489,7 @@ impl Workbook {
                 cell.style = style;
                 (sheet, r, c, Some(cell))
             }
+            _ => return Err(EditError::Invalid("unsupported sheet edit".into())),
         };
         let s = self.sheets.get_mut(sheet).ok_or(EditError::Missing)?;
         if s.is_locked(r, c) {
@@ -287,6 +506,172 @@ impl Workbook {
             cell: old,
         })
     }
+}
+
+fn range_len(from: (u32, u32), to: (u32, u32)) -> usize {
+    let rows = (to.0 - from.0 + 1) as usize;
+    let cols = (to.1 - from.1 + 1) as usize;
+    rows.saturating_mul(cols)
+}
+
+fn contains(range: (u32, u32, u32, u32), r: u32, c: u32) -> bool {
+    (range.0..=range.2).contains(&r) && (range.1..=range.3).contains(&c)
+}
+
+fn number(cell: Option<&Cell>) -> Option<f64> {
+    match cell?.value {
+        Value::Number(n) => Some(n),
+        Value::Bool(b) => Some(if b { 1.0 } else { 0.0 }),
+        _ => None,
+    }
+}
+
+fn text(cell: Option<&Cell>) -> String {
+    match cell.map(|c| &c.value) {
+        Some(Value::Text(t)) | Some(Value::Error(t)) => t.clone(),
+        Some(Value::Number(n)) => n.to_string(),
+        Some(Value::Bool(b)) => if *b { "TRUE" } else { "FALSE" }.into(),
+        _ => String::new(),
+    }
+}
+
+fn values(s: &Sheet, range: (u32, u32, u32, u32)) -> Vec<f64> {
+    s.cells
+        .iter()
+        .filter(|((r, c), _)| contains(range, *r, *c))
+        .filter_map(|(_, cell)| number(Some(cell)))
+        .collect()
+}
+
+fn rule_applies(
+    s: &Sheet,
+    rule: &crate::look::CondRule,
+    _r: u32,
+    _c: u32,
+    cell: Option<&Cell>,
+) -> bool {
+    use crate::look::{Compare, CondKind};
+    let n = number(cell);
+    match &rule.kind {
+        CondKind::CellIs(compare) => n.is_some_and(|v| match *compare {
+            Compare::Between(a, b) => v >= a && v <= b,
+            Compare::NotBetween(a, b) => v < a || v > b,
+            Compare::Equal(a) => (v - a).abs() < 1e-12,
+            Compare::NotEqual(a) => (v - a).abs() >= 1e-12,
+            Compare::Greater(a) => v > a,
+            Compare::Less(a) => v < a,
+            Compare::AtLeast(a) => v >= a,
+            Compare::AtMost(a) => v <= a,
+        }),
+        CondKind::Contains(needle) => {
+            let hay = text(cell).to_lowercase();
+            hay.contains(&needle.to_lowercase())
+        }
+        CondKind::Top { n, bottom, percent } => {
+            let Some(v) = n_number(cell) else {
+                return false;
+            };
+            let mut all = values(s, rule.range);
+            if all.is_empty() {
+                return false;
+            }
+            all.sort_by(|a, b| a.total_cmp(b));
+            let count = if *percent {
+                ((all.len() as f64 * f64::from(*n) / 100.0).ceil() as usize).max(1)
+            } else {
+                (*n as usize).max(1)
+            };
+            if *bottom {
+                all.into_iter().take(count).any(|x| (x - v).abs() < 1e-12)
+            } else {
+                all.into_iter()
+                    .rev()
+                    .take(count)
+                    .any(|x| (x - v).abs() < 1e-12)
+            }
+        }
+        CondKind::AboveAverage { below } => {
+            let Some(v) = n_number(cell) else {
+                return false;
+            };
+            let all = values(s, rule.range);
+            if all.is_empty() {
+                return false;
+            }
+            let avg = all.iter().sum::<f64>() / all.len() as f64;
+            if *below { v < avg } else { v > avg }
+        }
+        CondKind::Duplicate { unique } => {
+            let key = text(cell);
+            let count = s
+                .cells
+                .iter()
+                .filter(|((rr, cc), _)| contains(rule.range, *rr, *cc))
+                .filter(|(_, other)| text(Some(other)) == key)
+                .count();
+            if *unique { count == 1 } else { count > 1 }
+        }
+        CondKind::ColorScale(_) | CondKind::DataBar(_) => n.is_some(),
+        CondKind::Other(_) => false,
+    }
+}
+
+fn n_number(cell: Option<&Cell>) -> Option<f64> {
+    number(cell)
+}
+
+fn scale_color(
+    s: &Sheet,
+    range: (u32, u32, u32, u32),
+    cell: Option<&Cell>,
+    colors: &[crate::look::Rgb],
+) -> Option<crate::look::Rgb> {
+    let v = number(cell)?;
+    let all = values(s, range);
+    if all.is_empty() || colors.is_empty() {
+        return None;
+    }
+    let min = all.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = all.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let t = if (max - min).abs() < 1e-12 {
+        0.0
+    } else {
+        ((v - min) / (max - min)).clamp(0.0, 1.0)
+    };
+    match colors.len() {
+        1 => Some(colors[0]),
+        2 => Some(mix(colors[0], colors[1], t)),
+        _ => {
+            if t <= 0.5 {
+                Some(mix(colors[0], colors[1], t * 2.0))
+            } else {
+                Some(mix(colors[1], colors[2], (t - 0.5) * 2.0))
+            }
+        }
+    }
+}
+
+fn bar_fraction(s: &Sheet, range: (u32, u32, u32, u32), cell: Option<&Cell>) -> Option<f32> {
+    let v = number(cell)?;
+    let all = values(s, range);
+    if all.is_empty() {
+        return None;
+    }
+    let min = all.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = all.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    if (max - min).abs() < 1e-12 {
+        return Some(0.0);
+    }
+    Some((((v - min) / (max - min)).clamp(0.0, 1.0)) as f32)
+}
+
+fn mix(a: crate::look::Rgb, b: crate::look::Rgb, t: f64) -> crate::look::Rgb {
+    let ch = |shift: u32| {
+        let x = ((a.0 >> shift) & 0xFF) as f64;
+        let y = ((b.0 >> shift) & 0xFF) as f64;
+        (x + (y - x) * t).round() as u32
+    };
+    crate::look::Rgb((ch(16) << 16) | (ch(8) << 8) | ch(0))
 }
 
 #[cfg(test)]
@@ -325,5 +710,68 @@ mod tests {
         assert_eq!(wb.sheets[0].cells[&(1, 0)].value, Value::Number(1200.0));
         wb.apply(undo).unwrap();
         assert!(!wb.sheets[0].cells.contains_key(&(0, 0)));
+    }
+
+    #[test]
+    fn conditional_rules_follow_priority_and_stop_if_true() {
+        let mut first = crate::look::CellStyle::partial();
+        first.fill = Some(crate::look::Rgb(0xFF0000));
+        first.present.fill = true;
+        let mut second = crate::look::CellStyle::partial();
+        second.fill = Some(crate::look::Rgb(0x0000FF));
+        second.present.fill = true;
+        let mut sheet = Sheet::new("rules");
+        sheet.cells.insert(
+            (0, 0),
+            Cell {
+                value: Value::Number(5.0),
+                formula: None,
+                display: "5".into(),
+                bold: false,
+                style: 0,
+                edited: false,
+            },
+        );
+        sheet.look.conditional = vec![
+            crate::look::CondRule {
+                range: (0, 0, 0, 0),
+                kind: crate::look::CondKind::CellIs(crate::look::Compare::Greater(0.0)),
+                style: Some(first),
+                priority: 1,
+                stop_if_true: true,
+            },
+            crate::look::CondRule {
+                range: (0, 0, 0, 0),
+                kind: crate::look::CondKind::CellIs(crate::look::Compare::Greater(0.0)),
+                style: Some(second),
+                priority: 2,
+                stop_if_true: false,
+            },
+        ];
+        let wb = Workbook::from_sheets(vec![sheet]);
+        assert_eq!(
+            wb.shown(0, 0, 0).style.fill,
+            Some(crate::look::Rgb(0xFF0000))
+        );
+    }
+
+    #[test]
+    fn set_styles_formats_a_range_and_undoes_in_one_step() {
+        let mut wb = Workbook::from_sheets(vec![Sheet::new("range")]);
+        let style = wb.add_style(crate::look::CellStyle {
+            fill: Some(crate::look::Rgb(0x00FF00)),
+            ..Default::default()
+        });
+        let undo = wb
+            .apply(SheetOp::SetStyles {
+                sheet: 0,
+                from: (0, 0),
+                to: (1, 1),
+                style,
+            })
+            .unwrap();
+        assert_eq!(wb.sheets[0].cells[&(1, 1)].style, style);
+        wb.apply(undo).unwrap();
+        assert!(wb.sheets[0].cells.is_empty());
     }
 }

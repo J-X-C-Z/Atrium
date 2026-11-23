@@ -1,12 +1,20 @@
 //! Sparse SpreadsheetML projection and localized cell-edit planning.
 use crate::{
     OpenError, SaveError,
+    look::{Anchored, Chart, Compare, CondKind, CondRule, Drawing, Rgb, ShapeLook, SheetLook},
+    numfmt,
     package::Package,
     sheet,
-    word::EditError,
+    sheet_styles::{self, ReadStyles, Theme},
+    slides::Shape,
+    word::{EditError, Para, ParaStyle},
     xml::{XmlNode, XmlPart},
 };
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    path::PathBuf,
+    sync::Arc,
+};
 
 const NS: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 const STRICT: &str = "http://purl.oclc.org/ooxml/spreadsheetml/main";
@@ -14,6 +22,7 @@ const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relatio
 const STRICT_REL: &str = "http://purl.oclc.org/ooxml/officeDocument/relationships";
 const MAIN: &str = "xl/workbook.xml";
 type Patches = Vec<(String, Vec<u8>)>;
+type ColumnWidths = Vec<(u32, u32, f64)>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -37,6 +46,7 @@ pub struct Sheet {
     pub cells: BTreeMap<(u32, u32), Cell>,
     pub merged: Vec<String>,
     pub widths: Vec<(u32, u32, f64)>,
+    pub look: SheetLook,
     path: String,
     locked: Vec<CellRange>,
     unknown_pivot: bool,
@@ -45,10 +55,10 @@ pub struct Sheet {
 pub(crate) struct SheetBinding {
     baseline: sheet::Workbook,
     pub sheets: Vec<Sheet>,
-    formats: Vec<String>,
-    bold_styles: Vec<bool>,
+    styles: ReadStyles,
     part: String,
     date1904: bool,
+    _image_dir: Option<Arc<tempfile::TempDir>>,
 }
 fn bad(s: &str) -> OpenError {
     OpenError::Damaged(s.into())
@@ -61,6 +71,9 @@ fn is(n: &XmlNode, name: &str) -> bool {
 }
 fn child<'a>(n: &'a XmlNode, name: &str) -> Option<&'a XmlNode> {
     n.children.iter().find(|e| is(e, name))
+}
+fn any_child<'a>(n: &'a XmlNode, name: &str) -> Option<&'a XmlNode> {
+    n.children.iter().find(|e| e.local_name == name)
 }
 fn attr<'a>(n: &'a XmlNode, name: &str) -> Option<&'a str> {
     n.attr(None, name)
@@ -87,6 +100,8 @@ struct CellRange {
 }
 impl CellRange {
     fn parse(s: &str) -> Option<Self> {
+        let s = s.replace('$', "");
+        let s = s.as_str();
         let (a, b) = s.split_once(':').unwrap_or((s, s));
         let first = parse_addr(a)?;
         let last = parse_addr(b)?;
@@ -134,7 +149,6 @@ impl SheetBinding {
             .map(|rel| (rel.id.as_str(), &rel.target))
             .collect();
         let strings = package.related_part(&part, "sharedStrings")?;
-        let styles = package.related_part(&part, "styles")?;
         let shared = if let Some(path) = strings {
             package
                 .part(&path)?
@@ -147,17 +161,13 @@ impl SheetBinding {
         } else {
             Vec::new()
         };
-        let (formats, bold_styles) = if let Some(path) = styles {
-            let xml = package.part(&path)?;
-            (read_formats(xml.root()), read_bold(xml.root()))
-        } else {
-            (Vec::new(), Vec::new())
-        };
+        let styles = sheet_styles::read(package, &part)?;
         let date1904 = child(main.root(), "workbookPr")
             .and_then(|n| attr(n, "date1904"))
             .is_some_and(|x| matches!(x, "1" | "true"));
         let mut sheets = Vec::new();
         let mut text_bytes = 0usize;
+        let mut media = Media::default();
         for n in child(main.root(), "sheets")
             .ok_or_else(|| bad("missing sheets"))?
             .children
@@ -181,7 +191,10 @@ impl SheetBinding {
                     let style = attr(n, "s")
                         .and_then(|x| x.parse::<u32>().ok())
                         .unwrap_or(0);
-                    let date = formats.get(style as usize).is_some_and(|x| date_format(x));
+                    let date = styles
+                        .formats
+                        .get(style as usize)
+                        .is_some_and(|x| numfmt::is_date_format(x));
                     let v = child(n, "v").map(|v| v.text.as_str());
                     let value = match (attr(n, "t").unwrap_or("n"), v) {
                         ("inlineStr", _) => {
@@ -277,18 +290,7 @@ impl SheetBinding {
                 .filter(|x| is(x, "mergeCell"))
                 .filter_map(|x| attr(x, "ref").map(str::to_owned))
                 .collect();
-            let widths = child(xml.root(), "cols")
-                .into_iter()
-                .flat_map(|x| &x.children)
-                .filter(|x| is(x, "col"))
-                .filter_map(|x| {
-                    Some((
-                        attr(x, "min")?.parse().ok()?,
-                        attr(x, "max")?.parse().ok()?,
-                        attr(x, "width")?.parse().ok()?,
-                    ))
-                })
-                .collect();
+            let (widths, look) = read_sheet_look(package, path, xml.root(), &styles, &mut media)?;
             let pivot_rels = package
                 .relationships(path)?
                 .into_iter()
@@ -320,6 +322,7 @@ impl SheetBinding {
                 cells,
                 merged,
                 widths,
+                look,
                 path: (*path).clone(),
                 locked,
                 unknown_pivot,
@@ -328,10 +331,10 @@ impl SheetBinding {
         let mut binding = Self {
             baseline: sheet::Workbook::default(),
             sheets,
-            formats,
-            bold_styles,
+            styles,
             part,
             date1904,
+            _image_dir: media.dir.map(Arc::new),
         };
         binding.baseline = binding.model();
         Ok(binding)
@@ -355,6 +358,45 @@ impl SheetBinding {
         if self.baseline.sheets().len() != current.sheets().len() {
             return Err(SaveError::Unsupported);
         }
+        let mut used = BTreeSet::new();
+        used.insert(0);
+        for sheet in self.baseline.sheets() {
+            for cell in sheet.cells.values() {
+                used.insert(cell.style);
+            }
+            used.extend(sheet.look.row_styles.values().copied());
+            used.extend(sheet.look.column_styles.values().copied());
+        }
+        for sheet in current.sheets() {
+            for cell in sheet.cells.values() {
+                used.insert(cell.style);
+            }
+            used.extend(sheet.look.row_styles.values().copied());
+            used.extend(sheet.look.column_styles.values().copied());
+        }
+        for style in &used {
+            if *style as usize >= current.styles().len() {
+                return Err(SaveError::Unsupported);
+            }
+        }
+        let mut writer = sheet_styles::StyleWriter::new(&self.styles);
+        let mut style_map = HashMap::new();
+        for style in &used {
+            let current_style = &current.styles()[*style as usize];
+            // Index 0 is the workbook's default, even when its concrete
+            // font comes from `styles.xml`; existing indexes map one to one.
+            let xf = if *style == 0 || self.styles.list.get(*style as usize) == Some(current_style)
+            {
+                *style
+            } else {
+                writer.ensure(current_style)
+            };
+            style_map.insert(*style, xf);
+        }
+        let styles_patch = writer.finish();
+        if styles_patch.is_some() && self.styles.path.is_none() {
+            return Err(SaveError::Unsupported);
+        }
         let mut output = BTreeMap::new();
         let mut working = package.clone();
         for (sheet, (before, after)) in self
@@ -364,41 +406,95 @@ impl SheetBinding {
             .zip(current.sheets())
             .enumerate()
         {
+            let path = self.sheets[sheet].path.clone();
             let keys = before
                 .cells
                 .keys()
                 .chain(after.cells.keys())
                 .copied()
                 .collect::<BTreeSet<_>>();
-            for (r, c) in keys {
-                let old = before.cells.get(&(r, c));
-                let new = after.cells.get(&(r, c));
+            for (r, c) in &keys {
+                let old = before.cells.get(&(*r, *c));
+                let new = after.cells.get(&(*r, *c));
                 if old == new {
+                    continue;
+                }
+                let value_changed = match (old, new) {
+                    (Some(a), Some(b)) => {
+                        a.value != b.value || a.formula != b.formula || a.edited != b.edited
+                    }
+                    (None, Some(b)) => {
+                        b.edited || b.formula.is_some() || b.value != sheet::Value::Empty
+                    }
+                    (Some(_), None) => true,
+                    (None, None) => false,
+                };
+                if !value_changed {
                     continue;
                 }
                 let op = if let Some(cell) = new.filter(|c| c.edited) {
                     sheet::SheetOp::SetCell {
                         sheet,
-                        r,
-                        c,
+                        r: *r,
+                        c: *c,
                         input: cell.input(),
                     }
                 } else {
                     sheet::SheetOp::Restore {
                         sheet,
-                        r,
-                        c,
+                        r: *r,
+                        c: *c,
                         cell: new.cloned(),
                     }
                 };
                 let patches = self
                     .apply(&working, &op)
                     .map_err(|e| SaveError::Io(e.to_string()))?;
-                working
-                    .replace_parts(&patches)
-                    .map_err(|e| SaveError::Io(e.to_string()))?;
-                output.extend(patches);
+                record_patch(&mut output, &mut working, patches)?;
             }
+
+            // Cell style indexes are separate from values: patch `s` only.
+            for (r, c) in &keys {
+                let old = before
+                    .cells
+                    .get(&(*r, *c))
+                    .map(|cell| cell.style)
+                    .unwrap_or(0);
+                let new = after
+                    .cells
+                    .get(&(*r, *c))
+                    .map(|cell| cell.style)
+                    .unwrap_or(0);
+                let old_xf = style_map.get(&old).copied().unwrap_or(0);
+                let new_xf = style_map.get(&new).copied().unwrap_or(0);
+                if old_xf == new_xf {
+                    continue;
+                }
+                let bytes = working
+                    .read_part(&path)
+                    .map_err(|e| SaveError::Io(e.to_string()))?;
+                let xml = XmlPart::parse(bytes).map_err(|e| SaveError::Io(e.to_string()))?;
+                let updated = patch_cell_style(&xml, *r + 1, *c + 1, new_xf)
+                    .map_err(|e| SaveError::Io(e.to_string()))?;
+                XmlPart::parse(updated.clone()).map_err(|e| SaveError::Io(e.to_string()))?;
+                record_patch(&mut output, &mut working, vec![(path.clone(), updated)])?;
+            }
+
+            if let Some(bytes) = patch_sheet_layout(
+                &working,
+                &path,
+                &before.look,
+                &after.look,
+                self.styles.digit,
+                &style_map,
+            )
+            .map_err(|e| SaveError::Io(e.to_string()))?
+            {
+                record_patch(&mut output, &mut working, vec![(path.clone(), bytes)])?;
+            }
+        }
+        if let (Some(bytes), Some(path)) = (styles_patch, &self.styles.path) {
+            record_patch(&mut output, &mut working, vec![(path.clone(), bytes)])?;
         }
         let mut result = Vec::new();
         for (path, bytes) in output {
@@ -437,11 +533,11 @@ impl SheetBinding {
                                     formula: v.formula.clone(),
                                     display: self.display(v),
                                     bold: self
-                                        .bold_styles
+                                        .styles
+                                        .list
                                         .get(v.style as usize)
-                                        .copied()
-                                        .unwrap_or(false),
-                                    style: 0,
+                                        .is_some_and(|s| s.font.bold),
+                                    style: v.style,
                                     edited: false,
                                 },
                             )
@@ -471,11 +567,13 @@ impl SheetBinding {
                         merged,
                         widths,
                         locked,
-                        look: Default::default(),
+                        look: s.look.clone(),
                     }
                 })
                 .collect(),
         )
+        .with_styles(self.styles.list.clone())
+        .with_date1904(self.date1904)
     }
 
     /// Pure part edits. The document journal retains exact prior XML for inverses.
@@ -490,9 +588,9 @@ impl SheetBinding {
             ),
             sheet::SheetOp::Restore { sheet, r, c, cell } => (*sheet, *r, *c, None, cell.as_ref()),
             // Written back in backlog item 17 (docs/slides-sheets-implementation.md).
-            sheet::SheetOp::SetStyle { .. } => {
+            _ => {
                 return Err(EditError::Invalid(
-                    "cell formatting cannot be saved yet".into(),
+                    "this sheet edit is not saved by the single-cell path".into(),
                 ));
             }
         };
@@ -508,17 +606,12 @@ impl SheetBinding {
 
     fn display(&self, cell: &Cell) -> String {
         let f = self
+            .styles
             .formats
             .get(cell.style as usize)
             .map(String::as_str)
             .unwrap_or("General");
-        match &cell.value {
-            Value::Number(n) => format_number(*n, f),
-            Value::Date(n) => format_date(*n, f, self.date1904),
-            Value::Empty => String::new(),
-            Value::Text(s) | Value::Error(s) => s.clone(),
-            Value::Bool(b) => if *b { "TRUE" } else { "FALSE" }.into(),
-        }
+        numfmt::format_value(&model_value(&cell.value), f, self.date1904).text
     }
     /// Produces a transactional patch set; caller atomically applies all parts.
     fn patch_cell(
@@ -594,7 +687,7 @@ impl SheetBinding {
         let format = sheet
             .cells
             .get(&(row, col))
-            .and_then(|c| self.formats.get(c.style as usize));
+            .and_then(|c| self.styles.formats.get(c.style as usize));
         let input_kind = if let Some(c) = restore {
             match (&c.formula, &c.value) {
                 (Some(f), _) => Some(("formula", f.clone())),
@@ -617,8 +710,8 @@ impl SheetBinding {
                     .filter(|x| x.is_finite())
                 {
                     ("number", v.to_string())
-                } else if format.is_some_and(|f| date_format(f))
-                    && let Some(v) = date_serial(s, self.date1904)
+                } else if format.is_some_and(|f| numfmt::is_date_format(f))
+                    && let Some(v) = numfmt::date_serial(s, self.date1904)
                 {
                     ("number", v.to_string())
                 } else if ["TRUE", "FALSE"]
@@ -804,6 +897,912 @@ impl SheetBinding {
     }
 }
 
+fn model_value(v: &Value) -> sheet::Value {
+    match v {
+        Value::Empty => sheet::Value::Empty,
+        Value::Number(n) | Value::Date(n) => sheet::Value::Number(*n),
+        Value::Text(s) => sheet::Value::Text(s.clone()),
+        Value::Bool(b) => sheet::Value::Bool(*b),
+        Value::Error(s) => sheet::Value::Error(s.clone()),
+    }
+}
+
+fn record_patch(
+    output: &mut BTreeMap<String, Vec<u8>>,
+    working: &mut Package,
+    patches: Patches,
+) -> Result<(), SaveError> {
+    working
+        .replace_parts(&patches)
+        .map_err(|e| SaveError::Io(e.to_string()))?;
+    for (path, bytes) in patches {
+        output.insert(path, bytes);
+    }
+    Ok(())
+}
+
+fn patch_cell_style(xml: &XmlPart, row: u32, col: u32, xf: u32) -> Result<Vec<u8>, OpenError> {
+    let root = xml.root();
+    let data = child(root, "sheetData").ok_or_else(|| bad("missing sheet data"))?;
+    let r = data
+        .children
+        .iter()
+        .find(|n| is(n, "row") && attr(n, "r").and_then(|x| x.parse().ok()) == Some(row));
+    let cell = r.and_then(|r| {
+        r.children
+            .iter()
+            .find(|n| is(n, "c") && attr(n, "r").and_then(parse_addr) == Some((row, col)))
+    });
+    if let Some(cell) = cell {
+        let s = (xf != 0).then(|| xf.to_string());
+        return rewrite_start_attrs(xml, cell, &[("s", s.as_deref())]);
+    }
+    if xf == 0 {
+        return Ok(xml.bytes().to_vec());
+    }
+    let address = addr(row, col);
+    let q = prefix(xml, cell.or(r).unwrap_or(data));
+    let element = format!("<{q}c r=\"{address}\" s=\"{xf}\"/>");
+    let updated = if let Some(r) = r {
+        insert_child(
+            xml,
+            r,
+            &element,
+            r.children.iter().find(|n| {
+                is(n, "c")
+                    && attr(n, "r")
+                        .and_then(parse_addr)
+                        .is_some_and(|(_, c)| c > col)
+            }),
+        )?
+    } else {
+        let q = prefix(xml, data);
+        let row_element = format!("<{q}row r=\"{row}\">{element}</{q}row>");
+        insert_child(
+            xml,
+            data,
+            &row_element,
+            data.children.iter().find(|n| {
+                is(n, "row")
+                    && attr(n, "r")
+                        .and_then(|x| x.parse::<u32>().ok())
+                        .is_some_and(|x| x > row)
+            }),
+        )?
+    };
+    expand_dimension(&updated, row, col)
+}
+
+fn expand_dimension(bytes: &[u8], row: u32, col: u32) -> Result<Vec<u8>, OpenError> {
+    let candidate = XmlPart::parse(bytes.to_vec())?;
+    if let Some(dimension) = child(candidate.root(), "dimension") {
+        let range = attr(dimension, "ref")
+            .and_then(CellRange::parse)
+            .ok_or_else(|| bad("invalid worksheet dimension"))?;
+        if range.contains(row, col) {
+            return Ok(candidate.bytes().to_vec());
+        }
+        let bounds = format!(
+            "{}:{}",
+            addr(row.min(range.first.0), col.min(range.first.1)),
+            addr(row.max(range.last.0), col.max(range.last.1))
+        );
+        return replace_start_attr(&candidate, dimension, "ref", Some(&bounds));
+    }
+    Ok(candidate.bytes().to_vec())
+}
+
+fn rewrite_start_attrs(
+    xml: &XmlPart,
+    node: &XmlNode,
+    updates: &[(&str, Option<&str>)],
+) -> Result<Vec<u8>, OpenError> {
+    let raw = &xml.bytes()[node.range.start..];
+    let end = start_end(raw)?;
+    let mut tag = raw[..=end].to_vec();
+    for (key, value) in updates {
+        tag = start_attr(&tag, key, *value)?;
+    }
+    Ok(splice(
+        xml,
+        node.range.start..node.range.start + end + 1,
+        &tag,
+    ))
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ColState {
+    width: Option<f32>,
+    hidden: bool,
+    style: Option<u32>,
+    extra: Vec<(String, String)>,
+}
+
+fn patch_sheet_layout(
+    package: &Package,
+    path: &str,
+    before: &SheetLook,
+    after: &SheetLook,
+    digit: f32,
+    style_map: &HashMap<u32, u32>,
+) -> Result<Option<Vec<u8>>, OpenError> {
+    let columns_changed = before.columns != after.columns
+        || before.hidden_columns != after.hidden_columns
+        || before.column_styles != after.column_styles;
+    let rows_changed = before.rows != after.rows
+        || before.hidden_rows != after.hidden_rows
+        || before.row_styles != after.row_styles;
+    let frozen_changed = before.frozen != after.frozen;
+    if !columns_changed && !rows_changed && !frozen_changed {
+        return Ok(None);
+    }
+    let original = package.read_part(path)?;
+    let mut bytes = original.clone();
+    if columns_changed {
+        let xml = XmlPart::parse(bytes)?;
+        bytes = patch_columns(&xml, before, after, digit, style_map)?;
+    }
+    if rows_changed {
+        let xml = XmlPart::parse(bytes)?;
+        bytes = patch_rows(&xml, before, after, style_map)?;
+    }
+    if frozen_changed {
+        let xml = XmlPart::parse(bytes)?;
+        bytes = patch_frozen(&xml, after.frozen)?;
+    }
+    Ok((bytes != original).then_some(bytes))
+}
+
+fn patch_columns(
+    xml: &XmlPart,
+    before: &SheetLook,
+    after: &SheetLook,
+    digit: f32,
+    style_map: &HashMap<u32, u32>,
+) -> Result<Vec<u8>, OpenError> {
+    let root = xml.root();
+    let mut cols = BTreeMap::<u32, ColState>::new();
+    if let Some(existing) = child(root, "cols") {
+        for col in existing.children.iter().filter(|n| is(n, "col")) {
+            let min = attr(col, "min").and_then(|x| x.parse::<u32>().ok());
+            let max = attr(col, "max").and_then(|x| x.parse::<u32>().ok());
+            let (Some(min), Some(max)) = (min, max) else {
+                continue;
+            };
+            if min == 0 || max < min || max > 16_384 {
+                continue;
+            }
+            let width = attr(col, "width").and_then(|x| x.parse::<f32>().ok());
+            let hidden = attr(col, "hidden").is_some_and(|x| matches!(x, "1" | "true"));
+            let style = attr(col, "style").and_then(|x| x.parse::<u32>().ok());
+            let extra = col
+                .attributes
+                .iter()
+                .filter(|a| {
+                    a.namespace.is_none()
+                        && !matches!(
+                            a.local_name.as_str(),
+                            "min" | "max" | "width" | "hidden" | "style" | "customWidth"
+                        )
+                })
+                .map(|a| (a.local_name.clone(), a.value.clone()))
+                .collect();
+            let state = ColState {
+                width,
+                hidden,
+                style,
+                extra,
+            };
+            for c in min..=max {
+                cols.insert(c - 1, state.clone());
+            }
+        }
+    }
+    let mut touched = BTreeSet::new();
+    touched.extend(before.columns.keys().copied());
+    touched.extend(after.columns.keys().copied());
+    touched.extend(before.hidden_columns.iter().copied());
+    touched.extend(after.hidden_columns.iter().copied());
+    touched.extend(before.column_styles.keys().copied());
+    touched.extend(after.column_styles.keys().copied());
+    for c in touched {
+        let mut state = cols.get(&c).cloned().unwrap_or(ColState {
+            width: None,
+            hidden: false,
+            style: None,
+            extra: Vec::new(),
+        });
+        if let Some(points) = after.columns.get(&c) {
+            state.width = Some(crate::look::column_chars_from_points(*points, digit));
+        } else if before.columns.contains_key(&c) {
+            state.width = None;
+        }
+        if after.hidden_columns.contains(&c) {
+            state.hidden = true;
+        } else if before.hidden_columns.contains(&c) {
+            state.hidden = false;
+        }
+        if let Some(style) = after.column_styles.get(&c) {
+            state.style = Some(style_map.get(style).copied().unwrap_or(0));
+        } else if before.column_styles.contains_key(&c) {
+            state.style = None;
+        }
+        cols.insert(c, state);
+    }
+    let q = prefix(xml, root);
+    let mut record = String::new();
+    let mut keys: Vec<(u32, ColState)> = cols.into_iter().collect();
+    keys.sort_by_key(|(c, _)| *c);
+    let mut i = 0;
+    while i < keys.len() {
+        let start = keys[i].0;
+        let state = keys[i].1.clone();
+        let mut end = start;
+        while i + 1 < keys.len() && keys[i + 1].0 == end + 1 && keys[i + 1].1 == state {
+            i += 1;
+            end = keys[i].0;
+            if end >= 16_383 {
+                break;
+            }
+        }
+        let mut s = format!("<{q}col min=\"{}\" max=\"{}\"", start + 1, end + 1);
+        if let Some(width) = state.width {
+            s.push_str(&format!(" width=\"{}\" customWidth=\"1\"", fmt_num(width)));
+        }
+        if state.hidden {
+            s.push_str(" hidden=\"1\"");
+        }
+        if let Some(style) = state.style.filter(|s| *s != 0) {
+            s.push_str(&format!(" style=\"{style}\""));
+        }
+        for (key, value) in &state.extra {
+            s.push_str(&format!(
+                " {key}=\"{}\"",
+                quick_xml::escape::escape(value.as_str())
+            ));
+        }
+        s.push_str("/>");
+        record.push_str(&s);
+        i += 1;
+    }
+    let block = if record.is_empty() {
+        String::new()
+    } else {
+        format!("<{q}cols>{record}</{q}cols>")
+    };
+    if let Some(existing) = child(root, "cols") {
+        Ok(splice(xml, existing.range.clone(), block.as_bytes()))
+    } else if block.is_empty() {
+        Ok(xml.bytes().to_vec())
+    } else {
+        insert_child(xml, root, &block, child(root, "sheetData"))
+    }
+}
+
+fn patch_rows(
+    xml: &XmlPart,
+    before: &SheetLook,
+    after: &SheetLook,
+    style_map: &HashMap<u32, u32>,
+) -> Result<Vec<u8>, OpenError> {
+    let root = xml.root();
+    child(root, "sheetData").ok_or_else(|| bad("missing sheet data"))?;
+    let mut touched = BTreeSet::new();
+    for r in before
+        .rows
+        .keys()
+        .chain(after.rows.keys())
+        .chain(before.row_styles.keys())
+        .chain(after.row_styles.keys())
+        .chain(before.hidden_rows.iter())
+        .chain(after.hidden_rows.iter())
+        .copied()
+    {
+        if before.rows.get(&r) != after.rows.get(&r)
+            || before.row_styles.get(&r) != after.row_styles.get(&r)
+            || before.hidden_rows.contains(&r) != after.hidden_rows.contains(&r)
+        {
+            touched.insert(r);
+        }
+    }
+    let mut bytes = xml.bytes().to_vec();
+    for r in touched {
+        let ht = after.rows.get(&r).copied();
+        let hidden = after.hidden_rows.contains(&r);
+        let style = after
+            .row_styles
+            .get(&r)
+            .map(|s| style_map.get(s).copied().unwrap_or(0))
+            .filter(|s| *s != 0);
+        let xml = XmlPart::parse(bytes.clone())?;
+        let root = xml.root();
+        let data = child(root, "sheetData").ok_or_else(|| bad("missing sheet data"))?;
+        let row = data.children.iter().find(|n| {
+            is(n, "row") && attr(n, "r").and_then(|x| x.parse::<u32>().ok()) == Some(r + 1)
+        });
+        if let Some(row) = row {
+            let ht_text = ht.map(fmt_num);
+            let style_text = style.map(|s| s.to_string());
+            bytes = rewrite_start_attrs(
+                &xml,
+                row,
+                &[
+                    ("ht", ht_text.as_deref()),
+                    ("customHeight", ht.map(|_| "1")),
+                    ("hidden", hidden.then_some("1")),
+                    ("s", style_text.as_deref()),
+                    ("customFormat", style.map(|_| "1")),
+                ],
+            )?;
+        } else if ht.is_some() || hidden || style.is_some() {
+            let q = prefix(&xml, data);
+            let mut s = format!("<{q}row r=\"{}\"", r + 1);
+            if let Some(ht) = ht {
+                s.push_str(&format!(" ht=\"{}\" customHeight=\"1\"", fmt_num(ht)));
+            }
+            if hidden {
+                s.push_str(" hidden=\"1\"");
+            }
+            if let Some(style) = style {
+                s.push_str(&format!(" s=\"{style}\" customFormat=\"1\""));
+            }
+            s.push_str("/>");
+            bytes = insert_child(
+                &xml,
+                data,
+                &s,
+                data.children.iter().find(|n| {
+                    is(n, "row")
+                        && attr(n, "r")
+                            .and_then(|x| x.parse::<u32>().ok())
+                            .is_some_and(|x| x > r + 1)
+                }),
+            )?;
+        }
+    }
+    Ok(bytes)
+}
+
+fn patch_frozen(xml: &XmlPart, frozen: (u32, u32)) -> Result<Vec<u8>, OpenError> {
+    let root = xml.root();
+    let views = child(root, "sheetViews");
+    let view = views.and_then(|v| v.children.iter().find(|n| is(n, "sheetView")));
+    let pane = view.and_then(|v| child(v, "pane"));
+    if frozen == (0, 0) {
+        if let Some(pane) = pane {
+            return Ok(splice(xml, pane.range.clone(), b""));
+        }
+        return Ok(xml.bytes().to_vec());
+    }
+    let (rows, cols) = frozen;
+    let q = view
+        .map(|v| prefix(xml, v))
+        .or_else(|| views.map(|v| prefix(xml, v)))
+        .unwrap_or_else(|| prefix(xml, root));
+    let mut attrs = String::new();
+    if cols > 0 {
+        attrs.push_str(&format!(" xSplit=\"{cols}\""));
+    }
+    if rows > 0 {
+        attrs.push_str(&format!(" ySplit=\"{rows}\""));
+    }
+    attrs.push_str(&format!(" topLeftCell=\"{}\"", addr(rows + 1, cols + 1)));
+    attrs.push_str(&format!(
+        " activePane=\"{}\"",
+        match (rows > 0, cols > 0) {
+            (true, true) => "bottomRight",
+            (true, false) => "bottomLeft",
+            (false, true) => "topRight",
+            (false, false) => "topLeft",
+        }
+    ));
+    attrs.push_str(" state=\"frozen\"");
+    let pane_element = format!("<{q}pane{attrs}/>");
+    if let Some(view) = view {
+        let bytes = if let Some(pane) = pane {
+            splice(xml, pane.range.clone(), pane_element.as_bytes())
+        } else {
+            let raw = &xml.bytes()[view.range.clone()];
+            let end = start_end(raw)?;
+            splice(
+                xml,
+                view.range.start + end + 1..view.range.start + end + 1,
+                pane_element.as_bytes(),
+            )
+        };
+        return Ok(bytes);
+    }
+    let block = format!(
+        "<{q}sheetViews><{q}sheetView workbookViewId=\"0\">{pane_element}</{q}sheetView></{q}sheetViews>"
+    );
+    let before = ["sheetFormatPr", "cols", "sheetData"]
+        .iter()
+        .find_map(|name| child(root, name));
+    insert_child(xml, root, &block, before)
+}
+
+fn fmt_num(v: f32) -> String {
+    let mut s = format!("{v:.2}");
+    while s.ends_with('0') && s.contains('.') {
+        s.pop();
+    }
+    if s.ends_with('.') {
+        s.pop();
+    }
+    if s == "-0" { "0".into() } else { s }
+}
+
+#[derive(Default)]
+struct Media {
+    dir: Option<tempfile::TempDir>,
+    count: usize,
+    bytes: usize,
+    paths: HashMap<String, PathBuf>,
+}
+
+impl Media {
+    fn image(&mut self, package: &Package, target: &str) -> Option<PathBuf> {
+        if let Some(path) = self.paths.get(target) {
+            return Some(path.clone());
+        }
+        if self.count >= 64 || self.bytes >= 32 * 1024 * 1024 {
+            return None;
+        }
+        let ext = target
+            .rsplit_once('.')
+            .map(|(_, e)| e.to_ascii_lowercase())
+            .filter(|e| matches!(e.as_str(), "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp"))?;
+        let bytes = package
+            .read_part_with_limit(target, 16 * 1024 * 1024)
+            .ok()?;
+        if self.bytes.checked_add(bytes.len())? > 32 * 1024 * 1024 {
+            return None;
+        }
+        self.bytes += bytes.len();
+        if self.dir.is_none() {
+            self.dir = tempfile::tempdir().ok();
+        }
+        let dir = self.dir.as_ref()?;
+        let path = dir.path().join(format!("image-{}.{ext}", self.count));
+        self.count += 1;
+        std::fs::write(&path, bytes).ok()?;
+        self.paths.insert(target.to_owned(), path.clone());
+        Some(path)
+    }
+}
+
+fn read_sheet_look(
+    package: &Package,
+    path: &str,
+    root: &XmlNode,
+    styles: &ReadStyles,
+    media: &mut Media,
+) -> Result<(ColumnWidths, SheetLook), OpenError> {
+    let format = child(root, "sheetFormatPr");
+    let default_height = format
+        .and_then(|n| attr(n, "defaultRowHeight"))
+        .and_then(|x| x.parse::<f32>().ok())
+        .filter(|x| x.is_finite() && *x > 0.0)
+        .unwrap_or(15.0);
+    let default_chars = format
+        .and_then(|n| attr(n, "defaultColWidth"))
+        .and_then(|x| x.parse::<f32>().ok())
+        .filter(|x| x.is_finite() && *x > 0.0)
+        .unwrap_or(8.43);
+    let default_width = crate::look::column_width_points(default_chars, styles.digit);
+    let mut look = SheetLook {
+        default_width,
+        default_height,
+        ..SheetLook::default()
+    };
+    let mut widths = Vec::new();
+    if let Some(cols) = child(root, "cols") {
+        for col in cols.children.iter().filter(|n| is(n, "col")) {
+            let min = attr(col, "min").and_then(|x| x.parse::<u32>().ok());
+            let max = attr(col, "max").and_then(|x| x.parse::<u32>().ok());
+            let (Some(min), Some(max)) = (min, max) else {
+                continue;
+            };
+            if min == 0 || max < min || max > 16_384 {
+                continue;
+            }
+            let width = attr(col, "width").and_then(|x| x.parse::<f32>().ok());
+            let hidden = attr(col, "hidden").is_some_and(|x| matches!(x, "1" | "true"));
+            let style = attr(col, "style").and_then(|x| x.parse::<u32>().ok());
+            if let Some(chars) = width.filter(|x| x.is_finite() && *x >= 0.0) {
+                widths.push((min, max, chars as f64));
+                let points = crate::look::column_width_points(chars, styles.digit);
+                for c in min..=max {
+                    look.columns.insert(c - 1, points);
+                }
+            }
+            for c in min..=max {
+                if hidden {
+                    look.hidden_columns.insert(c - 1);
+                }
+                if let Some(style) = style.filter(|s| (*s as usize) < styles.list.len()) {
+                    look.column_styles.insert(c - 1, style);
+                }
+            }
+        }
+    }
+    if let Some(data) = child(root, "sheetData") {
+        for row in data.children.iter().filter(|n| is(n, "row")) {
+            let Some(r) = attr(row, "r").and_then(|x| x.parse::<u32>().ok()) else {
+                continue;
+            };
+            if r == 0 || r > 1_048_576 {
+                continue;
+            }
+            if let Some(ht) = attr(row, "ht")
+                .and_then(|x| x.parse::<f32>().ok())
+                .filter(|x| x.is_finite() && *x >= 0.0)
+            {
+                look.rows.insert(r - 1, ht);
+            }
+            if attr(row, "hidden").is_some_and(|x| matches!(x, "1" | "true")) {
+                look.hidden_rows.insert(r - 1);
+            }
+            if attr(row, "customFormat").is_some_and(|x| matches!(x, "1" | "true"))
+                && let Some(style) = attr(row, "s")
+                    .and_then(|x| x.parse::<u32>().ok())
+                    .filter(|s| (*s as usize) < styles.list.len())
+            {
+                look.row_styles.insert(r - 1, style);
+            }
+        }
+    }
+    if let Some(views) = child(root, "sheetViews")
+        && let Some(view) = views.children.iter().find(|n| is(n, "sheetView"))
+    {
+        look.gridlines = attr(view, "showGridLines").is_none_or(|x| !matches!(x, "0" | "false"));
+        look.zoom = attr(view, "zoomScale")
+            .and_then(|x| x.parse::<u16>().ok())
+            .filter(|x| *x > 0)
+            .unwrap_or(100);
+        if let Some(pane) = child(view, "pane")
+            && matches!(attr(pane, "state"), Some("frozen" | "frozenSplit"))
+        {
+            let rows = attr(pane, "ySplit")
+                .and_then(|x| x.parse::<u32>().ok())
+                .unwrap_or(0);
+            let cols = attr(pane, "xSplit")
+                .and_then(|x| x.parse::<u32>().ok())
+                .unwrap_or(0);
+            look.frozen = (rows, cols);
+        }
+    }
+    if let Some(tab) = child(root, "sheetPr")
+        .and_then(|p| child(p, "tabColor"))
+        .and_then(|c| sheet_styles::read_color(c, &styles.theme))
+    {
+        look.tab_color = Some(tab);
+    }
+    look.conditional = read_conditional(root, styles);
+    look.drawings = read_drawings(package, path, root, styles, media)?;
+    Ok((widths, look))
+}
+
+fn read_conditional(root: &XmlNode, styles: &ReadStyles) -> Vec<CondRule> {
+    let mut out = Vec::new();
+    for formatting in root
+        .children
+        .iter()
+        .filter(|n| is(n, "conditionalFormatting"))
+    {
+        let Some(sqref) = attr(formatting, "sqref") else {
+            continue;
+        };
+        let ranges: Vec<CellRange> = sqref
+            .split_whitespace()
+            .filter_map(CellRange::parse)
+            .collect();
+        for rule in formatting.children.iter().filter(|n| is(n, "cfRule")) {
+            let Some(kind) = conditional_kind(rule, &styles.theme) else {
+                continue;
+            };
+            let priority = attr(rule, "priority")
+                .and_then(|x| x.parse::<u32>().ok())
+                .unwrap_or(1);
+            let stop_if_true = attr(rule, "stopIfTrue").is_some_and(|x| matches!(x, "1" | "true"));
+            let style = attr(rule, "dxfId")
+                .and_then(|x| x.parse::<usize>().ok())
+                .and_then(|i| styles.dxfs.get(i).cloned());
+            for range in &ranges {
+                out.push(CondRule {
+                    range: (
+                        range.first.0 - 1,
+                        range.first.1 - 1,
+                        range.last.0 - 1,
+                        range.last.1 - 1,
+                    ),
+                    kind: kind.clone(),
+                    style: style.clone(),
+                    priority,
+                    stop_if_true,
+                });
+            }
+        }
+    }
+    out
+}
+
+fn conditional_kind(rule: &XmlNode, theme: &Theme) -> Option<CondKind> {
+    let formulas: Vec<f64> = rule
+        .children
+        .iter()
+        .filter(|n| is(n, "formula"))
+        .filter_map(|n| n.text.trim().parse::<f64>().ok())
+        .collect();
+    Some(match attr(rule, "type")? {
+        "cellIs" => {
+            let a = *formulas.first()?;
+            let b = formulas.get(1).copied().unwrap_or(a);
+            CondKind::CellIs(match attr(rule, "operator").unwrap_or("equal") {
+                "between" => Compare::Between(a, b),
+                "notBetween" => Compare::NotBetween(a, b),
+                "equal" => Compare::Equal(a),
+                "notEqual" => Compare::NotEqual(a),
+                "greaterThan" => Compare::Greater(a),
+                "lessThan" => Compare::Less(a),
+                "greaterThanOrEqual" => Compare::AtLeast(a),
+                "lessThanOrEqual" => Compare::AtMost(a),
+                _ => return None,
+            })
+        }
+        "containsText" => CondKind::Contains(attr(rule, "text")?.to_owned()),
+        "top10" => CondKind::Top {
+            n: attr(rule, "rank")
+                .and_then(|x| x.parse::<u32>().ok())
+                .unwrap_or(10),
+            bottom: attr(rule, "bottom").is_some_and(|x| matches!(x, "1" | "true")),
+            percent: attr(rule, "percent").is_some_and(|x| matches!(x, "1" | "true")),
+        },
+        "aboveAverage" => CondKind::AboveAverage {
+            below: attr(rule, "aboveAverage").is_some_and(|x| matches!(x, "0" | "false")),
+        },
+        "duplicateValues" => CondKind::Duplicate { unique: false },
+        "uniqueValues" => CondKind::Duplicate { unique: true },
+        "colorScale" => {
+            let scale = child(rule, "colorScale")?;
+            let colors: Vec<Rgb> = scale
+                .children
+                .iter()
+                .filter(|n| is(n, "color"))
+                .filter_map(|n| sheet_styles::read_color(n, theme))
+                .collect();
+            if colors.len() < 2 {
+                return Some(CondKind::Other("colorScale".into()));
+            }
+            CondKind::ColorScale(colors)
+        }
+        "dataBar" => {
+            let color = child(rule, "dataBar")
+                .and_then(|n| child(n, "color"))
+                .and_then(|n| sheet_styles::read_color(n, theme))
+                .unwrap_or(Rgb(0x638EC6));
+            CondKind::DataBar(color)
+        }
+        other => CondKind::Other(other.to_owned()),
+    })
+}
+
+#[derive(Clone, Copy)]
+struct Marker {
+    row: u32,
+    col: u32,
+    dx: f32,
+    dy: f32,
+}
+
+fn marker(n: &XmlNode) -> Option<Marker> {
+    Some(Marker {
+        row: any_child(n, "row")?.text.trim().parse().ok()?,
+        col: any_child(n, "col")?.text.trim().parse().ok()?,
+        dx: any_child(n, "colOff")
+            .and_then(|x| x.text.trim().parse::<f32>().ok())
+            .map_or(0.0, |x| x / 12700.0),
+        dy: any_child(n, "rowOff")
+            .and_then(|x| x.text.trim().parse::<f32>().ok())
+            .map_or(0.0, |x| x / 12700.0),
+    })
+}
+
+fn read_drawings(
+    package: &Package,
+    sheet_path: &str,
+    root: &XmlNode,
+    styles: &ReadStyles,
+    media: &mut Media,
+) -> Result<Vec<Anchored>, OpenError> {
+    let Some(id) = child(root, "drawing").and_then(|n| {
+        n.attr(Some(REL), "id")
+            .or_else(|| n.attr(Some(STRICT_REL), "id"))
+    }) else {
+        return Ok(Vec::new());
+    };
+    let rels = package.relationships(sheet_path)?;
+    let Some(rel) = rels
+        .iter()
+        .find(|r| r.id == id && !r.external && r.kind("drawing"))
+    else {
+        return Ok(Vec::new());
+    };
+    let part = package.part(&rel.target)?;
+    let drawing_rels = package.relationships(&rel.target)?;
+    let mut out = Vec::new();
+    for anchor in root_children(part.root()) {
+        let two = is_any(anchor, "twoCellAnchor");
+        let one = is_any(anchor, "oneCellAnchor");
+        if !two && !one {
+            continue;
+        }
+        let Some(from) = any_child(anchor, "from").and_then(marker) else {
+            continue;
+        };
+        let (to, ext) = if two {
+            (
+                any_child(anchor, "to")
+                    .and_then(marker)
+                    .map(|m| (m.row, m.col, m.dx, m.dy))
+                    .unwrap_or((from.row, from.col, from.dx, from.dy)),
+                None,
+            )
+        } else {
+            let ext = any_child(anchor, "ext").and_then(|n| {
+                Some((
+                    attr(n, "cx")?.parse::<f32>().ok()? / 12700.0,
+                    attr(n, "cy")?.parse::<f32>().ok()? / 12700.0,
+                ))
+            });
+            ((from.row, from.col, from.dx, from.dy), ext)
+        };
+        let what = if let Some(pic) = any_child(anchor, "pic") {
+            read_picture(pic, &drawing_rels, package, media).map(Drawing::Picture)
+        } else if let Some(frame) = any_child(anchor, "graphicFrame") {
+            read_chart_frame(frame, &drawing_rels, package, styles).map(Drawing::Chart)
+        } else if let Some(sp) = any_child(anchor, "sp").or_else(|| any_child(anchor, "cxnSp")) {
+            read_drawing_shape(sp, from, ext.unwrap_or((0.0, 0.0))).map(Drawing::Shape)
+        } else {
+            None
+        };
+        if let Some(what) = what {
+            out.push(Anchored {
+                from: (from.row, from.col, from.dx, from.dy),
+                to,
+                ext,
+                what,
+            });
+        }
+    }
+    Ok(out)
+}
+
+fn root_children(n: &XmlNode) -> impl Iterator<Item = &XmlNode> {
+    n.children.iter().filter(|c| {
+        is_any(c, "twoCellAnchor") || is_any(c, "oneCellAnchor") || is_any(c, "absoluteAnchor")
+    })
+}
+
+fn is_any(n: &XmlNode, name: &str) -> bool {
+    n.local_name == name
+}
+
+fn read_picture(
+    pic: &XmlNode,
+    rels: &[crate::relationships::Rel],
+    package: &Package,
+    media: &mut Media,
+) -> Option<PathBuf> {
+    let blip = pic
+        .children
+        .iter()
+        .flat_map(|n| descendant(n, "blip"))
+        .next()?;
+    let id = blip
+        .attr(Some(REL), "embed")
+        .or_else(|| blip.attr(Some(STRICT_REL), "embed"))?;
+    let target = &rels
+        .iter()
+        .find(|r| r.id == id && !r.external && r.kind("image"))?
+        .target;
+    Some(media.image(package, target).unwrap_or_default())
+}
+
+fn descendant<'a>(n: &'a XmlNode, name: &str) -> Option<&'a XmlNode> {
+    for c in &n.children {
+        if c.local_name == name {
+            return Some(c);
+        }
+        if let Some(found) = descendant(c, name) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn read_chart_frame(
+    frame: &XmlNode,
+    rels: &[crate::relationships::Rel],
+    package: &Package,
+    styles: &ReadStyles,
+) -> Option<Chart> {
+    let chart = descendant(frame, "chart")?;
+    let id = chart
+        .attr(Some(REL), "id")
+        .or_else(|| chart.attr(Some(STRICT_REL), "id"))?;
+    let target = &rels
+        .iter()
+        .find(|r| r.id == id && !r.external && r.kind("chart"))?
+        .target;
+    crate::chart::read(package, target, &styles.theme).ok()
+}
+
+fn read_drawing_shape(sp: &XmlNode, _from: Marker, ext: (f32, f32)) -> Option<Box<Shape>> {
+    let body = descendant(sp, "txBody");
+    let mut paras = Vec::new();
+    if let Some(body) = body {
+        for p in body.children.iter().filter(|n| n.local_name == "p") {
+            let mut text = String::new();
+            for r in &p.children {
+                if r.local_name == "r" {
+                    if let Some(t) = descendant(r, "t") {
+                        text.push_str(&t.text);
+                    }
+                } else if r.local_name == "br" {
+                    text.push('\n');
+                } else if r.local_name == "t" {
+                    text.push_str(&r.text);
+                }
+            }
+            let id = p.range.start as u64;
+            paras.push(Para::new(id, ParaStyle::Normal, &text));
+        }
+    }
+    if paras.is_empty() {
+        return None;
+    }
+    let mut look = ShapeLook::default();
+    if let Some(sp_pr) = any_child(sp, "spPr") {
+        if let Some(color) = any_child(sp_pr, "solidFill")
+            .and_then(|f| f.children.iter().find(|c| c.local_name == "srgbClr"))
+            .and_then(|c| hex_color(attr(c, "val").unwrap_or("")))
+        {
+            look.fill = crate::look::Fill::Solid(color, 255);
+        }
+        if let Some(line) = any_child(sp_pr, "ln")
+            && let Some(width) = attr(line, "w").and_then(|w| w.parse::<i32>().ok())
+            && let Some(color) = any_child(line, "solidFill")
+                .and_then(|f| f.children.iter().find(|c| c.local_name == "srgbClr"))
+                .and_then(|c| hex_color(attr(c, "val").unwrap_or("")))
+        {
+            look.line = Some(crate::look::Stroke {
+                width: width / 635,
+                color,
+                alpha: 255,
+                dash: Default::default(),
+                head: Default::default(),
+                tail: Default::default(),
+            });
+        }
+    }
+    Some(Box::new(Shape {
+        id: sp.range.start as u64,
+        frame: [0, 0, ext.0.round() as i32, ext.1.round() as i32],
+        paras,
+        look,
+        kind: crate::look::ShapeKind::Text,
+    }))
+}
+
+fn hex_color(s: &str) -> Option<Rgb> {
+    let s = s.trim();
+    let s = if s.len() == 8 { &s[2..] } else { s };
+    (s.len() == 6)
+        .then(|| u32::from_str_radix(s, 16).ok().map(Rgb))
+        .flatten()
+}
+
 fn element_payload(xml: &XmlPart, node: &XmlNode) -> Result<std::ops::Range<usize>, OpenError> {
     let bytes = &xml.bytes()[node.range.clone()];
     let e = start_end(bytes)?;
@@ -977,6 +1976,7 @@ fn rewrite_cell(
     }
     Ok(splice(xml, n.range.clone(), &out))
 }
+#[allow(dead_code)]
 fn read_bold(root: &XmlNode) -> Vec<bool> {
     let fonts: Vec<bool> = child(root, "fonts")
         .into_iter()
@@ -1000,6 +2000,7 @@ fn read_bold(root: &XmlNode) -> Vec<bool> {
         .collect()
 }
 
+#[allow(dead_code)]
 fn read_formats(root: &XmlNode) -> Vec<String> {
     let custom: HashMap<u32, &str> = child(root, "numFmts")
         .into_iter()
@@ -1040,6 +2041,7 @@ fn read_formats(root: &XmlNode) -> Vec<String> {
         })
         .collect()
 }
+#[allow(dead_code)]
 fn date_format(f: &str) -> bool {
     matches!(
         f.to_ascii_lowercase().as_str(),
@@ -1055,6 +2057,7 @@ fn date_format(f: &str) -> bool {
             | "yyyy\"年\"m\"月\"d\"日\""
     )
 }
+#[allow(dead_code)]
 fn format_number(n: f64, f: &str) -> String {
     let (pattern, pre, suffix) = if f.starts_with(['¥', '￥', '€', '£', '$']) {
         let i = f.chars().next().unwrap().len_utf8();
@@ -1122,6 +2125,7 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let doy = (153 * mp + 2) / 5 + d - 1;
     era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468
 }
+#[allow(dead_code)]
 fn date_serial(s: &str, date1904: bool) -> Option<f64> {
     let cleaned = s.replace(['年', '月'], "-").replace('日', "");
     let mut parts = cleaned.split('-');
@@ -1152,6 +2156,7 @@ fn date_serial(s: &str, date1904: bool) -> Option<f64> {
         }) as f64,
     )
 }
+#[allow(dead_code)]
 fn format_date(n: f64, f: &str, date1904: bool) -> String {
     if !n.is_finite() || !(0.0..=2_958_465.0).contains(&n) {
         return n.to_string();
