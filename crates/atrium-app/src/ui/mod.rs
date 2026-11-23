@@ -14,6 +14,7 @@ mod memory;
 mod motion;
 mod overview;
 mod pages;
+mod team;
 pub use grid::bind_keys as bind_grid_keys;
 pub use pages::bind_keys as bind_page_keys;
 mod preview;
@@ -173,6 +174,7 @@ enum Overlay {
     Settings {
         codex_path: Entity<TextInput>,
         node_address: Entity<TextInput>,
+        team_notes: Vec<(String, Entity<TextInput>)>,
     },
     Rename {
         thread_id: String,
@@ -712,9 +714,11 @@ impl RootView {
         let node_address = cx.new(|cx| {
             TextInput::new(window, cx).placeholder(t("Add a node by address, such as studio:7381"))
         });
+        let team_notes = team::note_inputs(self, window, cx);
         self.overlay = Some(Overlay::Settings {
             codex_path,
             node_address,
+            team_notes,
         });
         cx.notify();
     }
@@ -939,9 +943,11 @@ impl RootView {
         &self,
         codex_path: &Entity<TextInput>,
         node_address: &Entity<TextInput>,
+        team_notes: &[(String, Entity<TextInput>)],
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let agents = self.agents_list(cx);
+        let team = self.team_section(team_notes, cx);
         let devices = div()
             .flex()
             .flex_col()
@@ -1049,7 +1055,12 @@ impl RootView {
             ],
         );
         let close = cx.entity();
-        let save = (cx.entity(), self.workspace.clone(), codex_path.clone());
+        let save = (
+            cx.entity(),
+            self.workspace.clone(),
+            codex_path.clone(),
+            team_notes.to_vec(),
+        );
         Dialog::new("settings", t("Settings"), move |window, cx| {
             close.update(cx, |this, cx| this.close_overlay(window, cx))
         })
@@ -1144,6 +1155,11 @@ impl RootView {
                     skills,
                 ))
                 .child(section(
+                    t("Team"),
+                    t("In a project, the controller picks who does each task from these notes; edit them as models change. When one's usage limit is hit, its stand-in takes its tasks until it resets. A project can have its own .atrium/team.toml."),
+                    team,
+                ))
+                .child(section(
                     t("Agents"),
                     t("Claude Code, DeepSeek Harness and Antigravity run over the Agent Client Protocol. Set a command per agent with `agent_commands` in settings.json."),
                     agents,
@@ -1200,10 +1216,11 @@ impl RootView {
                 .on_click(move |_, window, cx| close(window, cx))
         })
         .action(move |close| {
-            let (root, workspace, field) = save;
+            let (root, workspace, field, notes) = save;
             Button::new("settings-save", t("Save"))
                 .primary()
                 .on_click(move |_, window, cx| {
+                    team::save_notes(&workspace, &notes, cx);
                     let text = field.read(cx).text().trim().to_string();
                     let path = (!text.is_empty()).then(|| std::path::PathBuf::from(text));
                     workspace.update(cx, |ws, cx| ws.set_codex_binary(path, cx));
@@ -1334,9 +1351,11 @@ impl Render for RootView {
             Some(Overlay::Settings {
                 codex_path,
                 node_address,
+                team_notes,
             }) => {
-                let (codex_path, node_address) = (codex_path.clone(), node_address.clone());
-                Some(self.settings_dialog(&codex_path, &node_address, cx))
+                let (codex_path, node_address, team_notes) =
+                    (codex_path.clone(), node_address.clone(), team_notes.clone());
+                Some(self.settings_dialog(&codex_path, &node_address, &team_notes, cx))
             }
             Some(Overlay::NewStream {
                 name,

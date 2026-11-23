@@ -50,6 +50,8 @@ mod schedules;
 mod sync;
 #[path = "workspace_sync_view.rs"]
 mod sync_view;
+#[path = "workspace_team.rs"]
+pub mod team;
 #[path = "workspace_updates.rs"]
 mod updates;
 #[path = "workspace_workflow_runner.rs"]
@@ -239,6 +241,8 @@ pub struct Workspace {
     _workflow_ticker: Option<Task<()>>,
     /// The shared memory: what sessions got, what was handed on.
     pub shared_memory: memory::MemoryState,
+    /// Which models a project's controller can hand work to.
+    pub team: team::TeamState,
     /// A newer Atrium, when one is out.
     pub update: Option<crate::updates::Update>,
     pub goals: HashMap<String, Goal>,
@@ -373,6 +377,7 @@ impl Workspace {
             workflow_reattaching: HashSet::new(),
             _workflow_ticker: None,
             shared_memory: Default::default(),
+            team: team::TeamState::load(),
             update: None,
             goals: HashMap::new(),
             memory_off: HashSet::new(),
@@ -580,6 +585,17 @@ impl Workspace {
                 let limits = self.rate_limits.get_or_insert_with(RateLimits::default);
                 let was_reached = limits.reached;
                 limits.merge(update.clone());
+                let (reached, resets_at) = (
+                    limits.reached,
+                    [limits.primary, limits.secondary]
+                        .into_iter()
+                        .flatten()
+                        .filter(|w| w.used_percent >= 100.0 || limits.reached)
+                        .filter_map(|w| w.resets_at)
+                        .max(),
+                );
+                self.team_limit(CODEX, reached, resets_at);
+                let limits = self.rate_limits.get_or_insert_with(RateLimits::default);
                 if limits.reached && !was_reached {
                     cx.emit(Notice::Error(
                         t("Usage limit reached. It resets soon; see Usage.").into(),

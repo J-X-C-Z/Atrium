@@ -15,8 +15,8 @@ existing functions to call, the tests to write and when it is done.
 
 ## Backlog
 
-**Next up: 14**, then 15, 16, 17 — Word, PowerPoint and Excel shown and
-edited as their apps show them. Real-device acceptance (multi-device items 12/13 and workflow W1 in
+**Next up: 18** (the team), then 14, 15, 16, 17 — Word, PowerPoint and
+Excel shown and edited as their apps show them. Real-device acceptance (multi-device items 12/13 and workflow W1 in
 `docs/backend-acceptance-matrix.md`) is run by the owner on real machines;
 do not mark it done from mocks.
 
@@ -39,6 +39,7 @@ do not mark it done from mocks.
 | 15 | **Layout engine** (`atrium-layout` API, navigation and a reference engine built; the page editor on the UI side): lay documents out as Word does — line breaking with Chinese rules, justification, tabs, line spacing and grid, keeps and widows, sections and columns, tables across pages, floating pictures, footnotes — and relayout fast enough for typing. Five PRs, 15a–15e | [`docs/layout-engine-implementation.md`](docs/layout-engine-implementation.md) | 14 |
 | 16 | **Slides in full** (`ShapeLook` fill/stroke/path/shadow, `ShapeKind`, `Chart`, `Item::Path`/`Gradient` and their painting built): every shape in z-order with group transforms, preset and custom outlines, gradient and picture fills, lines with dashes and arrows, theme style references, backgrounds and master graphics; slide tables with table styles; charts drawn from cached values; SmartArt from its drawing part; rotation. Four PRs, 16a–16d | [`docs/slides-sheets-implementation.md`](docs/slides-sheets-implementation.md) | 14c, 15a |
 | 17 | **Sheets in full** (`CellStyle`, `Workbook::styles`, `Cell::style`, `SheetLook`, conditional rules, `SheetOp::SetStyle`, `Workbook::shown` built; the grid on the UI side): read cell styles, number formats, column widths, row heights, hidden rows/columns, frozen panes, conditional formats and drawings; show values through their number formats and conditional rules; write formatting, sizes and panes back. Three PRs, 17a–17c | [`docs/slides-sheets-implementation.md`](docs/slides-sheets-implementation.md) | 16c for charts |
+| 18 | **Teams** (`atrium-team`, the settings page and Codex's limit hook built): give the controller and leads the team roster, start tasks on a stand-in while a member's limit is hit or it cannot start, mark ACP agents' limits from failed turns, and tell a parent when its worker goes in circles. Small on purpose: no routing rules in code | [`docs/team-implementation.md`](docs/team-implementation.md) | 1, 3 |
 
 Do one item per pull request. In each PR, tick its row here (add "✓ done in
 #N") and list which of the brief's tests and end-to-end checks you ran.
@@ -56,6 +57,7 @@ crates/atrium-project   projects, no GPUI: files, roles, tasks and roadmaps (lib
                         the agent skill (skill.rs, text in skills/atrium/SKILL.md)
 crates/atrium-office    Word/Excel/PowerPoint model, looks (look.rs) and the lossless file binding
 crates/atrium-layout    pages from the model: lines, items, caret and hit testing (no GPUI)
+crates/atrium-team      the team: members and notes, stand-ins, limits, the roster, the watch
 crates/atrium-app       the GPUI app; Workspace state and backend calls in
                         workspace*.rs (projects: workspace_project.rs); UI in ui/
 ```

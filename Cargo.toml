@@ -16,6 +16,7 @@ members = [
     "crates/atrium-preview",
     "crates/atrium-workflow",
     "crates/atrium-memory",
+    "crates/atrium-team",
     "crates/atrium-app",
 ]
 
@@ -53,6 +54,7 @@ atrium-office = { path = "crates/atrium-office" }
 atrium-layout = { path = "crates/atrium-layout" }
 atrium-preview = { path = "crates/atrium-preview" }
 atrium-memory = { path = "crates/atrium-memory" }
+atrium-team = { path = "crates/atrium-team" }
 atrium-workflow = { path = "crates/atrium-workflow" }
 
 # UI stack. GPUI Kit 0.7.1 and Ely both pin the gpui-pre 0.3.8 snapshot:

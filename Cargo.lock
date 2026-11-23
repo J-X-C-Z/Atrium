@@ -621,6 +621,7 @@ dependencies = [
  "atrium-preview",
  "atrium-project",
  "atrium-sync",
+ "atrium-team",
  "atrium-workflow",
  "base64 0.22.1",
  "codex-client",
@@ -786,6 +787,15 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "ureq",
+]
+
+[[package]]
+name = "atrium-team"
+version = "0.1.0"
+dependencies = [
+ "glob",
+ "serde",
+ "toml 0.8.23",
 ]
 
 [[package]]
