@@ -1,7 +1,7 @@
 use atrium_office::look::{
     Baseline, LineSpacing, PageLook, ParaLook, Section, TabKind, TabStop, TableLook,
 };
-use atrium_office::{Align, Block, Inline, Marks, Para, ParaStyle, Table, WordDoc};
+use atrium_office::{Align, Atom, AtomKind, Block, Inline, Marks, Para, ParaStyle, Table, WordDoc};
 
 use crate::{FixedShaper, Item, Pos, layout};
 
@@ -455,4 +455,343 @@ fn underline_and_highlight_are_drawn() {
         i,
         Item::Fill { color, .. } if *color == atrium_office::look::Rgb(0xFFFF00)
     )));
+}
+
+fn looked(blocks: Vec<Block>, sections: Vec<Section>) -> WordDoc {
+    WordDoc::from_blocks(blocks).with_look(
+        sections,
+        Marks {
+            size: Some(200),
+            ..Default::default()
+        },
+    )
+}
+
+fn one_section(width: i32, height: i32) -> Vec<Section> {
+    vec![Section {
+        page: PageLook {
+            width,
+            height,
+            top: 0,
+            bottom: 0,
+            left: 0,
+            right: 0,
+            header: 0,
+            footer: 0,
+            ..Default::default()
+        },
+        new_page: true,
+        ..Default::default()
+    }]
+}
+
+#[test]
+fn paragraph_spacing_adds_and_contextual_spacing_collapses_it() {
+    let mut first = plain(1, "字");
+    first.look.after = 240;
+    let mut second = plain(2, "字");
+    second.look.before = 160;
+    let out = layout(
+        &looked(
+            vec![
+                Block::Paragraph(first.clone()),
+                Block::Paragraph(second.clone()),
+            ],
+            one_section(2000, 2000),
+        ),
+        &FixedShaper,
+    );
+    assert!(close(out.lines[1].top, 30.0));
+
+    second.look.contextual = true;
+    let out = layout(
+        &looked(
+            vec![Block::Paragraph(first), Block::Paragraph(second)],
+            one_section(2000, 2000),
+        ),
+        &FixedShaper,
+    );
+    assert!(close(out.lines[1].top, 10.0));
+}
+
+#[test]
+fn space_before_is_dropped_at_the_top_of_a_page_but_not_the_first_page() {
+    let mut first = plain(1, "一字");
+    first.look.before = 200;
+    let out = layout(
+        &looked(vec![Block::Paragraph(first)], one_section(2000, 20000)),
+        &FixedShaper,
+    );
+    assert!(close(out.lines[0].top, 10.0));
+
+    let mut early = plain(1, "一二三四");
+    early.look.before = 0;
+    let mut later = plain(2, "五");
+    later.look.before = 400;
+    let out = layout(
+        &looked(
+            vec![Block::Paragraph(early), Block::Paragraph(later)],
+            one_section(400, 500),
+        ),
+        &FixedShaper,
+    );
+    assert_eq!(out.pages.len(), 2);
+    let line = out.lines.iter().find(|l| l.para == 2).unwrap();
+    assert!(close(line.top, 0.0));
+}
+
+#[test]
+fn keep_next_moves_a_heading_with_its_first_body_line() {
+    let mut heading = plain(2, "标题");
+    heading.look.keep_next = true;
+    let out = layout(
+        &looked(
+            vec![
+                Block::Paragraph(plain(1, "一二三四五六")),
+                Block::Paragraph(heading),
+                Block::Paragraph(plain(3, "一二三四")),
+            ],
+            one_section(400, 600),
+        ),
+        &FixedShaper,
+    );
+    let heading_line = out.lines.iter().find(|l| l.para == 2).unwrap();
+    let body_line = out.lines.iter().find(|l| l.para == 3).unwrap();
+    assert_eq!(heading_line.page, 1,);
+    assert_eq!(body_line.page, 1);
+}
+
+#[test]
+fn keep_lines_moves_a_paragraph_whole() {
+    let mut whole = plain(2, "五六七八九");
+    whole.look.keep_lines = true;
+    let out = layout(
+        &looked(
+            vec![
+                Block::Paragraph(plain(1, "一二三四")),
+                Block::Paragraph(whole),
+            ],
+            one_section(400, 800),
+        ),
+        &FixedShaper,
+    );
+    let pages: Vec<usize> = out
+        .lines
+        .iter()
+        .filter(|l| l.para == 2)
+        .map(|l| l.page)
+        .collect();
+    assert_eq!(pages, [1, 1, 1]);
+}
+
+#[test]
+fn widow_control_leaves_two_lines_at_the_bottom_and_two_at_the_top() {
+    let mut long = plain(2, "一二三四五六七八");
+    long.look.widow_control = true;
+    let out = layout(
+        &looked(
+            vec![Block::Paragraph(plain(1, "字")), Block::Paragraph(long)],
+            one_section(400, 800),
+        ),
+        &FixedShaper,
+    );
+    let pages: Vec<usize> = out
+        .lines
+        .iter()
+        .filter(|l| l.para == 2)
+        .map(|l| l.page)
+        .collect();
+    assert_eq!(pages, [0, 0, 1, 1]);
+}
+
+#[test]
+fn page_break_before_starts_a_page() {
+    let mut p = plain(2, "字");
+    p.look.page_break_before = true;
+    let out = layout(
+        &looked(
+            vec![Block::Paragraph(plain(1, "字")), Block::Paragraph(p)],
+            one_section(2000, 20000),
+        ),
+        &FixedShaper,
+    );
+    assert_eq!(out.pages.len(), 2);
+    assert_eq!(out.lines[1].page, 1);
+}
+
+#[test]
+fn a_continuous_section_stays_on_the_page() {
+    let mut sections = one_section(2000, 20000);
+    sections[0].last_block = Some(1);
+    let mut second = Section {
+        page: sections[0].page.clone(),
+        new_page: false,
+        ..Default::default()
+    };
+    second.last_block = None;
+    sections.push(second);
+    let out = layout(
+        &looked(
+            vec![
+                Block::Paragraph(plain(1, "字")),
+                Block::Paragraph(plain(2, "字")),
+            ],
+            sections,
+        ),
+        &FixedShaper,
+    );
+    assert_eq!(out.pages.len(), 1);
+    assert!(close(out.lines[1].top, 10.0));
+}
+
+#[test]
+fn columns_fill_down_then_across() {
+    let mut sections = one_section(2000, 400);
+    sections[0].page.columns = 2;
+    sections[0].page.column_gap = 0;
+    let out = layout(
+        &looked(
+            vec![
+                Block::Paragraph(plain(1, "一")),
+                Block::Paragraph(plain(2, "二")),
+                Block::Paragraph(plain(3, "三")),
+            ],
+            sections,
+        ),
+        &FixedShaper,
+    );
+    assert_eq!(out.pages.len(), 1);
+    assert_eq!(out.lines[2].page, 0);
+    assert!(out.lines[2].stops[0].1 >= 49.0);
+    assert!(close(out.lines[2].top, 0.0));
+}
+
+#[test]
+fn a_different_first_page_uses_the_first_header() {
+    let header = vec![Block::Paragraph(plain(10, "正文"))];
+    let first = vec![Block::Paragraph(plain(11, "首页"))];
+    let mut sections = one_section(2000, 200);
+    sections[0].header = Some(header);
+    sections[0].first_header = Some(first);
+    sections[0].title_page = true;
+    let out = layout(
+        &looked(
+            vec![
+                Block::Paragraph(plain(1, "字")),
+                Block::Paragraph(plain(2, "字")),
+            ],
+            sections,
+        ),
+        &FixedShaper,
+    );
+    assert_eq!(out.pages.len(), 2);
+    let has = |page: usize, text: &str| {
+        out.pages[page].items.iter().any(|i| {
+            matches!(
+                i,
+                Item::Text { text: t, .. } if t == text
+            )
+        })
+    };
+    assert!(has(0, "首页"));
+    assert!(has(1, "正文"));
+}
+
+#[test]
+fn page_and_num_pages_fields_show_the_page_numbers() {
+    let field = |id, code: &str| {
+        Inline::Atom(Atom {
+            id,
+            kind: AtomKind::Field(code.into()),
+            look: Default::default(),
+        })
+    };
+    let header = vec![Block::Paragraph(Para {
+        id: 10,
+        style: ParaStyle::Normal,
+        align: Align::Left,
+        inlines: vec![
+            field(11, "PAGE"),
+            Inline::Text {
+                text: "/".into(),
+                marks: Marks::default(),
+            },
+            field(12, "NUMPAGES"),
+        ],
+        locked: false,
+        look: ParaLook::default(),
+    })];
+    let mut sections = one_section(2000, 200);
+    sections[0].header = Some(header);
+    let out = layout(
+        &looked(
+            vec![
+                Block::Paragraph(plain(1, "字")),
+                Block::Paragraph(plain(2, "字")),
+            ],
+            sections,
+        ),
+        &FixedShaper,
+    );
+    assert_eq!(out.pages.len(), 2);
+    let text = |page: usize| -> String {
+        out.pages[page]
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    assert!(text(0).contains('1'));
+    assert!(text(0).contains('2'));
+    assert!(text(1).contains('2'));
+}
+
+#[test]
+fn a_taller_header_moves_the_body_down() {
+    let header = vec![Block::Paragraph(plain(10, "一二三"))];
+    let mut sections = one_section(200, 2000);
+    sections[0].page.top = 200;
+    sections[0].page.header = 0;
+    sections[0].header = Some(header);
+    let out = layout(
+        &looked(vec![Block::Paragraph(plain(1, "字"))], sections),
+        &FixedShaper,
+    );
+    let body = out.lines.iter().find(|l| l.para == 1).unwrap();
+    assert!(close(body.top, 30.0));
+}
+
+#[test]
+fn a_section_can_restart_page_numbers() {
+    let mut sections = one_section(2000, 200);
+    sections[0].last_block = Some(2);
+    sections[0].new_page = true;
+    let mut second = Section {
+        page: sections[0].page.clone(),
+        new_page: true,
+        page_start: Some(5),
+        ..Default::default()
+    };
+    second.last_block = None;
+    sections.push(second);
+    let out = layout(
+        &looked(
+            vec![
+                Block::Paragraph(plain(1, "一")),
+                Block::Paragraph(plain(2, "二")),
+                Block::Paragraph(plain(3, "三")),
+                Block::Paragraph(plain(4, "四")),
+            ],
+            sections,
+        ),
+        &FixedShaper,
+    );
+    assert_eq!(out.pages.len(), 4);
+    assert_eq!(
+        out.pages.iter().map(|p| p.number).collect::<Vec<_>>(),
+        [1, 2, 5, 6]
+    );
 }

@@ -216,247 +216,442 @@ fn chinese(n: u32, legal: bool) -> String {
     }
 }
 
-/// Where the next line goes while filling pages.
-struct Cursor {
-    layout: Layout,
-    section: usize,
-    page: Option<usize>,
-    y: f32,
-    top: f32,
-    bottom: f32,
-    left: f32,
-    /// Each page's section, for headers and footers.
-    sections: Vec<usize>,
+struct Furniture {
+    page: usize,
+    items: Vec<Item>,
+    lines: Vec<Line>,
 }
 
-impl Cursor {
-    fn new_page(&mut self, sections: &[Section]) {
-        let s = &sections[self.section].page;
-        self.layout.pages.push(Page {
-            width: pt(s.width),
-            height: pt(s.height),
-            number: 0,
-            background: None,
-            items: Vec::new(),
-        });
-        self.sections.push(self.section);
-        self.page = Some(self.layout.pages.len() - 1);
-        self.top = pt(s.top);
-        self.bottom = pt(s.height - s.bottom);
-        self.left = pt(s.left + s.gutter);
-        self.y = self.top;
+struct Flow<'a, 'b> {
+    cx: &'a mut Ctx<'b>,
+    sections: Vec<Section>,
+    layout: Layout,
+    furniture: Vec<Furniture>,
+    section: usize,
+    page: usize,
+    column: usize,
+    y: f32,
+    body_top: f32,
+    body_bottom: f32,
+    area_left: f32,
+    area_width: f32,
+    col_width: f32,
+    columns: usize,
+    header_h: f32,
+    footer_h: f32,
+    number: u32,
+    last_section: usize,
+    first_in_section: Vec<bool>,
+    last_after: f32,
+    last_after_at: Option<(usize, usize)>,
+    last_style: Option<atrium_office::ParaStyle>,
+}
+
+impl Flow<'_, '_> {
+    fn column_left(&self, column: usize) -> f32 {
+        let gap = pt(self.sections[self.section].page.column_gap);
+        self.area_left + column as f32 * (self.col_width + gap)
     }
 
     fn at_top(&self) -> bool {
-        self.y <= self.top + 0.01
+        self.y <= self.body_top + 0.01
     }
 
-    fn place(&mut self, line: Laid, sections: &[Section]) {
-        if self.y + line.height > self.bottom && !self.at_top() {
-            self.new_page(sections);
+    fn at_page_top(&self) -> bool {
+        self.column == 0 && self.at_top()
+    }
+
+    fn geometry(&mut self) {
+        let p = &self.sections[self.section].page;
+        self.area_left = pt(p.left + p.gutter);
+        self.area_width = pt(p.width - p.left - p.right - p.gutter);
+        self.columns = p.columns.max(1) as usize;
+        let gap = pt(p.column_gap);
+        self.col_width =
+            ((self.area_width - gap * (self.columns - 1) as f32) / self.columns as f32).max(1.0);
+    }
+
+    fn furniture(
+        &mut self,
+        blocks: &[atrium_office::Block],
+        page: usize,
+        left: f32,
+        top: f32,
+    ) -> f32 {
+        let (placed, extra, height) = lines::stack(self.cx, blocks, self.area_width);
+        let mut items: Vec<Item> = extra.iter().map(|i| translate(i, left, top)).collect();
+        let mut lines = Vec::new();
+        for (ly, line) in placed {
+            items.extend(line.items.iter().map(|i| translate(i, left, top + ly)));
+            lines.push(Line {
+                page,
+                para: line.para,
+                range: line.range,
+                top: top + ly,
+                height: line.height,
+                baseline: top + ly + line.baseline,
+                stops: line.stops.iter().map(|(o, x)| (*o, x + left)).collect(),
+                furniture: true,
+            });
         }
-        let page = self.page.unwrap_or(0);
-        let (dx, dy) = (self.left, self.y);
-        let items = line.items.iter().map(|i| translate(i, dx, dy));
-        self.layout.pages[page].items.extend(items);
+        self.furniture.push(Furniture { page, items, lines });
+        height
+    }
+
+    fn start_page(&mut self) {
+        let s = self.section;
+        let section = self.sections[s].clone();
+        let p = section.page.clone();
+        self.number = if s != self.last_section {
+            section.page_start.unwrap_or(self.number + 1)
+        } else {
+            self.number + 1
+        };
+        self.last_section = s;
+        let first = if s < self.first_in_section.len() {
+            std::mem::replace(&mut self.first_in_section[s], false)
+        } else {
+            false
+        };
+        let (header, footer) = if first && section.title_page {
+            (
+                section.first_header.as_deref(),
+                section.first_footer.as_deref(),
+            )
+        } else {
+            (section.header.as_deref(), section.footer.as_deref())
+        };
+        let index = self.layout.pages.len();
+        self.layout.pages.push(Page {
+            width: pt(p.width),
+            height: pt(p.height),
+            number: self.number,
+            section: s,
+            background: None,
+            items: Vec::new(),
+        });
+        self.page = index;
+        self.column = 0;
+        self.last_after = 0.0;
+        self.last_after_at = None;
+        self.geometry();
+        self.cx.page_number = self.number;
+        let save = std::mem::take(&mut self.cx.counters);
+        let header_top = pt(p.header);
+        self.header_h = header
+            .map(|blocks| self.furniture(blocks, index, self.area_left, header_top))
+            .unwrap_or(0.0);
+        let footer_bottom = pt(p.height - p.footer);
+        self.footer_h = footer
+            .map(|blocks| self.furniture(blocks, index, self.area_left, footer_bottom))
+            .unwrap_or(0.0);
+        // The footer is drawn upwards from its distance to the page's bottom.
+        if self.footer_h > 0.0
+            && let Some(last) = self.furniture.last_mut()
+            && last.page == index
+        {
+            for item in &mut last.items {
+                *item = translate(item, 0.0, -self.footer_h);
+            }
+            for line in &mut last.lines {
+                line.top -= self.footer_h;
+                line.baseline -= self.footer_h;
+            }
+        }
+        self.cx.counters = save;
+        self.body_top = if header.is_some() {
+            pt(p.top).max(header_top + self.header_h)
+        } else {
+            pt(p.top)
+        };
+        self.body_bottom = if footer.is_some() {
+            pt(p.height - p.bottom).min(footer_bottom - self.footer_h)
+        } else {
+            pt(p.height - p.bottom)
+        };
+        if self.body_bottom <= self.body_top {
+            self.body_bottom = pt(p.height - p.bottom);
+        }
+        self.y = self.body_top;
+    }
+
+    fn next_column(&mut self) {
+        if self.column + 1 < self.columns {
+            self.column += 1;
+            self.y = self.body_top;
+            self.last_after = 0.0;
+            self.last_after_at = None;
+        } else {
+            self.start_page();
+        }
+    }
+
+    fn add_line(&mut self, page: usize, x: f32, y: f32, line: Laid, shading: Option<Rgb>) {
+        if let Some(color) = shading {
+            self.layout.pages[page].items.insert(
+                0,
+                Item::Fill {
+                    rect: Rect {
+                        x,
+                        y,
+                        width: self.col_width,
+                        height: line.height,
+                    },
+                    color,
+                },
+            );
+        }
+        self.layout.pages[page]
+            .items
+            .extend(line.items.iter().map(|i| translate(i, x, y)));
         self.layout.lines.push(Line {
             page,
             para: line.para,
             range: line.range,
-            top: dy,
+            top: y,
             height: line.height,
-            baseline: dy + line.baseline,
-            stops: line.stops.iter().map(|(o, x)| (*o, x + dx)).collect(),
+            baseline: y + line.baseline,
+            stops: line.stops.iter().map(|(o, sx)| (*o, sx + x)).collect(),
             furniture: false,
         });
-        self.y += line.height;
     }
+
+    fn place_line(&mut self, line: Laid, shading: Option<Rgb>) {
+        if self.y + line.height > self.body_bottom + 0.01 && self.y > self.body_top + 0.01 {
+            self.next_column();
+        }
+        let page = self.page;
+        let x = self.column_left(self.column);
+        let y = self.y;
+        let height = line.height;
+        self.add_line(page, x, y, line, shading);
+        self.y += height;
+    }
+
+    /// How many of the lines fit in the remaining space.
+    fn fit_count(&self, lines: &[Laid], before: f32) -> usize {
+        let mut y = self.y + before;
+        let mut fit = 0;
+        for line in lines {
+            if y + line.height > self.body_bottom + 0.01 {
+                break;
+            }
+            y += line.height;
+            fit += 1;
+        }
+        fit
+    }
+
+    fn first_line_height(&mut self, p: &atrium_office::Para, width: f32) -> f32 {
+        let counters = self.cx.counters.clone();
+        let footnotes = self.cx.footnote_number;
+        let out = lines::para(self.cx, p, width, false);
+        self.cx.counters = counters;
+        self.cx.footnote_number = footnotes;
+        out.lines.first().map(|l| l.height).unwrap_or(0.0)
+    }
+
+    fn paragraph(&mut self, p: &atrium_office::Para, next: Option<&atrium_office::Block>) {
+        let width = self.col_width;
+        let b = lines::para(self.cx, p, width, false);
+        if b.page_break_before && !self.at_page_top() {
+            self.start_page();
+        }
+        let total: f32 = b.lines.iter().map(|l| l.height).sum();
+        let body_height = self.body_bottom - self.body_top;
+        let next_first = if b.keep_next {
+            match next {
+                Some(atrium_office::Block::Paragraph(n)) => self.first_line_height(n, width),
+                _ => 0.0,
+            }
+        } else {
+            0.0
+        };
+        let mut lines = b.lines;
+        loop {
+            let contextual = b.contextual && self.last_style.as_ref() == Some(&p.style);
+            if contextual && self.last_after_at == Some((self.page, self.column)) {
+                self.y = (self.y - self.last_after).max(self.body_top);
+                self.last_after = 0.0;
+                self.last_after_at = None;
+            }
+            let mut before = b.before;
+            if self.at_top() && !(self.page == 0 && self.column == 0) {
+                before = 0.0;
+            }
+            if contextual {
+                before = 0.0;
+            }
+            let mut fit = self.fit_count(&lines, before);
+            if fit < lines.len() {
+                if b.keep_lines && total <= body_height && !self.at_top() {
+                    self.next_column();
+                    continue;
+                }
+                if b.widow_control {
+                    if fit == 1 {
+                        fit = 0;
+                    }
+                    if lines.len() - fit < 2 {
+                        fit = lines.len().saturating_sub(2);
+                    }
+                    if fit < 2 {
+                        fit = 0;
+                    }
+                }
+                if fit == 0 {
+                    if self.at_top() {
+                        fit = 1;
+                    } else {
+                        self.next_column();
+                        continue;
+                    }
+                }
+            }
+            if b.keep_next
+                && fit == lines.len()
+                && next_first > 0.0
+                && self.y + before + total + next_first > self.body_bottom + 0.01
+                && total <= body_height
+                && !self.at_top()
+            {
+                self.next_column();
+                continue;
+            }
+            self.y += before;
+            let take = fit.min(lines.len());
+            for line in lines.drain(..take) {
+                self.place_line(line, b.shading);
+            }
+            if lines.is_empty() {
+                break;
+            }
+            self.next_column();
+        }
+        self.last_after = b.after;
+        self.last_after_at = Some((self.page, self.column));
+        self.y += b.after;
+        self.last_style = Some(p.style.clone());
+    }
+
+    fn table(&mut self, t: &atrium_office::Table) {
+        let width = self.col_width;
+        let (rows, _, _) = table::table(self.cx, t, width);
+        for row in rows {
+            let h = row.height;
+            if self.y + h > self.body_bottom + 0.01 && !self.at_top() {
+                self.next_column();
+            }
+            let page = self.page;
+            let x = self.column_left(self.column);
+            let y = self.y;
+            for (ly, line) in row.lines {
+                self.add_line(page, x, y + ly, line, None);
+            }
+            for item in row.items {
+                let moved = translate(&item, x, y - row.y);
+                let page_items = &mut self.layout.pages[page].items;
+                if matches!(moved, Item::Fill { .. }) {
+                    page_items.insert(0, moved);
+                } else {
+                    page_items.push(moved);
+                }
+            }
+            self.y += h;
+        }
+        self.last_style = None;
+        self.last_after = 0.0;
+        self.last_after_at = None;
+    }
+}
+
+fn document_pass(doc: &WordDoc, shaper: &dyn Shaper, pages_total: u32) -> Layout {
+    let sections = doc.sections().into_owned();
+    let mut cx = Ctx::new(shaper, doc.defaults(), BODY_PT, doc.default_tab_stop());
+    cx.pages_total = pages_total;
+    let mut flow = Flow {
+        cx: &mut cx,
+        first_in_section: vec![true; sections.len()],
+        sections,
+        layout: Layout::default(),
+        furniture: Vec::new(),
+        section: 0,
+        page: 0,
+        column: 0,
+        y: 0.0,
+        body_top: 0.0,
+        body_bottom: 0.0,
+        area_left: 0.0,
+        area_width: 0.0,
+        col_width: 0.0,
+        columns: 1,
+        header_h: 0.0,
+        footer_h: 0.0,
+        number: 0,
+        last_section: usize::MAX,
+        last_after: 0.0,
+        last_after_at: None,
+        last_style: None,
+    };
+    flow.start_page();
+    let blocks = doc.blocks();
+    for (i, block) in blocks.iter().enumerate() {
+        flow.cx.line_pitch = flow.sections[flow.section].page.line_pitch.map(pt);
+        match block {
+            atrium_office::Block::Paragraph(p) => {
+                flow.paragraph(p, blocks.get(i + 1));
+            }
+            atrium_office::Block::Table(t) => flow.table(t),
+            atrium_office::Block::Opaque { .. } => {}
+        }
+        if let Some(last) = flow.sections[flow.section].last_block
+            && last == block.id()
+            && flow.section + 1 < flow.sections.len()
+        {
+            let next = flow.section + 1;
+            if flow.sections[next].new_page {
+                flow.section = next;
+                flow.start_page();
+            } else {
+                flow.section = next;
+                if let Some(start) = flow.sections[next].page_start {
+                    flow.number = start;
+                    flow.layout.pages[flow.page].number = start;
+                }
+                flow.last_section = next;
+                flow.geometry();
+                let p = &flow.sections[next].page;
+                flow.body_top = flow.body_top.max(pt(p.top));
+                flow.body_bottom =
+                    pt(p.height - p.bottom).min(pt(p.height - p.footer) - flow.footer_h);
+                flow.y = flow.y.max(flow.body_top);
+                if flow.y >= flow.body_bottom {
+                    flow.next_column();
+                }
+            }
+        }
+    }
+    let mut layout = flow.layout;
+    for f in flow.furniture {
+        if let Some(page) = layout.pages.get_mut(f.page) {
+            page.items.extend(f.items);
+        }
+        layout.lines.extend(f.lines);
+    }
+    layout
 }
 
 pub(crate) fn document(doc: &WordDoc, shaper: &dyn Shaper) -> Layout {
-    let sections = doc.sections().into_owned();
-    let mut cx = Ctx::new(shaper, doc.defaults(), BODY_PT, doc.default_tab_stop());
-    let mut cur = Cursor {
-        layout: Layout::default(),
-        section: 0,
-        page: None,
-        y: 0.0,
-        top: 0.0,
-        bottom: 0.0,
-        left: 0.0,
-        sections: Vec::new(),
-    };
-    cur.new_page(&sections);
-    for block in doc.blocks() {
-        let s = &sections[cur.section].page;
-        let width = pt(s.width - s.left - s.right - s.gutter);
-        cx.line_pitch = sections[cur.section].page.line_pitch.map(pt);
-        match block {
-            atrium_office::Block::Paragraph(p) => {
-                let b = lines::para(&mut cx, p, width, false);
-                if b.page_break_before && !cur.at_top() {
-                    cur.new_page(&sections);
-                }
-                if !cur.at_top() {
-                    cur.y += b.before;
-                }
-                let start = (cur.page, cur.y);
-                let mut height = 0.0;
-                for line in b.lines {
-                    height += line.height;
-                    cur.place(line, &sections);
-                }
-                if let (Some(color), (Some(page), y)) = (b.shading, start)
-                    && cur.page == Some(page)
-                {
-                    let fill = Item::Fill {
-                        rect: Rect {
-                            x: cur.left,
-                            y,
-                            width,
-                            height,
-                        },
-                        color,
-                    };
-                    cur.layout.pages[page].items.insert(0, fill);
-                }
-                cur.y += b.after;
-            }
-            atrium_office::Block::Table(t) => {
-                let (rows, items, _) = table::table(&mut cx, t, width);
-                let mut row_tops: Vec<(f32, f32, f32, usize)> = Vec::new();
-                for row in rows {
-                    let row_y = row.y;
-                    let h = row.height;
-                    if cur.y + h > cur.bottom && !cur.at_top() {
-                        cur.new_page(&sections);
-                    }
-                    let page = cur.page.unwrap_or(0);
-                    let dy = cur.y - row_y;
-                    row_tops.push((row_y, row_y + h, dy, page));
-                    for (ly, line) in row.lines {
-                        let top = cur.y + ly;
-                        cur.layout.pages[page]
-                            .items
-                            .extend(line.items.iter().map(|i| translate(i, cur.left, top)));
-                        cur.layout.lines.push(Line {
-                            page,
-                            para: line.para,
-                            range: line.range,
-                            top,
-                            height: line.height,
-                            baseline: top + line.baseline,
-                            stops: line.stops.iter().map(|(o, x)| (*o, x + cur.left)).collect(),
-                            furniture: false,
-                        });
-                    }
-                    cur.y += h;
-                }
-                for item in items {
-                    let y = item_y(&item);
-                    let row = row_tops
-                        .iter()
-                        .position(|(a, b, _, _)| y >= *a - 0.01 && y < *b - 0.01)
-                        .unwrap_or(row_tops.len().saturating_sub(1));
-                    if let Some((_, _, dy, page)) = row_tops.get(row) {
-                        let moved = translate(&item, cur.left, *dy);
-                        let items = &mut cur.layout.pages[*page].items;
-                        if matches!(moved, Item::Fill { .. }) {
-                            items.insert(0, moved);
-                        } else {
-                            items.push(moved);
-                        }
-                    }
-                }
-            }
-            atrium_office::Block::Opaque { .. } => {}
+    let mut total = 1;
+    for _ in 0..5 {
+        let out = document_pass(doc, shaper, total);
+        let pages = out.pages.len() as u32;
+        if pages == total {
+            return out;
         }
-        if let Some(last) = sections[cur.section].last_block
-            && last == block.id()
-            && cur.section + 1 < sections.len()
-        {
-            cur.section += 1;
-            if sections[cur.section].new_page {
-                cur.new_page(&sections);
-            }
-        }
+        total = pages;
     }
-
-    // Number the pages, then draw headers and footers.
-    let total = cur.layout.pages.len() as u32;
-    let mut number = 0;
-    let mut last_section = usize::MAX;
-    for (i, page) in cur.layout.pages.iter_mut().enumerate() {
-        let s = cur.sections[i];
-        number = match (s != last_section, sections[s].page_start) {
-            (true, Some(start)) => start,
-            _ => number + 1,
-        };
-        last_section = s;
-        page.number = number;
-    }
-    cx.pages_total = total;
-    let mut first_in_section = vec![true; sections.len()];
-    for i in 0..cur.layout.pages.len() {
-        let s = cur.sections[i];
-        let section = &sections[s];
-        let first = std::mem::replace(&mut first_in_section[s], false);
-        let (header, footer) = if first && section.title_page {
-            (&section.first_header, &section.first_footer)
-        } else {
-            (&section.header, &section.footer)
-        };
-        cx.page_number = cur.layout.pages[i].number;
-        let p = &section.page;
-        let width = pt(p.width - p.left - p.right - p.gutter);
-        let left = pt(p.left + p.gutter);
-        let save = std::mem::take(&mut cx.counters);
-        for (blocks, top) in [(header, true), (footer, false)] {
-            let Some(blocks) = blocks else { continue };
-            let (placed, extra, h) = lines::stack(&mut cx, blocks, width);
-            let y0 = if top {
-                pt(p.header)
-            } else {
-                pt(p.height - p.footer) - h
-            };
-            let page = &mut cur.layout.pages[i];
-            page.items
-                .extend(extra.iter().map(|it| translate(it, left, y0)));
-            for (ly, line) in placed {
-                page.items
-                    .extend(line.items.iter().map(|it| translate(it, left, y0 + ly)));
-                cur.layout.lines.push(Line {
-                    page: i,
-                    para: line.para,
-                    range: line.range,
-                    top: y0 + ly,
-                    height: line.height,
-                    baseline: y0 + ly + line.baseline,
-                    stops: line.stops.iter().map(|(o, x)| (*o, x + left)).collect(),
-                    furniture: true,
-                });
-            }
-        }
-        cx.counters = save;
-    }
-    cur.layout
-}
-
-fn item_y(item: &Item) -> f32 {
-    match item {
-        Item::Fill { rect, .. } | Item::Picture { rect, .. } | Item::Gradient { rect, .. } => {
-            rect.y
-        }
-        Item::Path { segments, .. } => segments
-            .iter()
-            .filter_map(|s| match s {
-                Seg::Move(_, y) | Seg::Line(_, y) => Some(*y),
-                _ => None,
-            })
-            .fold(f32::MAX, f32::min),
-        Item::Rule { from, to, .. } => from.1.min(to.1),
-        Item::Text { baseline, .. } => *baseline,
-    }
+    document_pass(doc, shaper, total)
 }
 
 pub(crate) fn slide(slide: &Slide, index: usize, shaper: &dyn Shaper) -> Layout {
@@ -467,6 +662,7 @@ pub(crate) fn slide(slide: &Slide, index: usize, shaper: &dyn Shaper) -> Layout 
         width: slide.size.0 as f32,
         height: slide.size.1 as f32,
         number: index as u32 + 1,
+        section: 0,
         background: slide.background.or(Some(Rgb::WHITE)),
         items: Vec::new(),
     };
@@ -518,10 +714,11 @@ fn shape_items(
     shape_paint(shape, rect, page);
     match &shape.kind {
         ShapeKind::Table(table) => {
-            let (rows, items, _) = table::table(cx, table, w);
-            page.items.extend(items.iter().map(|i| translate(i, x, y)));
+            let (rows, _, _) = table::table(cx, table, w);
             for row in rows {
                 let row_y = row.y;
+                page.items
+                    .extend(row.items.iter().map(|i| translate(i, x, y)));
                 for (ly, line) in row.lines {
                     let top = y + row_y + ly;
                     page.items

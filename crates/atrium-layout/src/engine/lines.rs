@@ -1194,15 +1194,15 @@ pub(crate) fn stack(
                 last_style = Some(p.style.clone());
             }
             Block::Table(t) => {
-                let (rows, items, height) = super::table::table(cx, t, width);
+                let (rows, _, height) = super::table::table(cx, t, width);
                 for row in rows {
                     let row_y = row.y;
+                    for item in row.items {
+                        extra.push(super::translate(&item, 0.0, y));
+                    }
                     for (ly, line) in row.lines {
                         placed.push((y + row_y + ly, line));
                     }
-                }
-                for item in items {
-                    extra.push(super::translate(&item, 0.0, y));
                 }
                 y += height;
                 last_style = None;

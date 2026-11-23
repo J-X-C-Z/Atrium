@@ -11,6 +11,7 @@ pub(crate) struct Row {
     pub y: f32,
     pub height: f32,
     pub lines: Vec<(f32, Laid)>,
+    pub items: Vec<Item>,
 }
 
 /// The grid, scaled to the text area. Without a grid, columns fit their
@@ -93,9 +94,9 @@ pub(crate) fn table(cx: &mut Ctx<'_>, t: &Table, width: f32) -> (Vec<Row>, Vec<I
     };
     let fallback = default_look.then_some(grid);
     let mut rows = Vec::new();
-    let mut items = Vec::new();
     let mut y = 0.0;
     for (r, row) in t.rows.iter().enumerate() {
+        let mut items = Vec::new();
         let mut cells = Vec::new();
         let mut height: f32 = 0.0;
         let mut x = 0.0;
@@ -193,8 +194,9 @@ pub(crate) fn table(cx: &mut Ctx<'_>, t: &Table, width: f32) -> (Vec<Row>, Vec<I
             y,
             height,
             lines: laid,
+            items,
         });
         y += height;
     }
-    (rows, items, y)
+    (rows, Vec::new(), y)
 }

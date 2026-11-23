@@ -204,6 +204,8 @@ pub struct Page {
     pub height: f32,
     /// The number printed on it.
     pub number: u32,
+    /// The section this page belongs to, an index into `WordDoc::sections()`.
+    pub section: usize,
     pub background: Option<Rgb>,
     pub items: Vec<Item>,
 }
