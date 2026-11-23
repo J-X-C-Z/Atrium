@@ -349,6 +349,48 @@ impl NodeClient {
         }
     }
 
+    /// A file's bytes (up to the node's file limit).
+    pub fn read_bytes(&self, path: &str) -> Result<Vec<u8>> {
+        let response = answer(
+            self.request("GET", "/v1/fs/read")
+                .query("path", path)
+                .call(),
+        )?;
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut response.into_reader(), &mut bytes)
+            .map_err(|e| NodeError::Unreachable(e.to_string()))?;
+        Ok(bytes)
+    }
+
+    pub fn write_bytes(&self, path: &str, bytes: &[u8]) -> Result<()> {
+        answer(
+            self.request("PUT", "/v1/fs/write")
+                .query("path", path)
+                .send_bytes(bytes),
+        )
+        .map(|_| ())
+    }
+
+    /// Sends one `atrium` MCP message (JSON-RPC) for a workstream of a
+    /// project run on this node's computer, over the node's `/v1/mcp` route.
+    /// None for a notification.
+    pub fn mcp(&self, project: &str, stream: &str, message: &Value) -> Result<Option<Value>> {
+        let response = answer(
+            self.request("POST", "/v1/mcp")
+                .query("project", project)
+                .query("stream", stream)
+                .timeout(Duration::from_secs(60))
+                .send_json(message.clone()),
+        )?;
+        if response.status() == 202 {
+            return Ok(None);
+        }
+        response
+            .into_json()
+            .map(Some)
+            .map_err(|e| NodeError::Unreachable(format!("unexpected answer: {e}")))
+    }
+
     pub fn write(&self, path: &str, text: &str) -> Result<()> {
         answer(
             self.request("PUT", "/v1/fs/write")

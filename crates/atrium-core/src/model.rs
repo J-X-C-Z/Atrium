@@ -471,11 +471,30 @@ pub struct AgentCommand {
     pub description: String,
 }
 
-/// An MCP server a session should have, run over stdio.
+/// An MCP server a session should have: a command run over stdio, or, when
+/// `url` is set, a Streamable HTTP server the session connects to (`command`,
+/// `args` and `env` are then unused). The `atrium` tools reach agents on
+/// other computers this way.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct McpServer {
     pub name: String,
     pub command: String,
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
+    /// The server's address, for an HTTP server.
+    pub url: Option<String>,
+    /// Headers sent with every request, for an HTTP server.
+    pub headers: Vec<(String, String)>,
+}
+
+impl McpServer {
+    /// A Streamable HTTP server.
+    pub fn http(name: &str, url: &str, headers: Vec<(String, String)>) -> Self {
+        Self {
+            name: name.into(),
+            url: Some(url.into()),
+            headers,
+            ..Self::default()
+        }
+    }
 }

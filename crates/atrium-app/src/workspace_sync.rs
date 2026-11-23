@@ -111,6 +111,13 @@ enum Command {
         id: String,
         reply: oneshot::Sender<Result<(), HostError>>,
     },
+    /// A project the network `atrium` server may serve, and the nodes its
+    /// device tools reach.
+    McpContext {
+        project: String,
+        stream: String,
+        reply: oneshot::Sender<Result<(PathBuf, super::network::AppNodes), HostError>>,
+    },
 }
 
 #[derive(Clone)]
@@ -250,6 +257,33 @@ impl SyncHost for SyncHostClient {
                 .await
         })
     }
+
+    fn mcp<'a>(
+        &'a self,
+        project: &'a str,
+        stream: &'a str,
+        message: serde_json::Value,
+    ) -> HostFuture<'a, Option<serde_json::Value>> {
+        let (project, stream) = (project.to_string(), stream.to_string());
+        Box::pin(async move {
+            let (root, nodes) = self
+                .ask(|reply| Command::McpContext {
+                    project,
+                    stream: stream.clone(),
+                    reply,
+                })
+                .await?;
+            let target = atrium_project::mcp::Target { root, stream };
+            // The tools read and write files and ask other computers: not on
+            // the UI thread, and not on the node's.
+            tokio::task::spawn_blocking(move || {
+                let devices = atrium_project::devices::Direct(nodes);
+                atrium_project::mcp::handle_with(&target, &message, Some(&devices))
+            })
+            .await
+            .map_err(|error| HostError::Unavailable(error.to_string()))
+        })
+    }
 }
 
 impl Workspace {
@@ -337,6 +371,9 @@ impl Workspace {
                             return;
                         }
                     };
+                    let token = config.token.clone();
+                    let loopback_only = config.loopback_only;
+                    let tailnet_path = path.clone();
                     let node =
                         match EmbeddedNode::start(Arc::new(config), path, state.clone()).await {
                             Ok(node) => node,
@@ -345,6 +382,24 @@ impl Workspace {
                                 return;
                             }
                         };
+                    // Where agents can reach the `atrium` tools served by the
+                    // node: here by loopback, and from other computers by this
+                    // computer's tailnet address (the node binds it too).
+                    let port = node.port();
+                    let remote = if loopback_only {
+                        None
+                    } else {
+                        atrium_node::auth::addresses(&tailnet_path)
+                            .await
+                            .into_iter()
+                            .find(|ip| ip.is_ipv4())
+                            .map(|ip| format!("http://{ip}:{port}"))
+                    };
+                    super::network::set_network(Some(super::network::Network {
+                        local: node.local_url(),
+                        remote,
+                        token: Some(token).filter(|t| !t.is_empty()),
+                    }));
                     let _ = ready.send(Ok((state, node)));
                     std::future::pending::<()>().await;
                 });
@@ -593,6 +648,16 @@ impl Workspace {
             }
             Command::MoveRelease { backend, id, reply } => {
                 let _ = reply.send(self.sync_owner_move_release(&backend, &id, cx));
+            }
+            Command::McpContext {
+                project,
+                stream,
+                reply,
+            } => {
+                let _ = reply.send(
+                    self.mcp_context(&project, &stream)
+                        .map_err(HostError::BadRequest),
+                );
             }
         }
     }

@@ -185,6 +185,7 @@ impl Workspace {
                 agents::split_backend(backend).0.to_string(),
             ],
             env: Vec::new(),
+            ..Default::default()
         })
     }
 

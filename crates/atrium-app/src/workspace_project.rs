@@ -668,11 +668,14 @@ impl Workspace {
     }
 
     /// The `atrium` MCP server for workstream `stream` of the project in
-    /// `root`: this executable run as `atrium mcp`. None for agents on other
-    /// devices, which cannot run it.
+    /// `root`: this executable run as `atrium mcp`. An agent on another
+    /// device cannot run that, so it gets this computer's node as an HTTP
+    /// server (none while the node has no tailnet address).
     pub fn mcp_servers(root: &Path, stream: &str, backend: &str) -> Vec<McpServer> {
         if agents::split_backend(backend).1.is_some() {
-            return Vec::new();
+            return super::network::remote_server(root, stream)
+                .into_iter()
+                .collect();
         }
         let Ok(exe) = std::env::current_exe() else {
             return Vec::new();
@@ -687,7 +690,9 @@ impl Workspace {
                 "--stream".into(),
                 stream.into(),
             ],
-            env: Vec::new(),
+            // Where this computer's node is, for the device tools.
+            env: super::network::local_env(),
+            ..McpServer::default()
         }]
     }
 
@@ -706,6 +711,7 @@ impl Workspace {
                 command: m.command.clone(),
                 args: m.args.clone(),
                 env: m.env.clone(),
+                ..McpServer::default()
             })
             .collect()
     }

@@ -38,6 +38,8 @@ mod devices;
 mod docs;
 #[path = "workspace_memory.rs"]
 pub mod memory;
+#[path = "workspace_network.rs"]
+pub mod network;
 #[path = "workspace_phone.rs"]
 mod phone;
 #[path = "workspace_preview.rs"]

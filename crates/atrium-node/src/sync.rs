@@ -77,6 +77,22 @@ pub trait SyncHost: Send + Sync {
         })
     }
 
+    /// Answers one message of the `atrium` MCP server (JSON-RPC) for a
+    /// workstream of a project this Atrium runs, for an agent on another
+    /// computer. None for a notification. The default serves nothing.
+    fn mcp<'a>(
+        &'a self,
+        _project: &'a str,
+        _stream: &'a str,
+        _message: Value,
+    ) -> HostFuture<'a, Option<Value>> {
+        Box::pin(async {
+            Err(HostError::Unavailable(
+                "this Atrium does not serve the atrium tools".into(),
+            ))
+        })
+    }
+
     /// Closes the owner's writer after the target applied the package.
     fn move_release<'a>(&'a self, _backend: &'a str, _id: &'a str) -> HostFuture<'a, ()> {
         Box::pin(async { Ok(()) })

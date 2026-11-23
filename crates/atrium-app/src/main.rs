@@ -37,7 +37,15 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("mcp") {
         let served = project::mcp::Target::from_args(&args[1..]).and_then(|target| {
-            project::mcp::serve(&target, std::io::stdin().lock(), std::io::stdout().lock())
+            // The device tools of a spread project go through this computer's
+            // node, when Atrium said where it is.
+            let proxy = workspace::network::Proxy::from_env();
+            project::mcp::serve_with(
+                &target,
+                proxy.as_ref().map(|p| p as &dyn project::mcp::Devices),
+                std::io::stdin().lock(),
+                std::io::stdout().lock(),
+            )
         });
         if let Err(error) = served {
             eprintln!("atrium mcp: {error:#}");

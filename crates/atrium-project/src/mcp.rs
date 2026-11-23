@@ -5,6 +5,11 @@
 //! `atrium mcp --project <root> --stream <id>`, so the agent is always
 //! itself: it cannot act as another workstream. The files stay the source of
 //! truth, so an agent without MCP can still do everything by hand.
+//!
+//! [`handle`] answers one JSON-RPC message and knows no transport: stdio
+//! ([`serve`]) and the node's network route (`/v1/mcp`, for agents on other
+//! computers) both call it. In a project spread over several computers, a
+//! [`Devices`] adds the `device_*` tools.
 
 use std::{
     io::{BufRead, Write},
@@ -14,9 +19,16 @@ use std::{
 use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
 
-use crate::{Project, Role, agent::NewTask};
+use crate::{Project, Role, agent::NewTask, spread::Spread};
 
 const PROTOCOL: &str = "2025-06-18";
+
+/// How the `device_*` tools reach other computers. Offered only in spread
+/// projects, and only where a transport supplies one.
+pub trait Devices: Send + Sync {
+    /// Runs the device tool `name` as workstream `me`.
+    fn call(&self, project: &Project, me: &str, name: &str, args: &Value) -> Result<String>;
+}
 
 /// How the server is told who it serves, from its command line.
 #[derive(Clone, Debug, PartialEq)]
@@ -47,14 +59,24 @@ impl Target {
 }
 
 /// Answers requests from `input` on `output` until `input` ends.
-pub fn serve(target: &Target, input: impl BufRead, mut output: impl Write) -> Result<()> {
+pub fn serve(target: &Target, input: impl BufRead, output: impl Write) -> Result<()> {
+    serve_with(target, None, input, output)
+}
+
+/// [`serve`] with the device tools.
+pub fn serve_with(
+    target: &Target,
+    devices: Option<&dyn Devices>,
+    input: impl BufRead,
+    mut output: impl Write,
+) -> Result<()> {
     for line in input.lines() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
         let reply = match serde_json::from_str::<Value>(&line) {
-            Ok(message) => handle(target, &message),
+            Ok(message) => handle_with(target, &message, devices),
             Err(error) => Some(json!({
                 "jsonrpc": "2.0", "id": null,
                 "error": { "code": -32700, "message": format!("parse error: {error}") }
@@ -70,6 +92,15 @@ pub fn serve(target: &Target, input: impl BufRead, mut output: impl Write) -> Re
 
 /// The reply to one message; none for notifications.
 pub fn handle(target: &Target, message: &Value) -> Option<Value> {
+    handle_with(target, message, None)
+}
+
+/// [`handle`] with the device tools.
+pub fn handle_with(
+    target: &Target,
+    message: &Value,
+    devices: Option<&dyn Devices>,
+) -> Option<Value> {
     let id = message.get("id")?.clone();
     let method = message["method"].as_str().unwrap_or("");
     let params = &message["params"];
@@ -81,11 +112,12 @@ pub fn handle(target: &Target, message: &Value) -> Option<Value> {
             "instructions": INSTRUCTIONS,
         })),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tools(target) })),
+        "tools/list" => Ok(json!({ "tools": tools(target, devices.is_some()) })),
         "tools/call" => Ok(call(
             target,
             params["name"].as_str().unwrap_or(""),
             &params["arguments"],
+            devices,
         )),
         _ => Err(json!({ "code": -32601, "message": format!("no method {method}") })),
     };
@@ -96,9 +128,18 @@ pub fn handle(target: &Target, message: &Value) -> Option<Value> {
 }
 
 /// A tool result: text, flagged as an error when the call failed.
-fn call(target: &Target, name: &str, args: &Value) -> Value {
-    let outcome = Project::load(&target.root)
-        .and_then(|mut project| run(&mut project, &target.stream, name, args));
+fn call(target: &Target, name: &str, args: &Value, devices: Option<&dyn Devices>) -> Value {
+    let outcome = Project::load(&target.root).and_then(|mut project| {
+        if crate::devices::is_device_tool(name) {
+            return match devices {
+                Some(devices) if Spread::of(&project).is_spread() => {
+                    devices.call(&project, &target.stream, name, args)
+                }
+                _ => Err(anyhow!("No tool {name}.")),
+            };
+        }
+        run(&mut project, &target.stream, name, args)
+    });
     match outcome {
         Ok(text) => json!({ "content": [{ "type": "text", "text": text }] }),
         Err(error) => json!({
@@ -251,7 +292,7 @@ fn new_task(args: &Value) -> NewTask {
 }
 
 /// The tools `target`'s role may use.
-fn tools(target: &Target) -> Vec<Value> {
+fn tools(target: &Target, with_devices: bool) -> Vec<Value> {
     let own = Project::load(&target.root)
         .ok()
         .and_then(|p| p.stream(&target.stream).cloned());
@@ -402,7 +443,40 @@ fn tools(target: &Target) -> Vec<Value> {
             &["text"],
         ));
     }
+    if with_devices && Project::load(&target.root).is_ok_and(|p| Spread::of(&p).is_spread()) {
+        tools.extend(device_tools());
+    }
     tools
+}
+
+/// The tools for reading other computers' files, in a spread project.
+fn device_tools() -> Vec<Value> {
+    let device = json!({ "type": "string", "description": "A computer of this project: its device id, or the scheduler's name for the computer running the project." });
+    let path = |what: &str| json!({ "type": "string", "description": format!("{what}, relative to the project, such as perf/results.") });
+    vec![
+        tool(
+            "device_list",
+            "List a folder of another computer's copy of this project.",
+            json!({ "device": device, "path": path("The folder; empty for the project folder") }),
+            &["device"],
+        ),
+        tool(
+            "device_read",
+            "Read a file of another computer's copy of this project: its text, or a note for a binary or very large file.",
+            json!({ "device": device, "path": path("The file") }),
+            &["device", "path"],
+        ),
+        tool(
+            "device_copy",
+            "Copy a file or folder from another computer into your own scope, on your computer (at most 200 MB). Use it to bring data you need to work on; to change what another computer owns, ask its owner with `notify`.",
+            json!({
+                "device": device,
+                "path": path("What to copy"),
+                "to": path("Where it goes, inside your scope; the same path when left out"),
+            }),
+            &["device", "path"],
+        ),
+    ]
 }
 
 fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
@@ -473,6 +547,69 @@ mod tests {
         assert!(replies[2]["result"]["isError"].is_null(), "{}", replies[2]);
         assert!(root.join(".atrium/tasks/boss/web.md").exists());
         assert_eq!(replies[3]["result"]["isError"], true);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    struct Echo;
+    impl Devices for Echo {
+        fn call(&self, _: &Project, me: &str, name: &str, args: &Value) -> Result<String> {
+            Ok(format!("{me} ran {name} on {}", args["device"]))
+        }
+    }
+
+    #[test]
+    fn device_tools_exist_only_in_spread_projects() {
+        let root = std::env::temp_dir().join(format!("atrium-mcp-dev-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let mut project = Project::open(&root).unwrap();
+        project.file.streams.push(Workstream {
+            id: "boss".into(),
+            role: Role::Controller,
+            ..Default::default()
+        });
+        project.save().unwrap();
+        let target = Target {
+            root: root.clone(),
+            stream: "boss".into(),
+        };
+        let list = json!({"jsonrpc":"2.0","id":1,"method":"tools/list"});
+        let call = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"device_read","arguments":{"device":"win","path":"a"}}});
+        let names = |reply: &Value| -> Vec<String> {
+            reply["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        // Not spread: no device tools, with or without a transport for them.
+        let reply = handle_with(&target, &list, Some(&Echo)).unwrap();
+        assert!(!names(&reply).contains(&"device_read".to_string()));
+        assert_eq!(
+            handle_with(&target, &call, Some(&Echo)).unwrap()["result"]["isError"],
+            true
+        );
+        project.file.streams.push(Workstream {
+            id: "perf".into(),
+            role: Role::Lead,
+            backend: "codex@win".into(),
+            ..Default::default()
+        });
+        project.save().unwrap();
+        let reply = handle_with(&target, &list, Some(&Echo)).unwrap();
+        let spread = names(&reply);
+        for tool in ["device_list", "device_read", "device_copy"] {
+            assert!(spread.contains(&tool.to_string()), "{tool}");
+        }
+        // Without a transport for them (no node to ask) they are not offered.
+        assert!(!names(&handle(&target, &list).unwrap()).contains(&"device_read".to_string()));
+        let reply = handle_with(&target, &call, Some(&Echo)).unwrap();
+        assert_eq!(
+            reply["result"]["content"][0]["text"],
+            "boss ran device_read on \"win\""
+        );
         let _ = fs::remove_dir_all(&root);
     }
 }

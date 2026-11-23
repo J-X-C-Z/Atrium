@@ -24,6 +24,7 @@
 
 pub mod agent;
 pub mod autopilot;
+pub mod devices;
 mod git;
 pub mod mcp;
 pub mod notice_delivery;

@@ -211,8 +211,32 @@ check it with them, or ask them to make the change.",
 pub fn briefing(project: &Project, stream: &Workstream, scheduler: &str) -> String {
     let spread = Spread::of(project);
     if !spread.is_spread() {
-        return String::new();
+        return remote_tools(stream).unwrap_or_default();
     }
+    let text = place_text(&spread, stream, scheduler);
+    match remote_tools(stream) {
+        Some(tools) => format!("{text}\n\n{tools}"),
+        None => text,
+    }
+}
+
+/// What a stream on another computer is told about `.atrium/`: it is not
+/// there, so the tools do what the files would. None for a local stream, so
+/// local kickoffs stay as they are.
+pub fn remote_tools(stream: &Workstream) -> Option<String> {
+    let device = device_of(&stream.backend)?;
+    Some(format!(
+        "## Tools instead of `{dir}/` files\n\n\
+You run on `{device}`, which has no `{dir}/` folder: it stays on the computer that runs \
+the project. Wherever the text above says to write or edit a file under `{dir}/`, use the \
+`atrium` tools instead (`whoami`, `list_tasks`, `create_task`, `write_status`, `notify`, \
+`check_step`, `finish_task`, plus `write_plan` for the controller and `claim_next` for \
+pool workers). Do not create `{dir}/` paths here.",
+        dir = crate::DIR
+    ))
+}
+
+fn place_text(spread: &Spread, stream: &Workstream, scheduler: &str) -> String {
     let here = device_of(&stream.backend).unwrap_or(scheduler);
     let mut lines = vec![format!(
         "## Computers\n\nThis project is spread over several computers, each with the \
@@ -313,6 +337,29 @@ mod tests {
             "README.md".to_string(),
         ];
         assert_eq!(spread.foreign(mac, &paths), vec!["perf/core/b.rs"]);
+    }
+
+    #[test]
+    fn remote_agents_are_told_to_use_the_tools_and_local_ones_are_not() {
+        let p = project(vec![
+            s("ui", "claude", &["ui/**"]),
+            s("perf-mac", "codex@mac", &["perf/mac/**"]),
+        ]);
+        let remote = briefing(&p, &p.file.streams[1], "linux");
+        assert!(
+            remote.contains("Tools instead of `.atrium/` files"),
+            "{remote}"
+        );
+        assert!(remote.contains("`list_tasks`") && remote.contains("`finish_task`"));
+        let local = briefing(&p, &p.file.streams[0], "linux");
+        assert!(!local.contains("Tools instead"), "{local}");
+        // A local stream's text is the computers section alone, as before.
+        assert_eq!(
+            local,
+            place_text(&Spread::of(&p), &p.file.streams[0], "linux")
+        );
+        assert!(local.ends_with("ask their owner with a notice."), "{local}");
+        assert_eq!(remote_tools(&p.file.streams[0]), None);
     }
 
     #[test]
