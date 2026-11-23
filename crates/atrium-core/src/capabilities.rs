@@ -91,11 +91,7 @@ impl Capabilities {
             queue: true,
             interrupt: true,
             plan_mode: true,
-            approval_modes: vec![
-                "read-only".into(),
-                "auto".into(),
-                "full-access".into(),
-            ],
+            approval_modes: vec!["read-only".into(), "auto".into(), "full-access".into()],
             model_choice: true,
             effort_choice: true,
             service_tiers: true,
@@ -167,7 +163,6 @@ impl Capabilities {
     pub fn has_approval_choice(&self) -> bool {
         !self.approval_modes.is_empty()
     }
-
 }
 
 impl Default for Capabilities {
