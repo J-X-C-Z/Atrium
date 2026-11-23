@@ -7,16 +7,19 @@
 //! There is no GPUI or native Office dependency in this crate.
 
 mod media;
+mod numfmt;
 mod package;
 mod relationships;
 mod xml;
 mod zip_edit;
 pub(crate) use package::{Limits, Package};
+mod chart;
 mod file_binding;
 pub mod look;
 mod report;
 mod sheet;
 mod sheet_binding;
+mod sheet_styles;
 mod slides;
 mod slides_binding;
 mod word;

@@ -1038,6 +1038,37 @@ pub(crate) fn slide(slide: &Slide, index: usize, shaper: &dyn Shaper) -> Layout 
     }
 }
 
+/// Draws one shape at `rect`; used by sheet drawings.
+pub(crate) fn shape_at(shape: &Shape, rect: Rect, shaper: &dyn Shaper) -> Vec<Item> {
+    let defaults = Marks::default();
+    let mut cx = Ctx {
+        shaper,
+        defaults: &defaults,
+        base_size: SLIDE_PT,
+        counters: HashMap::new(),
+        page_number: 1,
+        pages_total: 1,
+        last_table_height: 0.0,
+    };
+    let mut page = Page {
+        width: rect.x + rect.width,
+        height: rect.y + rect.height,
+        number: 1,
+        background: None,
+        items: Vec::new(),
+    };
+    let mut shape = shape.clone();
+    shape.frame = [
+        rect.x.round() as i32,
+        rect.y.round() as i32,
+        rect.width.round() as i32,
+        rect.height.round() as i32,
+    ];
+    let mut lines = Vec::new();
+    shape_items(&mut cx, &shape, 0, &mut page, &mut lines, None);
+    page.items
+}
+
 /// Draws a shape and its text; returns the height its text took.
 fn shape_items(
     cx: &mut Ctx,

@@ -520,6 +520,81 @@ pub enum HAlign {
 
 /// How a cell looks. A workbook keeps each distinct style once; cells,
 /// rows and columns refer to it by index, 0 being the default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct StyleMask {
+    pub font: bool,
+    pub font_bold: bool,
+    pub font_italic: bool,
+    pub font_underline: bool,
+    pub font_strike: bool,
+    pub font_size: bool,
+    pub font_color: bool,
+    pub font_name: bool,
+    pub font_baseline: bool,
+    pub fill: bool,
+    pub borders: bool,
+    pub h_align: bool,
+    pub v_align: bool,
+    pub wrap: bool,
+    pub shrink: bool,
+    pub indent: bool,
+    pub rotation: bool,
+    pub number_format: bool,
+}
+
+impl StyleMask {
+    /// A complete style: every field belongs to it.
+    pub const fn all() -> Self {
+        Self {
+            font: true,
+            font_bold: true,
+            font_italic: true,
+            font_underline: true,
+            font_strike: true,
+            font_size: true,
+            font_color: true,
+            font_name: true,
+            font_baseline: true,
+            fill: true,
+            borders: true,
+            h_align: true,
+            v_align: true,
+            wrap: true,
+            shrink: true,
+            indent: true,
+            rotation: true,
+            number_format: true,
+        }
+    }
+
+    pub const fn none() -> Self {
+        Self {
+            font: false,
+            font_bold: false,
+            font_italic: false,
+            font_underline: false,
+            font_strike: false,
+            font_size: false,
+            font_color: false,
+            font_name: false,
+            font_baseline: false,
+            fill: false,
+            borders: false,
+            h_align: false,
+            v_align: false,
+            wrap: false,
+            shrink: false,
+            indent: false,
+            rotation: false,
+            number_format: false,
+        }
+    }
+
+    pub fn any(self) -> bool {
+        self != Self::none()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CellStyle {
     /// Font, size, colour, bold, italic, underline, strike.
@@ -536,6 +611,9 @@ pub struct CellStyle {
     pub rotation: i16,
     /// The number format code, as `0.00%` or `yyyy"年"m"月"d"日"`.
     pub number_format: String,
+    /// For a conditional format's partial style (`dxf`): only these fields
+    /// replace the cell's own. A normal style has all of them set.
+    pub present: StyleMask,
 }
 
 impl Default for CellStyle {
@@ -551,6 +629,77 @@ impl Default for CellStyle {
             indent: 0,
             rotation: 0,
             number_format: "General".into(),
+            present: StyleMask::all(),
+        }
+    }
+}
+
+impl CellStyle {
+    /// A partial style for a conditional format's `dxf`.
+    pub fn partial() -> Self {
+        Self {
+            present: StyleMask::none(),
+            ..Self::default()
+        }
+    }
+
+    /// Applies the fields this partial style sets to `base`.
+    pub fn merge_into(&self, base: &mut CellStyle) {
+        let m = self.present;
+        if m.font {
+            base.font = self.font.clone();
+        } else {
+            if m.font_bold {
+                base.font.bold = self.font.bold;
+            }
+            if m.font_italic {
+                base.font.italic = self.font.italic;
+            }
+            if m.font_underline {
+                base.font.underline = self.font.underline;
+            }
+            if m.font_strike {
+                base.font.strike = self.font.strike;
+            }
+            if m.font_baseline {
+                base.font.baseline = self.font.baseline;
+            }
+            if m.font_size {
+                base.font.size = self.font.size;
+            }
+            if m.font_color {
+                base.font.color = self.font.color;
+            }
+            if m.font_name {
+                base.font.fonts = self.font.fonts.clone();
+            }
+        }
+        if m.fill {
+            base.fill = self.fill;
+        }
+        if m.borders {
+            base.borders = self.borders;
+        }
+        if m.h_align {
+            base.h_align = self.h_align;
+        }
+        if m.v_align {
+            base.v_align = self.v_align;
+        }
+        if m.wrap {
+            base.wrap = self.wrap;
+        }
+        if m.shrink {
+            base.shrink = self.shrink;
+        }
+        if m.indent {
+            base.indent = self.indent;
+        }
+        if m.rotation {
+            base.rotation = self.rotation;
+        }
+        if m.number_format {
+            base.number_format = self.number_format.clone();
         }
     }
 }
@@ -612,6 +761,8 @@ pub struct Anchored {
     /// Row, column, and offsets in points into that cell.
     pub from: (u32, u32, f32, f32),
     pub to: (u32, u32, f32, f32),
+    /// A one-cell anchor's size in points; `None` uses `to`.
+    pub ext: Option<(f32, f32)>,
     pub what: Drawing,
 }
 
@@ -666,4 +817,43 @@ impl Default for SheetLook {
             tab_color: None,
         }
     }
+}
+
+/// Excel's maximum digit width, in pixels at 96 DPI, for a workbook default
+/// font. The sizes are the ones Excel and WPS use for their own defaults.
+pub fn digit_width(font: &str, size: f32) -> f32 {
+    let name = font.to_ascii_lowercase();
+    let base = match name.as_str() {
+        "calibri" | "calibri light" => 7.0,
+        "宋体" | "simsun" | "新宋体" | "nsimsun" => 7.0,
+        "等线" | "dengxian" | "等线 light" | "dengxian light" => 7.0,
+        "微软雅黑" | "microsoft yahei" => 8.0,
+        "arial" | "helvetica" | "times new roman" => 7.0,
+        "courier new" => 7.0,
+        _ => 7.0,
+    };
+    if (size - 11.0).abs() < 0.01 {
+        base
+    } else {
+        (base * size / 11.0).max(1.0)
+    }
+}
+
+/// Excel's column width in characters to points.
+///
+/// `points = trunc((chars × digit + 5) / digit × 256) / 256 × digit × 0.75`
+pub fn column_width_points(chars: f32, digit: f32) -> f32 {
+    if !chars.is_finite() || chars <= 0.0 || !digit.is_finite() || digit <= 0.0 {
+        return 0.0;
+    }
+    let pixels = (((chars * digit + 5.0) / digit) * 256.0).trunc() / 256.0 * digit;
+    pixels * 0.75
+}
+
+/// The inverse of [`column_width_points`], used when writing a user's size.
+pub fn column_chars_from_points(points: f32, digit: f32) -> f32 {
+    if !points.is_finite() || points <= 0.0 || !digit.is_finite() || digit <= 0.0 {
+        return 0.0;
+    }
+    ((points / 0.75) - 5.0) / digit
 }

@@ -17,8 +17,10 @@ use atrium_office::{Deck, NodeId, Slide, WordDoc};
 
 mod engine;
 mod nav;
+mod sheet;
 
 pub use nav::Pos;
+pub use sheet::layout_sheet_drawings;
 
 /// A font as the engine asks for it.
 #[derive(Clone, Debug, PartialEq)]
