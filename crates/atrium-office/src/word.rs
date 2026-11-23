@@ -239,6 +239,8 @@ pub struct WordDoc {
     pub(crate) sections: Vec<crate::look::Section>,
     /// How text looks where nothing else says: `docDefaults` and the Normal style.
     pub(crate) defaults: Marks,
+    /// Word's `defaultTabStop`, in twips.
+    pub(crate) default_tab_stop: crate::look::Twips,
 }
 
 /// Where a paragraph sits: its container's blocks and its index there.
@@ -268,6 +270,7 @@ impl WordDoc {
             next: FRESH,
             sections: Vec::new(),
             defaults: Marks::default(),
+            default_tab_stop: 420,
         }
     }
 
@@ -297,6 +300,21 @@ impl WordDoc {
     /// How text looks where nothing else says.
     pub fn defaults(&self) -> &Marks {
         &self.defaults
+    }
+
+    /// Word's `defaultTabStop`: the distance between automatic tab stops.
+    pub fn default_tab_stop(&self) -> crate::look::Twips {
+        if self.default_tab_stop > 0 {
+            self.default_tab_stop
+        } else {
+            420
+        }
+    }
+
+    /// Sets the document's automatic tab stop width.
+    pub fn with_default_tab_stop(mut self, twips: crate::look::Twips) -> Self {
+        self.default_tab_stop = twips;
+        self
     }
 
     fn para_mut(&mut self, id: NodeId) -> Result<&mut Para, EditError> {

@@ -653,6 +653,7 @@ name = "atrium-layout"
 version = "0.1.0"
 dependencies = [
  "atrium-office",
+ "unicode-linebreak",
 ]
 
 [[package]]
