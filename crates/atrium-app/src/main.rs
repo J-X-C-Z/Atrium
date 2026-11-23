@@ -122,6 +122,7 @@ fn main() {
         ]);
         // After the app-wide keys, so the page editor's own win while it has focus.
         ui::bind_page_keys(cx);
+        ui::bind_grid_keys(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
         ui::register_actions(cx);
         set_menus(cx);

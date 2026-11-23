@@ -2,17 +2,12 @@
 //! PowerPoint as blocks of text, Excel as a sheet of cells.
 
 use std::collections::HashMap;
-use std::rc::Rc;
 
-use atrium_office::{Document, Office, Op, SheetOp, SlideOp, Snapshot, WordOp};
-use ely_gpui_component::{
-    documents::{BlockData, BlockEditor, BlockEvent, BlockKind},
-    tables::Spreadsheet,
-    theme::{ActiveTheme, Radius, TextSize},
-};
+use atrium_office::{Document, Office, Op, SlideOp, Snapshot, WordOp};
+use ely_gpui_component::documents::{BlockData, BlockEditor, BlockEvent, BlockKind};
 use gpui::{
-    Context, Entity, EventEmitter, IntoElement, ParentElement, Render, SharedString, Styled,
-    Subscription, Window, div, prelude::*,
+    Context, Entity, EventEmitter, IntoElement, ParentElement, Render, Styled, Subscription,
+    Window, div, prelude::*,
 };
 
 use crate::docmap::{self, Refusal, Target};
@@ -40,6 +35,8 @@ pub struct DocView {
     _editor_events: Option<Subscription>,
     /// Word and PowerPoint on their pages.
     pub(super) pages: Option<super::pages::Pages>,
+    /// Workbooks as a grid.
+    pub(super) grid: Option<super::grid::Grid>,
     /// Shows the blocks outline instead of the pages.
     pub(super) outline: bool,
 }
@@ -66,10 +63,14 @@ impl DocView {
             baseline,
             _editor_events: None,
             pages: None,
+            grid: None,
             outline: false,
         };
         if matches!(view.doc.office, Office::Word(_) | Office::Slides(_)) {
             view.pages = Some(super::pages::Pages::new(&view.doc.office, window, cx));
+        }
+        if matches!(view.doc.office, Office::Sheet(_)) {
+            view.grid = Some(super::grid::Grid::new(window, cx));
         }
         view
     }
@@ -227,119 +228,12 @@ impl DocView {
         }
         cx.notify();
     }
-
-    fn set_cells(&mut self, edits: &[(usize, usize, SharedString)], cx: &mut Context<Self>) {
-        let sheet = self.sheet;
-        for (r, c, text) in edits {
-            let op = Op::Sheet(SheetOp::SetCell {
-                sheet,
-                r: *r as u32,
-                c: *c as u32,
-                input: text.to_string(),
-            });
-            if let Err(e) = self.doc.apply(op) {
-                cx.emit(DocEvent::Refused(e.to_string()));
-                cx.notify();
-                return;
-            }
-        }
-        cx.emit(DocEvent::Edited);
-        cx.notify();
-    }
-
-    fn sheet_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let Office::Sheet(wb) = &self.doc.office else {
-            return div().into_any_element();
-        };
-        let theme = cx.theme();
-        let colors = theme.colors.clone();
-        let small = theme.text_size(TextSize::Sm);
-        let me = cx.entity();
-        let sheets = wb.sheets();
-        let current = self.sheet.min(sheets.len().saturating_sub(1));
-        let mut tabs = div().flex().flex_wrap().gap_1().px_2().py_1();
-        for (i, s) in sheets.iter().enumerate() {
-            if s.hidden {
-                continue;
-            }
-            let on = i == current;
-            let pick = me.clone();
-            tabs = tabs.child(
-                div()
-                    .id(SharedString::from(format!("doc-sheet-{i}")))
-                    .px_2()
-                    .py_0p5()
-                    .rounded(theme.radius(Radius::Sm))
-                    .text_size(small)
-                    .cursor_pointer()
-                    .when(on, |el| el.bg(colors.selection))
-                    .when(!on, |el| {
-                        el.text_color(colors.fg_muted)
-                            .hover(|el| el.bg(colors.hover))
-                    })
-                    .on_click(move |_, _, cx| {
-                        pick.update(cx, |d, cx| {
-                            d.sheet = i;
-                            cx.notify();
-                        })
-                    })
-                    .child(s.name.clone()),
-            );
-        }
-        let Some(sheet) = sheets.get(current) else {
-            return div().into_any_element();
-        };
-        let (rows, cols) = sheet.extent();
-        let mut cells = HashMap::new();
-        for ((r, c), cell) in &sheet.cells {
-            // Formulas show their value as the file has it; Ely's own
-            // calculation would differ from Excel's for many functions.
-            let text = if cell.formula.is_some() && !cell.edited {
-                cell.display.clone()
-            } else {
-                cell.input()
-            };
-            cells.insert((*r as usize, *c as usize), SharedString::from(text));
-        }
-        let mut grid = Spreadsheet::new(
-            SharedString::from(format!("doc-grid-{current}")),
-            (rows as usize + 20).max(30),
-            (cols as usize + 4).max(8),
-        )
-        .cells(Rc::new(cells))
-        .freeze(1, 0)
-        .size_full();
-        for (r0, c0, r1, c1) in &sheet.merged {
-            grid = grid.merge((*r0 as usize, *c0 as usize), (*r1 as usize, *c1 as usize));
-        }
-        let edit = me.clone();
-        let grid = grid.on_change(move |edits, _, cx| {
-            let edits = edits.to_vec();
-            edit.update(cx, |d, cx| d.set_cells(&edits, cx));
-        });
-        let note = self.doc.is_dirty().then(|| {
-            div()
-                .px_3()
-                .pb_1()
-                .text_size(theme.text_size(TextSize::Xs))
-                .text_color(colors.fg_muted)
-                .child(t("Formulas keep their last results here; Excel recalculates them when it opens the file.").to_string())
-        });
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .child(tabs)
-            .children(note)
-            .child(div().flex_1().min_h_0().child(grid))
-            .into_any_element()
-    }
 }
 
 impl Render for DocView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if matches!(self.doc.office, Office::Sheet(_)) {
-            return self.sheet_body(cx);
+            return self.grid_body(window, cx);
         }
         if !self.outline && self.pages.is_some() {
             return self.pages_body(window, cx);

@@ -1326,6 +1326,9 @@ fn word_around(office: &Office, pos: Pos, paragraph: bool) -> (Pos, Pos) {
 
 impl Focusable for DocView {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
+        if let Some(g) = &self.grid {
+            return g.focus().clone();
+        }
         self.pages
             .as_ref()
             .map(|p| p.focus.clone())
@@ -1390,9 +1393,13 @@ impl EntityInputHandler for DocView {
         &mut self,
         range: Option<Range<usize>>,
         text: &str,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.grid.is_some() {
+            self.grid_typed(text, false, window, cx);
+            return;
+        }
         if self.pages.as_ref().is_some_and(|p| p.compose.is_some()) {
             self.compose_end(Some(text), cx);
             return;
@@ -1411,9 +1418,13 @@ impl EntityInputHandler for DocView {
         range: Option<Range<usize>>,
         new_text: &str,
         _selected: Option<Range<usize>>,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.grid.is_some() {
+            self.grid_typed(new_text, true, window, cx);
+            return;
+        }
         let composing = self.pages.as_ref().is_some_and(|p| p.compose.is_some());
         if !composing {
             // Starting: replace the selection (or the given range) with nothing first.
