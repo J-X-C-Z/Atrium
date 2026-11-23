@@ -111,12 +111,15 @@ Atrium 按 `roots` 里**名为 `Atrium Workspace` 的那一项**找到这台电�
 - [ ] 在 Linux 的 Atrium 里和 `Codex · win` 开一个普通对话，让它运行 `cd` 或 `pwd`：能在 Windows 上执行。
 - [ ] 项目里给 `codex@win` 建一个试验任务，`scope: analysis/**`。它启动后的工作目录应该是 `D:\Atrium Workspace\photo-engine`。
 
-## 目前的限制
+## 需要在真机上确认的地方
 
-Atrium 还有两项后端工作在做（`AGENTS.md` 的第 18、19 项）。合并之前：
+第 18、19 项已经合并。下面几点只在模拟环境里测试过，配置完要在真机上确认：
 
-- **项目工具**：Windows 和 Mac 上的负责人能在正确的文件夹里启动、能干活，但还用不了项目工具（汇报、完成任务、发公告），需要用户在对话里手动转达。
-- **跨电脑取文件**：`device_list`、`device_read`、`device_copy` 这几个工具还没有。
-- **额度用完自动换替补**：还没接上。
+- **远程 agent 能否用上项目工具**：Windows、Mac 上的 Codex 和 DeepSeek Harness 通过网络（Linux 节点的 `/v1/mcp`）使用项目工具。
+  - 请确认它们能调用 `whoami`。如果调用失败，可能是 Codex 版本太旧、不支持通过 URL 接入 MCP 服务器，升级 Codex 后再试。
+  - 也可能是 Linux 的节点只监听了本机地址，需要让它在 Tailscale 地址上监听。
+- **跨电脑取文件**：在 Mac 上让 agent 用 `device_copy` 从 `win` 复制 `perf/core/`。注意单个文件不能超过 16 MB，一次复制总共不能超过 200 MB。
+- **额度用完换替补**：只在打开自动驾驶（autopilot）时，会把任务交给替补重新开始。
+- **节点令牌**：如果节点设了令牌，令牌会写进远程 agent 的 MCP 配置里，只在 tailnet 里使用。
 
-配置时不要去绕开这些限制。配好后告诉用户：哪些已经可以验证，哪些要等第 18、19 项合并。
+遇到失败时，把报错原文告诉用户，不要绕过。
