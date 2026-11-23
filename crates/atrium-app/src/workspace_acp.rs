@@ -350,6 +350,7 @@ impl Workspace {
                     self.commands.insert(thread_id, commands);
                 }
                 AgentEvent::Warning(message) => cx.emit(Notice::Info(message)),
+                AgentEvent::RateLimitsUpdated(update) => self.note_limits(backend, update, cx),
                 event => self.apply(event, cx),
             }
         }

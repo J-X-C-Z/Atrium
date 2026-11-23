@@ -460,12 +460,18 @@ impl AcpClient {
         let delivery = prompt_delivery(&result);
         let result = result.map_err(|e| self.explain(e).to_string());
         let usage = result.as_ref().ok().map(|r| r["usage"].clone());
+        let limits = result
+            .as_ref()
+            .ok()
+            .and_then(atrium_core::parse_meta_limits);
         let result = result.map(|r| str_of(&r, "stopReason"));
         let events = self.translator.lock().expect("translator").finish_prompt(
             session_id,
             result,
             usage.as_ref(),
         );
+        let mut events = events;
+        events.extend(limits.map(AgentEvent::RateLimitsUpdated));
         PromptOutcome { events, delivery }
     }
 

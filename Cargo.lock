@@ -645,6 +645,7 @@ dependencies = [
 name = "atrium-core"
 version = "0.1.0"
 dependencies = [
+ "jiff 0.2.46",
  "log",
  "serde",
  "serde_json",

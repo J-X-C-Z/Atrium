@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 atrium-process.workspace = true
 atrium-sync.workspace = true
+agent-rpc.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 log.workspace = true
@@ -27,7 +28,6 @@ ureq.workspace = true
 atrium-project.workspace = true
 codex-client.workspace = true
 acp-client.workspace = true
-agent-rpc.workspace = true
 atrium-core.workspace = true
 tungstenite.workspace = true
 tempfile = "3"

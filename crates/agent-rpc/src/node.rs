@@ -260,6 +260,25 @@ impl NodeClient {
         Ok(info)
     }
 
+    /// The Claude plan usage the device sees (`five_hour` and `seven_day`,
+    /// each with `utilization` and `resets_at`); `None` when it has no
+    /// Claude login or cannot reach Anthropic. Fails on a node without the
+    /// endpoint.
+    pub fn claude_usage(&self) -> Result<Option<Value>> {
+        let response = answer(
+            self.request("GET", "/v1/agents/claude/usage")
+                .timeout(Duration::from_secs(15))
+                .call(),
+        )?;
+        if response.status() == 204 {
+            return Ok(None);
+        }
+        let value: Value = response
+            .into_json()
+            .map_err(|e| NodeError::Unreachable(e.to_string()))?;
+        Ok((!value.is_null()).then_some(value))
+    }
+
     pub fn procs(&self, owner: Option<&str>) -> Result<Vec<Proc>> {
         let mut request = self.request("GET", "/v1/procs");
         if let Some(owner) = owner {

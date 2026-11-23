@@ -552,7 +552,7 @@ impl RootView {
                 )));
             }
         }
-        if let Some(limits) = &ws.rate_limits {
+        if let Some(limits) = ws.limits_for(crate::workspace::CODEX) {
             let mut usage = div().flex().flex_col().gap_3();
             for (ix, window) in [limits.primary, limits.secondary]
                 .into_iter()

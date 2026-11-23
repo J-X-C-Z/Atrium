@@ -472,10 +472,14 @@ impl Translator {
                         currency: s(&update["cost"], "currency"),
                     });
                 }
-                vec![AgentEvent::TokenUsage {
+                let mut events = vec![AgentEvent::TokenUsage {
                     usage: state.usage.clone(),
                     thread_id: session,
-                }]
+                }];
+                events.extend(
+                    atrium_core::parse_meta_limits(update).map(AgentEvent::RateLimitsUpdated),
+                );
+                events
             }
             "session_info_update" => match opt_s(update, "title") {
                 Some(title) => vec![AgentEvent::ThreadNameUpdated {
@@ -878,6 +882,36 @@ mod tests {
             "rawInput": {"command": "rm -rf build"}}, "options": []}));
         assert!(
             matches!(approval, AgentEvent::ApprovalRequested(ApprovalRequest { kind: ApprovalKind::Command { command, .. }, .. }) if command == "rm -rf build")
+        );
+    }
+
+    #[test]
+    fn usage_update_carries_claude_rate_limits_from_meta() {
+        let mut t = Translator::new("claude");
+        let events = t.update(&update(
+            "s",
+            json!({"sessionUpdate": "usage_update", "used": 10, "size": 200000,
+            "_meta": {"claude/rateLimit": {
+                "five_hour": {"used_percentage": 42, "resets_at": 1762232399},
+                "seven_day": {"utilization": 100, "resets_at": "2025-11-06T03:59:59Z"}}}}),
+        ));
+        let limits = events
+            .iter()
+            .find_map(|e| match e {
+                AgentEvent::RateLimitsUpdated(l) => Some(l.clone()),
+                _ => None,
+            })
+            .expect("rate limits event");
+        assert_eq!(limits.primary.unwrap().used_percent, 42.0);
+        assert!(limits.reached);
+        let none = t.update(&update(
+            "s",
+            json!({"sessionUpdate": "usage_update", "used": 11, "size": 200000}),
+        ));
+        assert!(
+            !none
+                .iter()
+                .any(|e| matches!(e, AgentEvent::RateLimitsUpdated(_)))
         );
     }
 

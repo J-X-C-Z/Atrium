@@ -110,6 +110,29 @@ a request must be inside the roots, else `403 outside_roots`.
 - Answer within one second: cache versions and detection, refresh them in
   the background.
 
+### `GET /v1/agents/claude/usage`
+
+Claude plan usage for the account Claude Code is signed in to on this device.
+The node reads the OAuth token itself (`~/.claude/.credentials.json`, field
+`claudeAiOauth.accessToken`, ignored once `expiresAt` has passed; on macOS
+the keychain item `Claude Code-credentials` when the file is absent) and asks
+`GET https://api.anthropic.com/api/oauth/usage` with `Authorization: Bearer`
+and `anthropic-beta: oauth-2025-04-20`.
+
+```json
+{
+  "five_hour": { "utilization": 37.5, "resets_at": "2025-11-04T04:59:59Z" },
+  "seven_day": { "utilization": 12.0, "resets_at": "2025-11-06T03:59:59Z" }
+}
+```
+
+- `utilization` is the percent used (0-100); `resets_at` is ISO 8601 or
+  `null`. A window the account does not have is left out. Nothing else of
+  Anthropic's answer is passed on, and never the token.
+- `204 No Content` when the device has no usable login or the call failed.
+  The answer is cached for 5 minutes (failures for 1 minute), so polling it
+  is cheap. Older nodes answer 404; treat that as "no usage".
+
 ## Processes
 
 A process is one agent the node started for Atrium. It outlives the

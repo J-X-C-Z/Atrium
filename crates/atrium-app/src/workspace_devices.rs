@@ -196,6 +196,7 @@ impl Workspace {
             );
             self.settings.save();
         }
+        self.init_claude_usage(cx);
         self._discovery = Some(cx.spawn(async move |this, cx| {
             loop {
                 if this.update(cx, |ws, cx| ws.discover(cx)).is_err() {
@@ -217,6 +218,60 @@ impl Workspace {
                     .await;
             }
         }));
+    }
+
+    /// Every five minutes, reads the plan usage of each Claude Code in use:
+    /// this machine's through its own login, a device's through its node.
+    pub(super) fn init_claude_usage(&mut self, cx: &mut Context<Self>) {
+        let local = Arc::new(agent_rpc::claude_usage::ClaudeUsage::system());
+        self._claude_usage = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(5)).await;
+            loop {
+                let Ok(targets) = this.read_with(cx, |ws, _| ws.claude_usage_targets()) else {
+                    break;
+                };
+                for (backend, node) in targets {
+                    let local = local.clone();
+                    let usage = cx
+                        .background_executor()
+                        .spawn(async move {
+                            match node {
+                                Some(node) => node.claude_usage().ok().flatten(),
+                                None => local.get(),
+                            }
+                        })
+                        .await;
+                    let Some(limits) = usage.and_then(|v| atrium_core::parse_oauth_usage(&v))
+                    else {
+                        continue;
+                    };
+                    if this
+                        .update(cx, |ws, cx| ws.note_limits(&backend, limits, cx))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                cx.background_executor()
+                    .timer(Duration::from_secs(300))
+                    .await;
+            }
+        }));
+    }
+
+    /// The running Claude Code backends to ask about usage; a device's carry
+    /// its node.
+    fn claude_usage_targets(&self) -> Vec<(String, Option<NodeClient>)> {
+        self.agents
+            .iter()
+            .filter(|a| agents::is_claude(&a.profile.id) && a.status == AgentStatus::Ready)
+            .map(|a| {
+                (
+                    a.profile.id.clone(),
+                    a.remote.as_ref().map(|r| r.node.clone()),
+                )
+            })
+            .collect()
     }
 
     /// Looks for nodes: the tailnet's devices, plus addresses added by hand.
@@ -579,6 +634,9 @@ impl Workspace {
             if ok.is_err() {
                 return;
             }
+            if let Ok(limits) = listing.rate_limits().await {
+                let _ = this.update(cx, |ws, cx| ws.note_limits(&backend, limits, cx));
+            }
             match listing.model_list().await {
                 Ok(models) => {
                     let _ = this.update(cx, |ws, cx| {
@@ -667,9 +725,11 @@ impl Workspace {
                 meta.backend = backend;
                 AgentEvent::ThreadStarted(meta)
             }
-            AgentEvent::RateLimitsUpdated(_)
-            | AgentEvent::AccountChanged
-            | AgentEvent::LoginCompleted { .. } => return,
+            AgentEvent::RateLimitsUpdated(update) => {
+                self.note_limits(&backend, update, cx);
+                return;
+            }
+            AgentEvent::AccountChanged | AgentEvent::LoginCompleted { .. } => return,
             event => event,
         };
         self.apply(event, cx);

@@ -251,7 +251,8 @@ pub struct Workspace {
     /// Threads with memory switched off.
     pub memory_off: HashSet<String>,
     pub account: Option<Account>,
-    pub rate_limits: Option<RateLimits>,
+    /// Plan usage by backend id: `codex`, `codex@studio`, `claude`, ….
+    pub rate_limits: HashMap<String, RateLimits>,
     /// Chats folded into memory, and whether memory is ready.
     pub memory: Option<(u64, bool)>,
     /// A ChatGPT sign-in in progress.
@@ -292,6 +293,7 @@ pub struct Workspace {
     /// How many tailnet devices are online, or why the tailnet could not be read.
     pub tailnet: Option<Result<usize, String>>,
     _discovery: Option<Task<()>>,
+    _claude_usage: Option<Task<()>>,
     _pump: Option<Task<()>>,
     /// Multi-device overlay, the embedded node and remote conversations.
     pub sync: Option<SyncRuntime>,
@@ -386,7 +388,7 @@ impl Workspace {
             goals: HashMap::new(),
             memory_off: HashSet::new(),
             account: None,
-            rate_limits: None,
+            rate_limits: HashMap::new(),
             memory: None,
             login: None,
             editing: None,
@@ -411,6 +413,7 @@ impl Workspace {
             renaming_device: None,
             tailnet: None,
             _discovery: None,
+            _claude_usage: None,
             _pump: None,
             sync: None,
             sync_pending_turns: HashMap::new(),
@@ -494,6 +497,38 @@ impl Workspace {
         self.refresh_account(cx);
     }
 
+    /// The plan usage of `backend`'s account, when known.
+    pub fn limits_for(&self, backend: &str) -> Option<&RateLimits> {
+        self.rate_limits.get(backend)
+    }
+
+    /// Merges a usage update for `backend`, tells the team when a limit is
+    /// hit or lifted, and warns once when it is reached.
+    pub(super) fn note_limits(
+        &mut self,
+        backend: &str,
+        update: RateLimits,
+        cx: &mut Context<Self>,
+    ) {
+        let limits = self.rate_limits.entry(backend.to_string()).or_default();
+        let was_reached = limits.reached;
+        limits.merge(update);
+        let reached = limits.reached;
+        let resets_at = [limits.primary, limits.secondary]
+            .into_iter()
+            .flatten()
+            .filter(|w| w.used_percent >= 100.0 || reached)
+            .filter_map(|w| w.resets_at)
+            .max();
+        self.team_limit(backend, reached, resets_at);
+        if reached && !was_reached {
+            cx.emit(Notice::Error(
+                t("Usage limit reached. It resets soon; see Usage.").into(),
+            ));
+        }
+        cx.notify();
+    }
+
     /// Reloads who is signed in, their usage, and memory's state.
     pub fn refresh_account(&mut self, cx: &mut Context<Self>) {
         let Some(client) = self.client.clone() else {
@@ -513,7 +548,14 @@ impl Workspace {
                     ws.signed_in = Some(account.is_some() || !requires);
                     ws.account = account;
                 }
-                ws.rate_limits = limits;
+                match limits {
+                    Some(limits) => {
+                        ws.rate_limits.insert(CODEX.to_string(), limits);
+                    }
+                    None => {
+                        ws.rate_limits.remove(CODEX);
+                    }
+                }
                 ws.memory = memory;
                 cx.notify();
             });
@@ -587,25 +629,7 @@ impl Workspace {
                 return;
             }
             AgentEvent::RateLimitsUpdated(update) => {
-                let limits = self.rate_limits.get_or_insert_with(RateLimits::default);
-                let was_reached = limits.reached;
-                limits.merge(update.clone());
-                let (reached, resets_at) = (
-                    limits.reached,
-                    [limits.primary, limits.secondary]
-                        .into_iter()
-                        .flatten()
-                        .filter(|w| w.used_percent >= 100.0 || limits.reached)
-                        .filter_map(|w| w.resets_at)
-                        .max(),
-                );
-                self.team_limit(CODEX, reached, resets_at);
-                let limits = self.rate_limits.get_or_insert_with(RateLimits::default);
-                if limits.reached && !was_reached {
-                    cx.emit(Notice::Error(
-                        t("Usage limit reached. It resets soon; see Usage.").into(),
-                    ));
-                }
+                self.note_limits(CODEX, update.clone(), cx);
                 return;
             }
             AgentEvent::AccountChanged => {
@@ -1553,7 +1577,7 @@ impl Workspace {
             let _ = this.update(cx, |ws, cx| match result {
                 Ok(()) => {
                     ws.account = None;
-                    ws.rate_limits = None;
+                    ws.rate_limits.remove(CODEX);
                     cx.emit(Notice::Info(t("Signed out").into()));
                     ws.refresh_account(cx);
                 }

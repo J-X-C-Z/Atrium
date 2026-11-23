@@ -125,6 +125,11 @@ pub fn is_codex(id: &str) -> bool {
     split_backend(id).0 == "codex"
 }
 
+/// Whether a backend is Claude Code, here or on another device.
+pub fn is_claude(id: &str) -> bool {
+    split_backend(id).0 == "claude"
+}
+
 /// "Claude Code", or "Claude Code · studio" on another device.
 pub fn backend_label(id: &str) -> String {
     backend_label_with(id, |device| device.to_string())

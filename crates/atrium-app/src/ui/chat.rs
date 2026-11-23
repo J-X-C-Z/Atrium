@@ -91,15 +91,13 @@ fn header(
 
     let memory = ws.memory_enabled();
     // How much of the plan's usage is spent: a ring that opens the details.
-    // Codex's plan usage, shown in Codex chats only.
+    // Plan usage of the shown chat's backend: Codex's, Claude's, or a
+    // device's, when known.
     let usage_meter = ws
-        .rate_limits
-        .as_ref()
-        .filter(|_| ws.is_codex_view())
-        .and_then(|l| l.highest_used())
-        .map(|used| {
+        .limits_for(ws.view_backend())
+        .and_then(|l| l.highest_used().map(|used| (used, l.reached)))
+        .map(|(used, reached)| {
             let open = root.clone();
-            let reached = ws.rate_limits.as_ref().is_some_and(|l| l.reached);
             div()
                 .id("usage-meter")
                 .flex_none()

@@ -32,8 +32,14 @@ pub struct State {
     instance_id: String,
     ws_slots: Arc<Semaphore>,
     pub sync: Option<Arc<SyncState>>,
+    claude_usage: std::sync::Mutex<Arc<agent_rpc::claude_usage::ClaudeUsage>>,
 }
 impl State {
+    /// Replaces where Claude's usage comes from (tests stub the HTTP call).
+    pub fn set_claude_usage(&self, usage: agent_rpc::claude_usage::ClaudeUsage) {
+        *self.claude_usage.lock().expect("claude usage") = Arc::new(usage);
+    }
+
     pub async fn new(config: Arc<Config>, path: String) -> Result<Arc<Self>> {
         Self::new_with_sync(config, path, None).await
     }
@@ -62,6 +68,9 @@ impl State {
             info: RwLock::new(Value::Null),
             instance_id: uuid::Uuid::new_v4().to_string(),
             sync,
+            claude_usage: std::sync::Mutex::new(Arc::new(
+                agent_rpc::claude_usage::ClaudeUsage::system(),
+            )),
         });
         s.refresh(false).await;
         let c = s.clone();
@@ -155,6 +164,7 @@ pub fn router(s: Arc<State>) -> Router {
             "/v1/sync/threads/{backend}/{id}/move-release",
             post(sync_move_release),
         )
+        .route("/v1/agents/claude/usage", get(claude_usage))
         .route("/v1/procs", get(list).post(spawn))
         .route("/v1/procs/{id}", delete(stop))
         .route("/v1/procs/{id}/attach", get(attach))
@@ -638,6 +648,20 @@ impl From<HostError> for ApiError {
 }
 async fn info(AxState(s): AxState<Arc<State>>) -> Json<Value> {
     Json(s.info.read().await.clone())
+}
+/// Claude's plan usage as this machine's login sees it: 200 with the two
+/// windows, or 204 without a login or when Anthropic cannot be reached. The
+/// token never leaves the machine.
+async fn claude_usage(AxState(s): AxState<Arc<State>>) -> Response {
+    let usage = s.claude_usage.lock().expect("claude usage").clone();
+    match tokio::task::spawn_blocking(move || usage.get())
+        .await
+        .ok()
+        .flatten()
+    {
+        Some(value) => Json(value).into_response(),
+        None => StatusCode::NO_CONTENT.into_response(),
+    }
 }
 async fn list(
     AxState(s): AxState<Arc<State>>,
