@@ -27,10 +27,54 @@ impl Slide {
     pub fn title(&self) -> String {
         self.shapes
             .iter()
-            .flat_map(|s| s.paras.iter())
+            .flat_map(Shape::text_paras)
             .map(|p| p.text().trim().to_string())
             .find(|t| !t.is_empty())
             .unwrap_or_default()
+    }
+}
+
+impl Shape {
+    /// Every paragraph the shape shows or edits, including table cells.
+    pub fn text_paras(&self) -> Box<dyn Iterator<Item = &Para> + '_> {
+        let own = self.paras.iter();
+        match &self.kind {
+            crate::look::ShapeKind::Table(table) => Box::new(
+                own.chain(
+                    table
+                        .rows
+                        .iter()
+                        .flatten()
+                        .flatten()
+                        .filter_map(|b| match b {
+                            crate::word::Block::Paragraph(p) => Some(p),
+                            _ => None,
+                        }),
+                ),
+            ),
+            _ => Box::new(own),
+        }
+    }
+
+    /// The same paragraphs, for edits.
+    pub fn text_paras_mut(&mut self) -> Box<dyn Iterator<Item = &mut Para> + '_> {
+        let own = self.paras.iter_mut();
+        match &mut self.kind {
+            crate::look::ShapeKind::Table(table) => Box::new(
+                own.chain(
+                    table
+                        .rows
+                        .iter_mut()
+                        .flatten()
+                        .flatten()
+                        .filter_map(|b| match b {
+                            crate::word::Block::Paragraph(p) => Some(p),
+                            _ => None,
+                        }),
+                ),
+            ),
+            _ => Box::new(own),
+        }
     }
 }
 
@@ -60,7 +104,7 @@ impl Deck {
             .slides
             .iter_mut()
             .flat_map(|s| s.shapes.iter_mut())
-            .flat_map(|s| s.paras.iter_mut())
+            .flat_map(Shape::text_paras_mut)
             .find(|p| p.id == para)
             .ok_or(EditError::Missing)?;
         if p.locked {

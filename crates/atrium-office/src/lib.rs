@@ -19,6 +19,10 @@ mod sheet;
 mod sheet_binding;
 mod slides;
 mod slides_binding;
+mod slides_chart;
+mod slides_geom;
+mod slides_style;
+mod slides_theme;
 mod word;
 mod word_binding;
 

@@ -163,7 +163,7 @@ pub(crate) fn snapshot(office: &Office) -> Snapshot {
         Office::Slides(deck) => {
             for (i, slide) in deck.slides().iter().enumerate() {
                 let title = slide.title();
-                for p in slide.shapes.iter().flat_map(|s| s.paras.iter()) {
+                for p in slide.shapes.iter().flat_map(|s| s.text_paras()) {
                     pieces.push(Piece {
                         key: Key::Node(p.id),
                         at: Location::Slide {

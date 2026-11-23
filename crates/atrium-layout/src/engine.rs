@@ -17,7 +17,7 @@ use atrium_office::{
 
 use crate::{FontKey, Item, Layout, Line, Metrics, Page, Pen, Rect, Seg, Shaper};
 
-fn pt(twips: i32) -> f32 {
+pub(crate) fn pt(twips: i32) -> f32 {
     twips as f32 / TWIPS_PER_PT as f32
 }
 
@@ -72,35 +72,35 @@ struct Unit {
 /// A line laid out at the origin: x from the text area's left edge, y
 /// from the line's top.
 #[derive(Clone, Debug)]
-struct Laid {
-    height: f32,
-    baseline: f32,
-    items: Vec<Item>,
-    para: NodeId,
-    range: std::ops::Range<usize>,
-    stops: Vec<(usize, f32)>,
+pub(crate) struct Laid {
+    pub(crate) height: f32,
+    pub(crate) baseline: f32,
+    pub(crate) items: Vec<Item>,
+    pub(crate) para: NodeId,
+    pub(crate) range: std::ops::Range<usize>,
+    pub(crate) stops: Vec<(usize, f32)>,
 }
 
-struct ParaBox {
-    before: f32,
-    after: f32,
-    page_break_before: bool,
-    lines: Vec<Laid>,
-    shading: Option<Rgb>,
+pub(crate) struct ParaBox {
+    pub(crate) before: f32,
+    pub(crate) after: f32,
+    pub(crate) page_break_before: bool,
+    pub(crate) lines: Vec<Laid>,
+    pub(crate) shading: Option<Rgb>,
 }
 
-struct Ctx<'a> {
-    shaper: &'a dyn Shaper,
-    defaults: &'a Marks,
-    base_size: f32,
+pub(crate) struct Ctx<'a> {
+    pub(crate) shaper: &'a dyn Shaper,
+    pub(crate) defaults: &'a Marks,
+    pub(crate) base_size: f32,
     /// Each list's count per level.
-    counters: HashMap<u32, Vec<u32>>,
-    page_number: u32,
-    pages_total: u32,
-    last_table_height: f32,
+    pub(crate) counters: HashMap<u32, Vec<u32>>,
+    pub(crate) page_number: u32,
+    pub(crate) pages_total: u32,
+    pub(crate) last_table_height: f32,
 }
 
-fn translate(item: &Item, dx: f32, dy: f32) -> Item {
+pub(crate) fn translate(item: &Item, dx: f32, dy: f32) -> Item {
     match item.clone() {
         Item::Text {
             x,
@@ -108,12 +108,16 @@ fn translate(item: &Item, dx: f32, dy: f32) -> Item {
             text,
             font,
             color,
+            rotation,
+            center,
         } => Item::Text {
             x: x + dx,
             baseline: baseline + dy,
             text,
             font,
             color,
+            rotation,
+            center: (center.0 + dx, center.1 + dy),
         },
         Item::Fill { rect, color } => Item::Fill {
             rect: Rect {
@@ -146,6 +150,8 @@ fn translate(item: &Item, dx: f32, dy: f32) -> Item {
             segments,
             fill,
             stroke,
+            rotation,
+            center,
         } => Item::Path {
             segments: segments
                 .into_iter()
@@ -161,6 +167,8 @@ fn translate(item: &Item, dx: f32, dy: f32) -> Item {
                 .collect(),
             fill,
             stroke,
+            rotation,
+            center: (center.0 + dx, center.1 + dy),
         },
         Item::Gradient { rect, angle, stops } => Item::Gradient {
             rect: Rect {
@@ -529,7 +537,7 @@ impl Ctx<'_> {
         }
     }
 
-    fn para(&mut self, para: &Para, width: f32, slide: bool) -> ParaBox {
+    pub(crate) fn para(&mut self, para: &Para, width: f32, slide: bool) -> ParaBox {
         let (look, size, bold) = hinted(para);
         let size = size.or(slide.then_some(SLIDE_PT));
         let mut units = Vec::new();
@@ -754,6 +762,8 @@ impl Ctx<'_> {
                     text,
                     font,
                     color,
+                    rotation: 0.0,
+                    center: (0.0, 0.0),
                 });
             }
         };
@@ -840,7 +850,11 @@ impl Ctx<'_> {
     }
 
     /// Blocks stacked without pages: a table cell, a header, a text box.
-    fn stack(&mut self, blocks: &[Block], width: f32) -> (Vec<(f32, Laid)>, Vec<Item>, f32) {
+    pub(crate) fn stack(
+        &mut self,
+        blocks: &[Block],
+        width: f32,
+    ) -> (Vec<(f32, Laid)>, Vec<Item>, f32) {
         let mut placed = Vec::new();
         let mut extra = Vec::new();
         let mut y = 0.0;
@@ -878,7 +892,7 @@ impl Ctx<'_> {
 }
 
 /// Rows of a laid-out table: each row's top, the lines in it, its height.
-type Rows = Vec<(f32, Vec<(f32, Laid)>)>;
+pub(crate) type Rows = Vec<(f32, Vec<(f32, Laid)>)>;
 
 impl Ctx<'_> {
     fn columns(&self, t: &Table, width: f32) -> Vec<f32> {
@@ -896,7 +910,7 @@ impl Ctx<'_> {
 
     /// Lays out a table at the origin; returns its rows and the fills and
     /// borders, and leaves its height in `last_table_height`.
-    fn table(&mut self, t: &Table, width: f32) -> (Rows, Vec<Item>) {
+    pub(crate) fn table(&mut self, t: &Table, width: f32) -> (Rows, Vec<Item>) {
         let cols = self.columns(t, width);
         let default_look = t.look == Default::default();
         let pad = if default_look {
@@ -926,10 +940,25 @@ impl Ctx<'_> {
                 let w: f32 = cols[c.min(cols.len() - 1)..(c + span).min(cols.len())]
                     .iter()
                     .sum();
-                let inner = (w - pad[1] - pad[3]).max(1.0);
+                let look = t.look.cells.get(r).and_then(|row| row.get(c));
+                if look.is_some_and(|l| l.merged_up) {
+                    c += span;
+                    x += w;
+                    continue;
+                }
+                let cell_pad = look
+                    .map(|l| {
+                        if l.padding == [0; 4] {
+                            pad
+                        } else {
+                            l.padding.map(pt)
+                        }
+                    })
+                    .unwrap_or(pad);
+                let inner = (w - cell_pad[1] - cell_pad[3]).max(1.0);
                 let (placed, extra, h) = self.stack(&row[c], inner);
-                height = height.max(h + pad[0] + pad[2]);
-                cells.push((c, x, w, placed, extra, h));
+                height = height.max(h + cell_pad[0] + cell_pad[2]);
+                cells.push((c, x, w, cell_pad, placed, extra, h));
                 x += w;
                 c += span;
             }
@@ -937,7 +966,7 @@ impl Ctx<'_> {
                 height = if *exact { pt(*h) } else { height.max(pt(*h)) };
             }
             let mut laid = Vec::new();
-            for (c, x, w, placed, extra, h) in cells {
+            for (c, x, w, cell_pad, placed, extra, h) in cells {
                 let look = t.look.cells.get(r).and_then(|row| row.get(c));
                 if let Some(color) = look.and_then(|l| l.shading) {
                     items.push(Item::Fill {
@@ -950,24 +979,24 @@ impl Ctx<'_> {
                         color,
                     });
                 }
-                let free = height - pad[0] - pad[2] - h;
-                let dy = pad[0]
+                let free = height - cell_pad[0] - cell_pad[2] - h;
+                let dy = cell_pad[0]
                     + match look.map(|l| l.v_align).unwrap_or_default() {
                         VAlign::Top => 0.0,
                         VAlign::Center => free / 2.0,
                         VAlign::Bottom => free,
                     };
                 for item in extra {
-                    items.push(translate(&item, x + pad[3], y + dy));
+                    items.push(translate(&item, x + cell_pad[3], y + dy));
                 }
                 for (ly, mut line) in placed {
                     line.items = line
                         .items
                         .iter()
-                        .map(|i| translate(i, x + pad[3], 0.0))
+                        .map(|i| translate(i, x + cell_pad[3], 0.0))
                         .collect();
                     for s in line.stops.iter_mut() {
-                        s.1 += x + pad[3];
+                        s.1 += x + cell_pad[3];
                     }
                     laid.push((dy + ly, line));
                 }
@@ -1264,6 +1293,7 @@ pub(crate) fn document(doc: &WordDoc, shaper: &dyn Shaper) -> Layout {
     cur.layout
 }
 
+#[allow(dead_code)]
 pub(crate) fn slide(slide: &Slide, index: usize, shaper: &dyn Shaper) -> Layout {
     let defaults = Marks::default();
     let mut cx = Ctx {
@@ -1314,6 +1344,7 @@ pub(crate) fn slide(slide: &Slide, index: usize, shaper: &dyn Shaper) -> Layout 
 }
 
 /// Draws a shape and its text; returns the height its text took.
+#[allow(dead_code)]
 fn shape_items(
     cx: &mut Ctx,
     shape: &Shape,
@@ -1421,6 +1452,7 @@ fn shape_items(
 }
 
 /// A shape's fill and outline: its own path, or its frame.
+#[allow(dead_code)]
 fn shape_paint(shape: &Shape, rect: Rect, page: &mut Page) {
     let look = &shape.look;
     let (x, y) = (rect.x, rect.y);
@@ -1462,6 +1494,8 @@ fn shape_paint(shape: &Shape, rect: Rect, page: &mut Page) {
             segments: segments.clone(),
             fill: Some((*color, *alpha)),
             stroke: None,
+            rotation: 0.0,
+            center: (0.0, 0.0),
         }),
         Fill::Gradient { stops, angle, .. } if plain => page.items.push(Item::Gradient {
             rect,
@@ -1478,6 +1512,8 @@ fn shape_paint(shape: &Shape, rect: Rect, page: &mut Page) {
                     segments: segments.clone(),
                     fill: Some((*c, *a)),
                     stroke: None,
+                    rotation: 0.0,
+                    center: (0.0, 0.0),
                 });
             }
         }
@@ -1496,12 +1532,15 @@ fn shape_paint(shape: &Shape, rect: Rect, page: &mut Page) {
                 alpha: stroke.alpha,
                 dash: stroke.dash,
             }),
+            rotation: 0.0,
+            center: (0.0, 0.0),
         });
     }
 }
 
 /// The reference chart: a frame, the title, and columns, bars or lines for
 /// the series; other kinds show their name. The full engine replaces it.
+#[allow(dead_code)]
 pub(crate) fn chart(c: &Chart, rect: Rect, shaper: &dyn Shaper) -> Vec<Item> {
     const PALETTE: [u32; 6] = [0x4472C4, 0xED7D31, 0xA5A5A5, 0xFFC000, 0x5B9BD5, 0x70AD47];
     let mut out = vec![Item::Rule {
@@ -1526,6 +1565,8 @@ pub(crate) fn chart(c: &Chart, rect: Rect, shaper: &dyn Shaper) -> Vec<Item> {
             text: title.clone(),
             font: font.clone(),
             color: Rgb(0x404040),
+            rotation: 0.0,
+            center: (0.0, 0.0),
         });
         top += 20.0;
     }
@@ -1595,6 +1636,8 @@ pub(crate) fn chart(c: &Chart, rect: Rect, shaper: &dyn Shaper) -> Vec<Item> {
                         alpha: 255,
                         dash: Default::default(),
                     }),
+                    rotation: 0.0,
+                    center: (0.0, 0.0),
                 });
             }
         }
@@ -1609,6 +1652,8 @@ pub(crate) fn chart(c: &Chart, rect: Rect, shaper: &dyn Shaper) -> Vec<Item> {
                 text: label,
                 font,
                 color: Rgb(0x808080),
+                rotation: 0.0,
+                center: (0.0, 0.0),
             });
         }
     }
