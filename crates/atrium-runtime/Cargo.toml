@@ -1,0 +1,11 @@
+[package]
+name = "atrium-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+atrium-core.workspace = true
+serde.workspace = true
+thiserror.workspace = true
