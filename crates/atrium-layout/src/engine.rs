@@ -6,6 +6,7 @@ mod lines;
 mod table;
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use atrium_office::look::{
     Chart, ChartKind, Fill, NumFormat, Origin, PathCmd, Rgb, Section, ShapeKind, Wrap,
@@ -259,6 +260,13 @@ struct Flow<'a, 'b> {
     base_bottom: Vec<f32>,
     note_height: f32,
     footnotes: HashMap<NodeId, Vec<Block>>,
+    previous: Option<&'a Layout>,
+    changed: HashSet<NodeId>,
+    start_page: usize,
+    start_block: usize,
+    block_index: usize,
+    number_override: Option<u32>,
+    stopped: bool,
 }
 
 impl Flow<'_, '_> {
@@ -316,7 +324,9 @@ impl Flow<'_, '_> {
         let s = self.section;
         let section = self.sections[s].clone();
         let p = section.page.clone();
-        self.number = if s != self.last_section {
+        self.number = if let Some(number) = self.number_override.take() {
+            number
+        } else if s != self.last_section {
             section.page_start.unwrap_or(self.number + 1)
         } else {
             self.number + 1
@@ -578,6 +588,15 @@ impl Flow<'_, '_> {
     }
 
     fn paragraph(&mut self, p: &atrium_office::Para, next: Option<&atrium_office::Block>) {
+        if !self.stopped
+            && self.block_index > self.start_block
+            && self.at_page_top()
+            && let Some(previous) = self.previous
+            && let Some(page) = matching_page(previous, p.id, self.section, &self.sections)
+        {
+            self.copy_rest(previous, page);
+            return;
+        }
         let width = self.col_width;
         let (look, _, _) = lines::hinted(p);
         if look.page_break_before && !self.at_page_top() {
@@ -820,6 +839,51 @@ impl Flow<'_, '_> {
             }
         }
     }
+
+    fn copy_rest(&mut self, previous: &Layout, from: usize) {
+        let current = self.page;
+        self.layout.pages.truncate(current);
+        self.layout.lines.retain(|line| line.page < current);
+        self.furniture.retain(|f| f.page < current);
+        self.notes.truncate(current);
+        self.base_bottom.truncate(current);
+        self.layout
+            .pages
+            .extend(previous.pages[from..].iter().cloned());
+        for line in &previous.lines {
+            if line.page < from {
+                continue;
+            }
+            let mut line = line.clone();
+            line.page = current + (line.page - from);
+            self.layout.lines.push(line);
+        }
+        self.stopped = true;
+    }
+}
+
+fn matching_page(
+    previous: &Layout,
+    para: NodeId,
+    section: usize,
+    sections: &[Section],
+) -> Option<usize> {
+    for (i, page) in previous.pages.iter().enumerate() {
+        if page.section != section {
+            continue;
+        }
+        if let Some(first) = previous
+            .lines
+            .iter()
+            .find(|line| line.page == i && !line.furniture)
+            && first.para == para
+            && first.range.start == 0
+        {
+            let _ = sections;
+            return Some(i);
+        }
+    }
+    None
 }
 
 fn document_pass(doc: &WordDoc, shaper: &dyn Shaper, pages_total: u32) -> Layout {
@@ -860,6 +924,13 @@ fn document_pass(doc: &WordDoc, shaper: &dyn Shaper, pages_total: u32) -> Layout
         base_bottom: Vec::new(),
         note_height: 0.0,
         footnotes,
+        previous: None,
+        changed: HashSet::new(),
+        start_page: 0,
+        start_block: 0,
+        block_index: 0,
+        number_override: None,
+        stopped: false,
     };
     flow.start_page();
     let blocks = doc.blocks();
