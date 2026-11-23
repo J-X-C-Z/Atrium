@@ -7,8 +7,10 @@ mod table;
 
 use std::collections::HashMap;
 
-use atrium_office::look::{Chart, ChartKind, Fill, NumFormat, PathCmd, Rgb, Section, ShapeKind};
-use atrium_office::{Marks, Shape, Slide, WordDoc};
+use atrium_office::look::{
+    Chart, ChartKind, Fill, NumFormat, Origin, PathCmd, Rgb, Section, ShapeKind, Wrap,
+};
+use atrium_office::{AtomKind, Block, Inline, Marks, NodeId, Shape, Slide, WordDoc};
 
 use crate::{FontKey, Item, Layout, Line, Metrics, Page, Pen, Rect, Seg, Shaper};
 
@@ -222,6 +224,12 @@ struct Furniture {
     lines: Vec<Line>,
 }
 
+struct Note {
+    lines: Vec<(f32, Laid)>,
+    items: Vec<Item>,
+    height: f32,
+}
+
 struct Flow<'a, 'b> {
     cx: &'a mut Ctx<'b>,
     sections: Vec<Section>,
@@ -245,6 +253,12 @@ struct Flow<'a, 'b> {
     last_after: f32,
     last_after_at: Option<(usize, usize)>,
     last_style: Option<atrium_office::ParaStyle>,
+    floats: Vec<lines::FloatBox>,
+    front: Vec<(usize, Item)>,
+    notes: Vec<Vec<Note>>,
+    base_bottom: Vec<f32>,
+    note_height: f32,
+    footnotes: HashMap<NodeId, Vec<Block>>,
 }
 
 impl Flow<'_, '_> {
@@ -332,6 +346,8 @@ impl Flow<'_, '_> {
         });
         self.page = index;
         self.column = 0;
+        self.floats.clear();
+        self.note_height = 0.0;
         self.last_after = 0.0;
         self.last_after_at = None;
         self.geometry();
@@ -372,6 +388,13 @@ impl Flow<'_, '_> {
         if self.body_bottom <= self.body_top {
             self.body_bottom = pt(p.height - p.bottom);
         }
+        if self.notes.len() <= index {
+            self.notes.resize_with(index + 1, Vec::new);
+        }
+        if self.base_bottom.len() <= index {
+            self.base_bottom.resize(index + 1, self.body_bottom);
+        }
+        self.base_bottom[index] = self.body_bottom;
         self.y = self.body_top;
     }
 
@@ -417,7 +440,19 @@ impl Flow<'_, '_> {
     }
 
     fn place_line(&mut self, line: Laid, shading: Option<Rgb>) {
-        if self.y + line.height > self.body_bottom + 0.01 && self.y > self.body_top + 0.01 {
+        let (notes, note_height) = self.lay_notes(&line.refs, self.area_width);
+        if !notes.is_empty()
+            && self.y + line.height > self.body_bottom - note_height + 0.01
+            && self.y > self.body_top + 0.01
+        {
+            self.next_column();
+        }
+        let had_notes = !notes.is_empty();
+        self.commit_notes(notes, note_height);
+        if !had_notes
+            && self.y + line.height > self.body_bottom + 0.01
+            && self.y > self.body_top + 0.01
+        {
             self.next_column();
         }
         let page = self.page;
@@ -430,13 +465,11 @@ impl Flow<'_, '_> {
 
     /// How many of the lines fit in the remaining space.
     fn fit_count(&self, lines: &[Laid], before: f32) -> usize {
-        let mut y = self.y + before;
         let mut fit = 0;
         for line in lines {
-            if y + line.height > self.body_bottom + 0.01 {
+            if self.y + before + line.y + line.height > self.body_bottom + 0.01 {
                 break;
             }
-            y += line.height;
             fit += 1;
         }
         fit
@@ -451,13 +484,127 @@ impl Flow<'_, '_> {
         out.lines.first().map(|l| l.height).unwrap_or(0.0)
     }
 
+    fn paragraph_floats(&self, p: &atrium_office::Para) -> Vec<lines::FloatAnchor> {
+        let mut out = Vec::new();
+        for inline in &p.inlines {
+            if let Inline::Atom(atom) = inline
+                && let (AtomKind::Image(path), Some(float)) = (&atom.kind, atom.look.float)
+            {
+                let (w, h) = atom
+                    .look
+                    .size
+                    .map(|(w, h)| (pt(w), pt(h)))
+                    .unwrap_or((30.0, 30.0));
+                out.push(lines::FloatAnchor {
+                    id: atom.id,
+                    path: path.clone(),
+                    width: w,
+                    height: h,
+                    float,
+                });
+            }
+        }
+        out
+    }
+
+    fn anchor_box(&self, anchor: &lines::FloatAnchor, para_top: f32) -> lines::FloatBox {
+        let p = &self.sections[self.section].page;
+        let x0 = match anchor.float.from_x {
+            Origin::Page => 0.0,
+            Origin::Margin => self.area_left,
+            Origin::Column | Origin::Paragraph => self.column_left(self.column),
+        };
+        let y0 = match anchor.float.from_y {
+            Origin::Page => 0.0,
+            Origin::Margin => pt(p.top),
+            Origin::Column | Origin::Paragraph => para_top,
+        };
+        lines::FloatBox {
+            rect: Rect {
+                x: x0 + pt(anchor.float.x),
+                y: y0 + pt(anchor.float.y),
+                width: anchor.width,
+                height: anchor.height,
+            },
+            wrap: anchor.float.wrap,
+            clear: anchor.float.clear.map(pt),
+        }
+    }
+
+    fn add_float(&mut self, anchor: &lines::FloatAnchor, placed: lines::FloatBox) {
+        self.floats.push(placed);
+        let item = Item::Picture {
+            rect: placed.rect,
+            path: anchor.path.clone(),
+        };
+        match placed.wrap {
+            Wrap::Behind => self.layout.pages[self.page].items.insert(0, item),
+            Wrap::InFront => self.front.push((self.page, item)),
+            Wrap::Square | Wrap::TopAndBottom => self.layout.pages[self.page].items.push(item),
+        }
+    }
+
+    fn lay_notes(&mut self, refs: &[NodeId], width: f32) -> (Vec<Note>, f32) {
+        let mut out = Vec::new();
+        let mut total = 0.0;
+        let counters = self.cx.counters.clone();
+        let footnotes = self.cx.footnote_number;
+        for id in refs {
+            let Some(blocks) = self.footnotes.get(id).cloned() else {
+                continue;
+            };
+            let (placed, items, height) = lines::stack(self.cx, &blocks, width);
+            total += height + 2.0;
+            out.push(Note {
+                lines: placed,
+                items,
+                height,
+            });
+        }
+        self.cx.counters = counters;
+        self.cx.footnote_number = footnotes;
+        (out, total)
+    }
+
+    fn commit_notes(&mut self, notes: Vec<Note>, height: f32) {
+        if notes.is_empty() {
+            return;
+        }
+        self.notes[self.page].extend(notes);
+        self.note_height += height;
+        if let Some(base) = self.base_bottom.get(self.page) {
+            self.body_bottom = (base - self.note_height).max(self.body_top + 1.0);
+        }
+    }
+
     fn paragraph(&mut self, p: &atrium_office::Para, next: Option<&atrium_office::Block>) {
         let width = self.col_width;
-        let b = lines::para(self.cx, p, width, false);
+        let (look, _, _) = lines::hinted(p);
+        if look.page_break_before && !self.at_page_top() {
+            self.start_page();
+        }
+        let para_top = self.y;
+        let anchors = self.paragraph_floats(p);
+        let mut boxes = self.floats.clone();
+        let placed: Vec<lines::FloatBox> = anchors
+            .iter()
+            .map(|a| self.anchor_box(a, para_top))
+            .collect();
+        boxes.extend(placed.iter().copied());
+        let wrap = lines::WrapCtx {
+            top: para_top,
+            left: self.column_left(self.column),
+            width: self.col_width,
+            floats: &boxes,
+        };
+        let b = lines::para_wrapped(self.cx, p, width, false, Some(&wrap));
+        for (anchor, placed) in anchors.iter().zip(placed.iter()) {
+            self.add_float(anchor, *placed);
+        }
         if b.page_break_before && !self.at_page_top() {
             self.start_page();
         }
-        let total: f32 = b.lines.iter().map(|l| l.height).sum();
+        let total: f32 = b.lines.last().map(|l| l.y + l.height).unwrap_or(0.0);
         let body_height = self.body_bottom - self.body_top;
         let next_first = if b.keep_next {
             match next {
@@ -519,8 +666,13 @@ impl Flow<'_, '_> {
                 continue;
             }
             self.y += before;
+            let para_start = self.y;
             let take = fit.min(lines.len());
             for line in lines.drain(..take) {
+                let target = para_start + line.y;
+                if target > self.y {
+                    self.y = target;
+                }
                 self.place_line(line, b.shading);
             }
             if lines.is_empty() {
@@ -616,10 +768,67 @@ impl Flow<'_, '_> {
             self.place_row(header);
         }
     }
+
+    fn draw_notes(&mut self) {
+        for i in 0..self.notes.len() {
+            let notes = std::mem::take(&mut self.notes[i]);
+            if notes.is_empty() {
+                continue;
+            }
+            let Some(page) = self.layout.pages.get(i) else {
+                continue;
+            };
+            let p = &self.sections[page.section].page;
+            let left = pt(p.left + p.gutter);
+            let width = pt(p.width - p.left - p.right - p.gutter);
+            let total: f32 = notes.iter().map(|n| n.height + 2.0).sum();
+            let mut y = (self.base_bottom.get(i).copied().unwrap_or(0.0) - total).max(pt(p.top));
+            self.layout.pages[i].items.push(Item::Rule {
+                from: (left, y - 3.0),
+                to: (left + width / 3.0, y - 3.0),
+                width: 0.5,
+                color: Rgb::BLACK,
+            });
+            for note in notes {
+                self.layout.pages[i]
+                    .items
+                    .extend(note.items.iter().map(|item| translate(item, left, y)));
+                for (ly, line) in note.lines {
+                    self.layout.pages[i]
+                        .items
+                        .extend(line.items.iter().map(|item| translate(item, left, y + ly)));
+                    self.layout.lines.push(Line {
+                        page: i,
+                        para: line.para,
+                        range: line.range,
+                        top: y + ly,
+                        height: line.height,
+                        baseline: y + ly + line.baseline,
+                        stops: line.stops.iter().map(|(o, x)| (*o, x + left)).collect(),
+                        furniture: false,
+                    });
+                }
+                y += note.height + 2.0;
+            }
+        }
+    }
+
+    fn flush_front(&mut self) {
+        for (page, item) in std::mem::take(&mut self.front) {
+            if let Some(p) = self.layout.pages.get_mut(page) {
+                p.items.push(item);
+            }
+        }
+    }
 }
 
 fn document_pass(doc: &WordDoc, shaper: &dyn Shaper, pages_total: u32) -> Layout {
     let sections = doc.sections().into_owned();
+    let footnotes: HashMap<NodeId, Vec<Block>> = doc
+        .footnotes()
+        .iter()
+        .map(|f| (f.id, f.blocks.clone()))
+        .collect();
     let mut cx = Ctx::new(shaper, doc.defaults(), BODY_PT, doc.default_tab_stop());
     cx.pages_total = pages_total;
     let mut flow = Flow {
@@ -645,6 +854,12 @@ fn document_pass(doc: &WordDoc, shaper: &dyn Shaper, pages_total: u32) -> Layout
         last_after: 0.0,
         last_after_at: None,
         last_style: None,
+        floats: Vec::new(),
+        front: Vec::new(),
+        notes: Vec::new(),
+        base_bottom: Vec::new(),
+        note_height: 0.0,
+        footnotes,
     };
     flow.start_page();
     let blocks = doc.blocks();
@@ -684,6 +899,8 @@ fn document_pass(doc: &WordDoc, shaper: &dyn Shaper, pages_total: u32) -> Layout
             }
         }
     }
+    flow.draw_notes();
+    flow.flush_front();
     let mut layout = flow.layout;
     for f in flow.furniture {
         if let Some(page) = layout.pages.get_mut(f.page) {
@@ -818,10 +1035,12 @@ fn shape_items(
     for p in &shape.paras {
         let b = lines::para(cx, p, inner, auto.is_none());
         ty += b.before;
+        let para_start = ty;
         for line in b.lines {
             let lh = line.height;
-            placed.push((ty, line));
-            ty += lh;
+            let ly = para_start + line.y;
+            placed.push((ly, line));
+            ty = ly + lh;
         }
         ty += b.after;
     }

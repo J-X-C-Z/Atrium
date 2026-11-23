@@ -1,8 +1,10 @@
 use atrium_office::look::{
-    Baseline, Border, Borders, CellLook, LineSpacing, PageLook, ParaLook, Rgb, Section, TabKind,
-    TabStop, TableLook,
+    AtomLook, Baseline, Border, Borders, CellLook, Float, LineSpacing, Origin, PageLook, ParaLook,
+    Rgb, Section, TabKind, TabStop, TableLook, Wrap,
 };
-use atrium_office::{Align, Atom, AtomKind, Block, Inline, Marks, Para, ParaStyle, Table, WordDoc};
+use atrium_office::{
+    Align, Atom, AtomKind, Block, Footnote, Inline, Marks, Para, ParaStyle, Table, WordDoc,
+};
 
 use crate::{FixedShaper, Item, Pos, layout};
 
@@ -1015,7 +1017,15 @@ fn a_taller_header_moves_the_body_down() {
         &FixedShaper,
     );
     let body = out.lines.iter().find(|l| l.para == 1).unwrap();
-    assert!(close(body.top, 30.0));
+    assert!(
+        close(body.top, 30.0),
+        "{} {:?}",
+        body.top,
+        out.lines
+            .iter()
+            .map(|l| (l.para, l.page, l.top, l.height, l.furniture))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -1047,5 +1057,153 @@ fn a_section_can_restart_page_numbers() {
     assert_eq!(
         out.pages.iter().map(|p| p.number).collect::<Vec<_>>(),
         [1, 2, 5, 6]
+    );
+}
+
+fn float_image(id: u64, wrap: Wrap, x: i32, y: i32) -> Inline {
+    Inline::Atom(Atom {
+        id,
+        kind: AtomKind::Image(None),
+        look: AtomLook {
+            size: Some((400, 400)),
+            float: Some(Float {
+                x,
+                from_x: Origin::Margin,
+                y,
+                from_y: Origin::Margin,
+                wrap,
+                clear: [0; 4],
+            }),
+            shown: None,
+        },
+    })
+}
+
+#[test]
+fn square_wrap_shortens_the_lines_beside_a_float() {
+    let mut p = plain(1, "");
+    p.inlines = vec![
+        float_image(20, Wrap::Square, 0, 0),
+        Inline::Text {
+            text: "一二三四五六七八九十".into(),
+            marks: Marks {
+                size: Some(200),
+                ..Default::default()
+            },
+        },
+    ];
+    let out = layout(
+        &looked(vec![Block::Paragraph(p)], one_section(2000, 2000)),
+        &FixedShaper,
+    );
+    assert_eq!(out.lines[0].range.end, 27);
+    assert!(out.lines[0].stops[0].1 >= 19.9);
+    assert!(
+        out.pages[0]
+            .items
+            .iter()
+            .any(|i| matches!(i, Item::Picture { rect, .. } if close(rect.width, 20.0)))
+    );
+}
+
+#[test]
+fn top_and_bottom_wrap_pushes_the_text_below() {
+    let mut p = plain(1, "");
+    p.inlines = vec![
+        float_image(20, Wrap::TopAndBottom, 0, 0),
+        Inline::Text {
+            text: "字".into(),
+            marks: Marks {
+                size: Some(200),
+                ..Default::default()
+            },
+        },
+    ];
+    let out = layout(
+        &looked(vec![Block::Paragraph(p)], one_section(2000, 2000)),
+        &FixedShaper,
+    );
+    let body = out.lines.iter().find(|l| l.para == 1).unwrap();
+    assert!(body.top >= 19.9);
+}
+
+#[test]
+fn behind_and_in_front_floats_take_no_space_and_are_drawn_in_order() {
+    let behind = {
+        let mut p = plain(1, "");
+        p.inlines = vec![
+            float_image(20, Wrap::Behind, 0, 0),
+            Inline::Text {
+                text: "字".into(),
+                marks: Marks::default(),
+            },
+        ];
+        layout(
+            &looked(vec![Block::Paragraph(p)], one_section(2000, 2000)),
+            &FixedShaper,
+        )
+    };
+    assert!(matches!(
+        behind.pages[0].items.first(),
+        Some(Item::Picture { .. })
+    ));
+
+    let front = {
+        let mut p = plain(1, "");
+        p.inlines = vec![
+            float_image(20, Wrap::InFront, 0, 0),
+            Inline::Text {
+                text: "字".into(),
+                marks: Marks::default(),
+            },
+        ];
+        layout(
+            &looked(vec![Block::Paragraph(p)], one_section(2000, 2000)),
+            &FixedShaper,
+        )
+    };
+    assert!(matches!(
+        front.pages[0].items.last(),
+        Some(Item::Picture { .. })
+    ));
+}
+
+#[test]
+fn a_footnote_is_drawn_at_the_page_bottom_above_a_separator() {
+    let mut p = plain(1, "");
+    p.inlines = vec![
+        Inline::Text {
+            text: "字".into(),
+            marks: Marks {
+                size: Some(200),
+                ..Default::default()
+            },
+        },
+        Inline::Atom(Atom {
+            id: 50,
+            kind: AtomKind::Footnote,
+            look: AtomLook::default(),
+        }),
+    ];
+    let note = Footnote {
+        id: 50,
+        blocks: vec![Block::Paragraph(plain(60, "注"))],
+    };
+    let doc = looked(vec![Block::Paragraph(p)], one_section(2000, 2000)).with_footnotes(vec![note]);
+    let out = layout(&doc, &FixedShaper);
+    assert!(out.lines.iter().any(|l| l.para == 60));
+    assert!(out.pages[0].items.iter().any(|i| matches!(
+        i,
+        Item::Text { text, .. } if text == "注"
+    )));
+    assert!(out.pages[0].items.iter().any(|i| matches!(
+        i,
+        Item::Text { text, .. } if text == "1"
+    )));
+    assert!(
+        out.pages[0]
+            .items
+            .iter()
+            .any(|i| matches!(i, Item::Rule { .. }))
     );
 }

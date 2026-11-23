@@ -139,6 +139,13 @@ pub struct Table {
     pub look: crate::look::TableLook,
 }
 
+/// A footnote's text, referred to by an atom with the same `id`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Footnote {
+    pub id: NodeId,
+    pub blocks: Vec<Block>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Block {
     Paragraph(Para),
@@ -241,6 +248,8 @@ pub struct WordDoc {
     pub(crate) defaults: Marks,
     /// Word's `defaultTabStop`, in twips.
     pub(crate) default_tab_stop: crate::look::Twips,
+    /// Footnote text, by the id of the atom that refers to it.
+    pub(crate) footnotes: Vec<Footnote>,
 }
 
 /// Where a paragraph sits: its container's blocks and its index there.
@@ -271,6 +280,7 @@ impl WordDoc {
             sections: Vec::new(),
             defaults: Marks::default(),
             default_tab_stop: 420,
+            footnotes: Vec::new(),
         }
     }
 
@@ -314,6 +324,17 @@ impl WordDoc {
     /// Sets the document's automatic tab stop width.
     pub fn with_default_tab_stop(mut self, twips: crate::look::Twips) -> Self {
         self.default_tab_stop = twips;
+        self
+    }
+
+    /// The document's footnotes.
+    pub fn footnotes(&self) -> &[Footnote] {
+        &self.footnotes
+    }
+
+    /// Sets the document's footnotes.
+    pub fn with_footnotes(mut self, footnotes: Vec<Footnote>) -> Self {
+        self.footnotes = footnotes;
         self
     }
 

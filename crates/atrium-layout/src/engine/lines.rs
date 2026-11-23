@@ -6,7 +6,7 @@ use std::ops::Range;
 use std::path::PathBuf;
 
 use atrium_office::look::{
-    Baseline, Float, LabelSuffix, LineSpacing, NumFormat, ParaLook, Rgb, TabKind,
+    Baseline, Float, LabelSuffix, LineSpacing, NumFormat, ParaLook, Rgb, TabKind, Wrap,
 };
 use atrium_office::{Align, AtomKind, Block, Inline, Marks, NodeId, Para, ParaStyle};
 use unicode_linebreak::{BreakOpportunity, linebreaks};
@@ -75,10 +75,28 @@ pub(crate) struct FloatAnchor {
     pub float: Float,
 }
 
+/// A placed float, in page coordinates, for wrapping the text beside it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FloatBox {
+    pub rect: Rect,
+    pub wrap: Wrap,
+    pub clear: [f32; 4],
+}
+
+pub(crate) struct WrapCtx<'a> {
+    /// The paragraph's first line's page y.
+    pub top: f32,
+    pub left: f32,
+    pub width: f32,
+    pub floats: &'a [FloatBox],
+}
+
 /// A line laid out at the text area's origin: x from its left edge, y from
 /// the line's top.
 #[derive(Clone, Debug)]
 pub(crate) struct Laid {
+    /// The line's top within its paragraph or stacked block.
+    pub y: f32,
     pub height: f32,
     pub baseline: f32,
     pub items: Vec<Item>,
@@ -757,6 +775,7 @@ struct LineCfg<'a> {
 fn make_line(
     cx: &mut Ctx<'_>,
     units: &[Unit],
+    y: f32,
     indent: f32,
     avail: f32,
     cfg: &LineCfg<'_>,
@@ -969,6 +988,7 @@ fn make_line(
         stops.push((start, indent + shift));
     }
     Laid {
+        y,
         height,
         baseline,
         items,
@@ -994,6 +1014,16 @@ fn flush_run(run: &mut Option<(f32, String, FontKey, Rgb, f32)>, items: &mut Vec
 }
 
 pub(crate) fn para(cx: &mut Ctx<'_>, para: &Para, width: f32, slide: bool) -> ParaOut {
+    para_wrapped(cx, para, width, slide, None)
+}
+
+pub(crate) fn para_wrapped(
+    cx: &mut Ctx<'_>,
+    para: &Para,
+    width: f32,
+    slide: bool,
+    wrap: Option<&WrapCtx<'_>>,
+) -> ParaOut {
     let (look, size, bold) = hinted(para);
     let size = size.or(slide.then_some(super::SLIDE_PT));
     let mut units = Vec::new();
@@ -1056,9 +1086,53 @@ pub(crate) fn para(cx: &mut Ctx<'_>, para: &Para, width: f32, slide: bool) -> Pa
     let mut lines = Vec::new();
     let mut i = 0;
     let mut first_line = true;
+    let mut y_acc = 0.0f32;
     loop {
-        let indent = left + if first_line { first_indent } else { 0.0 };
-        let avail = (width - indent - right).max(1.0);
+        let mut left_cut = 0.0f32;
+        let mut right_cut = 0.0f32;
+        if let Some(w) = wrap {
+            let estimate = mark.ascent + mark.descent;
+            let mut top = w.top + y_acc;
+            loop {
+                let mut pushed = false;
+                for f in w.floats {
+                    if !matches!(f.wrap, Wrap::TopAndBottom) {
+                        continue;
+                    }
+                    let band_top = f.rect.y - f.clear[0];
+                    let band_bottom = f.rect.y + f.rect.height + f.clear[2];
+                    if top < band_bottom && top + estimate > band_top {
+                        let push = band_bottom - top;
+                        if push > 0.01 {
+                            y_acc += push;
+                            top += push;
+                            pushed = true;
+                        }
+                    }
+                }
+                if !pushed {
+                    break;
+                }
+            }
+            for f in w.floats {
+                if !matches!(f.wrap, Wrap::Square) {
+                    continue;
+                }
+                let band_top = f.rect.y - f.clear[0];
+                let band_bottom = f.rect.y + f.rect.height + f.clear[2];
+                if top < band_bottom && top + estimate > band_top {
+                    let fx = f.rect.x - f.clear[3];
+                    let fr = f.rect.x + f.rect.width + f.clear[1];
+                    if fx <= w.left + w.width / 2.0 {
+                        left_cut = left_cut.max(fr - w.left);
+                    } else {
+                        right_cut = right_cut.max(w.left + w.width - fx);
+                    }
+                }
+            }
+        }
+        let indent = left + if first_line { first_indent } else { 0.0 } + left_cut;
+        let avail = (width - indent - right - right_cut).max(1.0);
         let mut x = 0.0;
         let mut j = i;
         let mut last_break: Option<usize> = None;
@@ -1112,6 +1186,7 @@ pub(crate) fn para(cx: &mut Ctx<'_>, para: &Para, width: f32, slide: bool) -> Pa
         lines.push(make_line(
             cx,
             &units[i..j],
+            y_acc,
             indent,
             avail,
             &cfg,
@@ -1120,11 +1195,23 @@ pub(crate) fn para(cx: &mut Ctx<'_>, para: &Para, width: f32, slide: bool) -> Pa
             if i >= units.len() { end } else { line_start },
             line_end,
         ));
+        y_acc += lines.last().map(|l| l.height).unwrap_or(0.0);
         i = j;
         first_line = false;
         if i >= units.len() {
             if forced {
-                lines.push(make_line(cx, &[], left, avail, &cfg, true, false, end, end));
+                lines.push(make_line(
+                    cx,
+                    &[],
+                    y_acc,
+                    left,
+                    avail,
+                    &cfg,
+                    true,
+                    false,
+                    end,
+                    end,
+                ));
             }
             break;
         }
@@ -1184,10 +1271,12 @@ pub(crate) fn stack(
                     y = y.max(0.0);
                 }
                 y += before;
+                let para_start = y;
                 for line in b.lines {
                     let h = line.height;
-                    placed.push((y, line));
-                    y += h;
+                    let ly = para_start + line.y;
+                    placed.push((ly, line));
+                    y = ly + h;
                 }
                 y += b.after;
                 after = b.after;
