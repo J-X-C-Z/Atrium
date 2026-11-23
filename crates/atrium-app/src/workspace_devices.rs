@@ -533,6 +533,35 @@ impl Workspace {
         }
     }
 
+    /// Another computer's Atrium Workspace folder: set in settings, else
+    /// the root of its node named after it.
+    pub fn device_workspace(&self, device: &str) -> Option<String> {
+        self.settings
+            .device_workspaces
+            .get(device)
+            .cloned()
+            .or_else(|| {
+                atrium_project::spread::workspace_in_roots(&self.device(device)?.info.roots)
+            })
+    }
+
+    /// Where a project of this computer's workspace is on `device`, when
+    /// the project is inside the workspace and the device has one.
+    pub fn project_on_device(&self, root: &std::path::Path, device: &str) -> Option<String> {
+        let relative = atrium_project::spread::relative(root, &self.settings.atrium_workspace())?;
+        Some(atrium_project::spread::join_on(
+            &self.device_workspace(device)?,
+            &relative,
+        ))
+    }
+
+    pub fn set_workspace_dir(&mut self, dir: std::path::PathBuf, cx: &mut Context<Self>) {
+        let _ = std::fs::create_dir_all(&dir);
+        self.settings.workspace_dir = Some(dir);
+        self.settings.save();
+        cx.notify();
+    }
+
     pub fn set_device_folder(&mut self, device: &str, folder: String, cx: &mut Context<Self>) {
         self.settings
             .device_folders

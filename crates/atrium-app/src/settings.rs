@@ -104,6 +104,11 @@ pub struct Settings {
     pub device_name: String,
     /// Tokens from pairing codes, by the address of the device that gave them.
     pub paired: std::collections::HashMap<String, String>,
+    /// This computer's Atrium Workspace folder; `~/Atrium Workspace` when unset.
+    pub workspace_dir: Option<PathBuf>,
+    /// Other computers' Atrium Workspace folders, by device id, when their
+    /// node's roots do not name one.
+    pub device_workspaces: std::collections::HashMap<String, String>,
 }
 
 impl Settings {
@@ -143,6 +148,15 @@ impl Settings {
     }
 
     /// The folder new chats start in: the saved one if it still exists, else home.
+    /// This computer's Atrium Workspace folder, where spread projects live.
+    pub fn atrium_workspace(&self) -> PathBuf {
+        self.workspace_dir.clone().unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("/"))
+                .join(atrium_project::spread::WORKSPACE_DIR)
+        })
+    }
+
     pub fn working_dir(&self) -> PathBuf {
         self.cwd
             .clone()

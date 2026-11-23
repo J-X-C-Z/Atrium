@@ -28,6 +28,7 @@ pub struct ExtrasInputs {
     pub schedule_prompt: Entity<TextInput>,
     pub schedule_days: crate::schedule::Days,
     pub device_name: Entity<TextInput>,
+    pub workspace_dir: Entity<TextInput>,
     pub pair_address: Entity<TextInput>,
     pub pair_code: Entity<TextInput>,
 }
@@ -52,6 +53,9 @@ impl ExtrasInputs {
             schedule_time: cx.new(|cx| TextInput::new(window, cx).placeholder("09:00")),
             device_name: cx.new(|cx| {
                 TextInput::new(window, cx).placeholder(t("Name, such as studio or laptop"))
+            }),
+            workspace_dir: cx.new(|cx| {
+                TextInput::new(window, cx).placeholder(t("A folder, such as ~/Atrium Workspace"))
             }),
             pair_address: cx.new(|cx| {
                 TextInput::new(window, cx).placeholder(t("Its address, such as 100.64.0.2:7381"))

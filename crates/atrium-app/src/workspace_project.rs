@@ -1029,6 +1029,11 @@ impl Workspace {
 
     fn start_stream(&mut self, root: &Path, stream: Workstream, cx: &mut Context<Self>) {
         let root = root.to_path_buf();
+        let here = if self.settings.device_name.is_empty() {
+            "this computer".to_string()
+        } else {
+            self.settings.device_name.clone()
+        };
         let Some(project) = self.project_mut(&root) else {
             return;
         };
@@ -1057,6 +1062,12 @@ impl Workspace {
             }
             project.kickoff(&stream)
         };
+        let place = atrium_project::spread::briefing(project, &stream, &here);
+        let kickoff = if place.is_empty() {
+            kickoff
+        } else {
+            format!("{kickoff}\n\n{place}")
+        };
         let isolated = project.file.worktrees;
         if pool::is_pool_worker(&stream) {
             self.project_schedule
@@ -1065,6 +1076,19 @@ impl Workspace {
                 .insert((root.clone(), id.clone()));
         }
         cx.notify();
+        // On another computer: the project at the same place in its Atrium
+        // Workspace, where that computer's own folders are. No worktree there.
+        if let Some(device) = atrium_project::spread::device_of(&stream.backend) {
+            let Some(cwd) = self.project_on_device(&root, device) else {
+                let error = anyhow::anyhow!(
+                    "{device} has no Atrium Workspace folder, or this project is not inside this computer's Atrium Workspace"
+                );
+                self.stream_failed(&root, &id, error, cx);
+                return;
+            };
+            self.launch_stream(root.clone(), stream, title, kickoff, PathBuf::from(cwd), cx);
+            return;
+        }
         if isolated {
             self.prepare_stream_checkout(root, stream, title, kickoff, cx);
         } else {

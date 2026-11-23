@@ -159,6 +159,12 @@ pub fn section(workspace: &Entity<Workspace>, address: &Entity<TextInput>, cx: &
                         DeviceStatus::Online => agents.join(" · "),
                     },
                 ))
+                .child(div().text_size(tiny).text_color(colors.fg_subtle).child(
+                    match ws.device_workspace(&device.id) {
+                        Some(dir) => tf("Atrium Workspace: {path}", &[("path", &dir)]),
+                        None => t("No Atrium Workspace folder among its shared folders").into(),
+                    },
+                ))
                 .when(!missing.is_empty(), |card| {
                     card.child(div().text_size(tiny).text_color(colors.fg_subtle).child(tf(
                         "Not installed there: {list}",
@@ -303,6 +309,43 @@ pub fn this_computer(
                     }),
             ),
     );
+
+    // Its Atrium Workspace folder.
+    let (dir_input, set_dir) = (inputs.workspace_dir.clone(), workspace.clone());
+    let current = super::composer::short_path(&ws.settings.atrium_workspace());
+    column = column
+        .child(
+            div()
+                .text_size(small)
+                .text_color(colors.fg_muted)
+                .child(tf("Atrium Workspace: {path}", &[("path", &current)])),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(div().flex_1().child(Input::new(&inputs.workspace_dir)))
+                .child(
+                    Button::new("workspace-dir", t("Change"))
+                        .size(ControlSize::Sm)
+                        .on_click(move |_, _, cx| {
+                            let text = dir_input.read(cx).text().trim().to_string();
+                            if text.is_empty() {
+                                return;
+                            }
+                            let dir = match text.strip_prefix("~/") {
+                                Some(rest) => dirs::home_dir().unwrap_or_default().join(rest),
+                                None => std::path::PathBuf::from(text),
+                            };
+                            set_dir.update(cx, |ws, cx| ws.set_workspace_dir(dir, cx));
+                            dir_input.update(cx, |input, cx| input.set_text("", cx));
+                        }),
+                ),
+        )
+        .child(note(
+            t("Projects spread over several computers sit at the same path inside each computer's Atrium Workspace folder; each computer keeps only the folders it works on. Make it one of the folders atrium-node shares.").into(),
+        ));
 
     if !sharing {
         return column.into_any_element();

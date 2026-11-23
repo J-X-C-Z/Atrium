@@ -33,6 +33,7 @@ pub mod preview;
 pub mod repo;
 pub mod scheduler;
 pub mod skill;
+pub mod spread;
 pub mod worktrees;
 
 use std::{
