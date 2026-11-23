@@ -178,7 +178,9 @@ pub fn project_root(cwd: &Path) -> PathBuf {
     let mut dir = start.as_path();
     loop {
         if dir.join(".git").exists() {
-            return dir.to_path_buf();
+            // `cwd` may not exist yet, so the walk can start uncanonical
+            // (macOS's /var → /private/var); the root found does exist.
+            return dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
         }
         match dir.parent() {
             Some(parent) => dir = parent,
