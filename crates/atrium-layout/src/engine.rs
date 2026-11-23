@@ -1041,19 +1041,12 @@ pub(crate) fn slide(slide: &Slide, index: usize, shaper: &dyn Shaper) -> Layout 
 /// Draws one shape at `rect`; used by sheet drawings.
 pub(crate) fn shape_at(shape: &Shape, rect: Rect, shaper: &dyn Shaper) -> Vec<Item> {
     let defaults = Marks::default();
-    let mut cx = Ctx {
-        shaper,
-        defaults: &defaults,
-        base_size: SLIDE_PT,
-        counters: HashMap::new(),
-        page_number: 1,
-        pages_total: 1,
-        last_table_height: 0.0,
-    };
+    let mut cx = Ctx::new(shaper, &defaults, SLIDE_PT, 420);
     let mut page = Page {
         width: rect.x + rect.width,
         height: rect.y + rect.height,
         number: 1,
+        section: 0,
         background: None,
         items: Vec::new(),
     };

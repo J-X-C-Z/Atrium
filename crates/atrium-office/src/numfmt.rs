@@ -183,7 +183,7 @@ fn general_number(n: f64) -> String {
     if !n.is_finite() {
         return n.to_string();
     }
-    if abs >= 1e11 || abs < 1e-9 {
+    if !(1e-9..1e11).contains(&abs) {
         return scientific_plain(n);
     }
     let mut s = format!("{n:.15}");
