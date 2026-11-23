@@ -451,14 +451,6 @@ fn header(
         .into_any_element()
 }
 
-pub(super) fn truncate(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        text.to_string()
-    } else {
-        format!("{}…", text.chars().take(max).collect::<String>())
-    }
-}
-
 /// The composer, at the reading column's width.
 fn composer_column(composer: &Entity<Composer>) -> AnyElement {
     div()

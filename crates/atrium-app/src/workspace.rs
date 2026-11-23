@@ -1106,15 +1106,15 @@ impl Workspace {
             .and_then(|id| self.stream_of(id))
             .is_some_and(|(p, _)| p.file.autopilot.on);
         let mode = self.project_access_mode(unattended);
-        // A device's Codex keeps its own model settings: the models listed
-        // here are this machine's.
+        // A device's Codex: the model chosen from that device's list.
         if self.is_remote_view() {
+            let choice = self.model_choice();
             return TurnRequest {
                 text: composed.text.clone(),
                 images: composed.images.clone(),
                 mentions: composed.mentions.clone(),
-                model: None,
-                effort: None,
+                model: choice.model,
+                effort: choice.effort,
                 mode: Some(mode),
                 service_tier: None,
                 plan_mode: false,
@@ -1734,15 +1734,10 @@ impl Workspace {
                 self.turn_started.insert(DRAFT.into(), Instant::now());
                 cx.notify();
                 let backend = self.view_backend().to_string();
-                let remote = crate::agents::split_backend(&backend).1.is_some();
                 let options = StartThread {
                     cwd: Some(self.folder_for(&backend)),
-                    // Models listed here are this machine's Codex's.
-                    model: if remote {
-                        None
-                    } else {
-                        self.settings.model.clone()
-                    },
+                    // Each device's Codex takes a model from its own list.
+                    model: self.model_choice().model,
                     approval_policy: Some(self.settings.mode.approval_policy().into()),
                     sandbox: Some(self.settings.mode.sandbox_mode().into()),
                     mcp_servers: self.chat_mcp(&backend),
@@ -2154,22 +2149,78 @@ impl Workspace {
     }
 
     pub fn set_model(&mut self, model: Option<String>, cx: &mut Context<Self>) {
+        let mut choice = self.model_choice();
         // A model may not take the chosen effort; fall back to its default.
-        if let Some(effort) = &self.settings.effort {
+        if let Some(effort) = &choice.effort {
             let accepts = self
                 .model_info(model.as_deref())
                 .is_none_or(|info| info.efforts.is_empty() || info.efforts.contains(effort));
             if !accepts {
-                self.settings.effort = None;
+                choice.effort = None;
             }
         }
-        self.settings.model = model;
-        self.settings.save();
-        cx.notify();
+        choice.model = model;
+        self.set_model_choice(choice, cx);
     }
 
     pub fn set_effort(&mut self, effort: Option<String>, cx: &mut Context<Self>) {
-        self.settings.effort = effort;
+        let mut choice = self.model_choice();
+        choice.effort = effort;
+        self.set_model_choice(choice, cx);
+    }
+
+    /// The device whose Codex the shown chat uses; none for this machine.
+    fn view_device(&self) -> Option<String> {
+        crate::agents::split_backend(self.view_backend())
+            .1
+            .map(str::to_owned)
+    }
+
+    /// The models the shown chat's Codex offers: this machine's, or the
+    /// device's it runs on.
+    pub fn view_models(&self) -> &[ModelInfo] {
+        match self.view_device() {
+            Some(id) => self
+                .devices
+                .iter()
+                .find(|d| d.id == id)
+                .map(|d| d.models.as_slice())
+                .unwrap_or(&[]),
+            None => &self.models,
+        }
+    }
+
+    /// The model and effort chosen for the shown chat's Codex.
+    pub fn model_choice(&self) -> crate::settings::ModelChoice {
+        self.model_choice_on(self.view_device().as_deref())
+    }
+
+    /// The model and effort chosen for Codex on `device` (none: here).
+    pub fn model_choice_on(&self, device: Option<&str>) -> crate::settings::ModelChoice {
+        match device {
+            Some(id) => self
+                .settings
+                .device_models
+                .get(id)
+                .cloned()
+                .unwrap_or_default(),
+            None => crate::settings::ModelChoice {
+                model: self.settings.model.clone(),
+                effort: self.settings.effort.clone(),
+            },
+        }
+    }
+
+    fn set_model_choice(&mut self, choice: crate::settings::ModelChoice, cx: &mut Context<Self>) {
+        match self.view_device() {
+            Some(id) => {
+                self.settings.device_models.insert(id, choice);
+            }
+            None => {
+                self.settings.model = choice.model;
+                self.settings.effort = choice.effort;
+            }
+        }
         self.settings.save();
         cx.notify();
     }
@@ -2241,12 +2292,11 @@ impl Workspace {
 
     /// The model new turns use: chosen, else the chat's, else Codex's default.
     pub fn model_id(&self) -> Option<String> {
-        self.settings
+        self.model_choice()
             .model
-            .clone()
             .or_else(|| self.active_thread().and_then(|t| t.model.clone()))
             .or_else(|| {
-                self.models
+                self.view_models()
                     .iter()
                     .find(|m| m.is_default)
                     .map(|m| m.id.clone())
@@ -2255,14 +2305,14 @@ impl Workspace {
 
     fn model_info(&self, id: Option<&str>) -> Option<&ModelInfo> {
         let id = id.map(str::to_owned).or_else(|| self.model_id())?;
-        self.models.iter().find(|m| m.id == id)
+        self.view_models().iter().find(|m| m.id == id)
     }
 
     /// The model new turns use, for display.
     pub fn model_label(&self) -> String {
         match self.model_id() {
             Some(id) => self
-                .models
+                .view_models()
                 .iter()
                 .find(|m| m.id == id)
                 .map(|m| m.display_name.clone())
@@ -2276,9 +2326,8 @@ impl Workspace {
         let info = self.model_info(None);
         let efforts = info.map(|m| m.efforts.clone()).unwrap_or_default();
         let current = self
-            .settings
+            .model_choice()
             .effort
-            .clone()
             .or_else(|| info.and_then(|m| m.default_effort.clone()));
         (efforts, current)
     }

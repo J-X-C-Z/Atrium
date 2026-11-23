@@ -1637,8 +1637,9 @@ impl Workspace {
         let peer = sync_peer(&node);
         let text = composed.text.clone();
         let local_attachments = composed.attachments();
-        let model = self.settings.model.clone();
-        let effort = self.settings.effort.clone();
+        // The owner runs the turn, with the model chosen for its Codex.
+        let choice = self.model_choice_on(Some(&device));
+        let (model, effort) = (choice.model, choice.effort);
         let id = thread_id.to_string();
         if let Some(transcript) = self.transcripts.get_mut(thread_id) {
             transcript.begin_pending_turn();

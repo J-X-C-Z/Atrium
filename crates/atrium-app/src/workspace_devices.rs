@@ -34,6 +34,8 @@ pub struct Device {
     pub codex: Option<CodexClient>,
     pub codex_status: AgentStatus,
     pub codex_link: Option<Arc<Mutex<LinkState>>>,
+    /// The models that device's Codex offers.
+    pub models: Vec<codex_client::ModelInfo>,
     _codex_pump: Option<Task<()>>,
 }
 
@@ -197,6 +199,7 @@ impl Workspace {
                         codex: None,
                         codex_status: AgentStatus::NotInstalled,
                         codex_link: None,
+                        models: Vec::new(),
                         _codex_pump: None,
                     });
                     self.start_device(&id, cx);
@@ -249,6 +252,7 @@ impl Workspace {
             codex: None,
             codex_status: AgentStatus::NotInstalled,
             codex_link: None,
+            models: Vec::new(),
             _codex_pump: None,
         });
         id
@@ -393,6 +397,17 @@ impl Workspace {
             });
             if ok.is_err() {
                 return;
+            }
+            match listing.model_list().await {
+                Ok(models) => {
+                    let _ = this.update(cx, |ws, cx| {
+                        if let Some(d) = ws.devices.iter_mut().find(|d| d.id == device_id) {
+                            d.models = models;
+                        }
+                        cx.notify();
+                    });
+                }
+                Err(error) => log::warn!("model/list on {device_id} failed: {error:#}"),
             }
             if let Ok(threads) = listing.thread_list(50).await {
                 let threads = threads

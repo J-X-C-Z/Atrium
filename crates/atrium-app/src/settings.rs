@@ -15,6 +15,14 @@ pub enum ThemePref {
     Dark,
 }
 
+/// A model and reasoning effort; each the default when unset.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModelChoice {
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -26,6 +34,9 @@ pub struct Settings {
     pub model: Option<String>,
     /// Reasoning effort for new turns; the model's default when unset.
     pub effort: Option<String>,
+    /// The model and effort for Codex on each other device, by device id:
+    /// each device's Codex lists its own models.
+    pub device_models: std::collections::HashMap<String, ModelChoice>,
     /// How much Codex may do without asking.
     pub mode: AccessMode,
     /// The `codex` binary; found on PATH when unset.

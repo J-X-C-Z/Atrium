@@ -445,58 +445,62 @@ impl Composer {
             .into_any_element()
     }
 
-    /// Codex's model and reasoning effort, in one menu: "GPT-5 · High".
+    /// Codex's model, by name only ("GPT-6.2 Sol · Pro 20"), from the list
+    /// of the Codex the chat runs on, here or on another device.
     fn model_picker(&self, cx: &App) -> AnyElement {
         let ws = self.workspace.read(cx);
-        let mut models = vec![
-            MenuItem::radio(t("Codex default"), ws.settings.model.is_none()).on_click({
+        let chosen = ws.model_choice().model;
+        let mut menu = Menu::new().item(
+            MenuItem::radio(t("Codex default"), chosen.is_none()).on_click({
                 let workspace = self.workspace.clone();
                 move |_, cx| workspace.update(cx, |ws, cx| ws.set_model(None, cx))
             }),
-        ];
-        for model in &ws.models {
+        );
+        for model in ws.view_models() {
             let id = model.id.clone();
             let workspace = self.workspace.clone();
-            let label = if model.description.trim().is_empty() {
-                model.display_name.clone()
-            } else {
-                format!(
-                    "{} · {}",
-                    model.display_name,
-                    super::chat::truncate(model.description.trim(), 36)
-                )
-            };
-            models.push(
-                MenuItem::radio(label, ws.settings.model.as_deref() == Some(&model.id)).on_click(
+            menu = menu.item(
+                MenuItem::radio(model_name(model), chosen.as_deref() == Some(&model.id)).on_click(
                     move |_, cx| workspace.update(cx, |ws, cx| ws.set_model(Some(id.clone()), cx)),
                 ),
             );
         }
-        let mut menu = Menu::new().group(t("Model"), models);
-        let (efforts, effort) = ws.efforts();
-        if !efforts.is_empty() {
-            let levels: Vec<MenuItem> = efforts
-                .iter()
-                .map(|level| {
-                    let workspace = self.workspace.clone();
-                    let value = level.clone();
-                    MenuItem::radio(title_case(level), effort.as_deref() == Some(level)).on_click(
-                        move |_, cx| {
-                            workspace.update(cx, |ws, cx| ws.set_effort(Some(value.clone()), cx))
-                        },
-                    )
-                })
-                .collect();
-            menu = menu.group(t("Reasoning effort"), levels);
-        }
-        let label = match effort.as_deref().filter(|_| !efforts.is_empty()) {
-            Some(level) => format!("{} · {}", ws.model_label(), title_case(level)),
-            None => ws.model_label(),
-        };
-        DropdownMenu::new("model", label, menu)
+        DropdownMenu::new("model", ws.model_label(), menu)
             .icon(IconName::Sparkles)
             .variant(ButtonVariant::Ghost)
             .into_any_element()
+    }
+
+    /// The reasoning effort, in a picker of its own; none when the model
+    /// offers no choice.
+    fn effort_picker(&self, cx: &App) -> Option<AnyElement> {
+        let ws = self.workspace.read(cx);
+        let (efforts, effort) = ws.efforts();
+        if efforts.is_empty() {
+            return None;
+        }
+        let mut menu = Menu::new();
+        for level in &efforts {
+            let workspace = self.workspace.clone();
+            let value = level.clone();
+            menu = menu.item(
+                MenuItem::radio(title_case(level), effort.as_deref() == Some(level)).on_click(
+                    move |_, cx| {
+                        workspace.update(cx, |ws, cx| ws.set_effort(Some(value.clone()), cx))
+                    },
+                ),
+            );
+        }
+        let label = effort
+            .as_deref()
+            .map(title_case)
+            .unwrap_or_else(|| t("Reasoning effort").to_string());
+        Some(
+            DropdownMenu::new("effort", label, menu)
+                .icon(IconName::Gauge)
+                .variant(ButtonVariant::Ghost)
+                .into_any_element(),
+        )
     }
 
     /// An ACP agent's pickers, as the agent offers them: mode, model,
@@ -608,11 +612,14 @@ impl Composer {
         );
 
         tools.push(self.agent_picker(cx));
-        // A device's Codex keeps its own model settings.
-        if ws.is_codex_view() && !ws.is_remote_view() {
+        if ws.is_codex_view() {
+            // A device's Codex offers its own models, chosen the same way.
             tools.push(self.model_picker(cx));
-            self.codex_tools(&mut tools, cx);
-        } else if !ws.is_codex_view() {
+            tools.extend(self.effort_picker(cx));
+            if !ws.is_remote_view() {
+                self.codex_tools(&mut tools, cx);
+            }
+        } else {
             self.agent_tools(&mut tools, cx);
         }
         let ws = self.workspace.read(cx);
@@ -977,6 +984,18 @@ impl Render for Composer {
                         .into()
                     })),
             )
+    }
+}
+
+/// A model's name as the menu shows it. Some providers put the provider
+/// into the name already and repeat it with "via …" in the description;
+/// the name alone reads best either way.
+fn model_name(model: &codex_client::ModelInfo) -> String {
+    let name = model.display_name.trim();
+    if name.is_empty() {
+        model.id.clone()
+    } else {
+        name.to_string()
     }
 }
 
