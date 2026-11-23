@@ -5,6 +5,7 @@
 
 mod agents;
 mod alerts;
+mod capabilities;
 mod i18n;
 use atrium_project as project;
 mod docmap;
