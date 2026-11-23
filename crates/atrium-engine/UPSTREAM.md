@@ -8,13 +8,13 @@ Keep this table current when a module lands or moves.
 
 | `atrium-engine` module | T3 source | Item |
 | --- | --- | --- |
-| `src/contracts` | `packages/contracts/src` (base schemas, orchestration V2, model selection) | 32 |
-| `src/store` | `apps/server/src/orchestration-v2/EventStore.ts`, `ProjectionStore.ts`, `apps/server/src/persistence/Migrations/055_OrchestrationV2.ts` | 32 |
-| `src/orchestration` | `apps/server/src/orchestration-v2/Orchestrator.ts`, `EventSink.ts`, `EffectWorker.ts`, `runtimeLayer.ts` | 32 |
-| `src/providers` | `packages/provider-core`, `packages/effect-codex-app-server`, `packages/provider-acp` | 25, 26 |
-| `src/usage` | `orchestration-v2/UsageLimitRecoveryWorker.ts`, limit schemas | 23 |
-| `src/checkpoint` | `apps/server/src/checkpointing`, `orchestration-v2/Checkpoint*Service.ts` | 30 |
-| `src/mcp` | `packages/contracts/src/orchestratorMcp.ts`, `apps/server/src/mcp` | 20+ |
+| `src/contracts` | `packages/contracts/src` (base schemas, orchestration V2, model selection) | 20 |
+| `src/store` | `apps/server/src/orchestration-v2/EventStore.ts`, `ProjectionStore.ts`, `apps/server/src/persistence/Migrations/055_OrchestrationV2.ts` | 21 |
+| `src/orchestration` | `apps/server/src/orchestration-v2/Orchestrator.ts`, `EventSink.ts`, `EffectWorker.ts`, `runtimeLayer.ts` | 25 |
+| `src/providers` | `packages/provider-core`, `packages/effect-codex-app-server`, `packages/provider-acp` | 22, 23, 24 |
+| `src/usage` | `orchestration-v2/UsageLimitRecoveryWorker.ts`, limit schemas | 26 |
+| `src/checkpoint` | `apps/server/src/checkpointing`, `orchestration-v2/Checkpoint*Service.ts` | 27 |
+| `src/mcp` | `packages/contracts/src/orchestratorMcp.ts`, `apps/server/src/mcp` | 28 |
 
 ## What is not ported
 
