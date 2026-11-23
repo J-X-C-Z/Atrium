@@ -171,8 +171,8 @@ fn append_assigns_monotonic_sequences_and_derives_index_columns() {
             .collect::<Vec<_>>(),
         vec![1, 2, 3]
     );
-    assert_eq!(stored[0].command_id.as_deref(), Some("command:1"));
-    assert_eq!(stored[0].run_id.as_deref(), Some("run:1"));
+    assert_eq!(stored[0].command_id.as_ref().map(|id| id.as_str()), Some("command:1"));
+    assert_eq!(stored[0].run_id.as_ref().map(|id| id.as_str()), Some("run:1"));
 
     let conn = store.connection();
     let (kind, stream, version, event_type, command_id, correlation_id, actor): (
@@ -523,7 +523,7 @@ fn apply_is_idempotent_for_a_repeated_command_id() {
     assert_eq!(count, 1);
     let event = store.read_by_command_id("command:once").unwrap();
     assert_eq!(event.len(), 1);
-    assert_eq!(event[0].event_id, "event:once:1");
+    assert_eq!(event[0].event_id.as_str(), "event:once:1");
 }
 
 #[test]

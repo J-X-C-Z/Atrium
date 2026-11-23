@@ -400,10 +400,10 @@ pub fn append_events(
         )?;
         stored.push(StoredEvent {
             sequence,
-            event_id: event.id.clone(),
-            command_id: command_id.map(str::to_string),
-            thread_id: event.thread_id.clone(),
-            run_id: event.run_id.clone(),
+            event_id: event.id.clone().into(),
+            command_id: command_id.map(Into::into),
+            thread_id: event.thread_id.clone().into(),
+            run_id: event.run_id.clone().map(Into::into),
             event_type: event.event_type.clone(),
             occurred_at: event.occurred_at.clone(),
             payload: event.payload.clone(),
@@ -479,9 +479,9 @@ pub fn append_project_event(conn: &Connection, event: &NewProjectEvent) -> Resul
     )?;
     Ok(StoredEvent {
         sequence,
-        event_id: event.event_id.clone(),
-        command_id: event.command_id.clone(),
-        thread_id: event.project_id.clone(),
+        event_id: event.event_id.clone().into(),
+        command_id: event.command_id.clone().map(Into::into),
+        thread_id: event.project_id.clone().into(),
         run_id: None,
         event_type: event.event_type.clone(),
         occurred_at: event.occurred_at.clone(),
@@ -510,10 +510,10 @@ impl RawEventRow {
             .map(str::to_string);
         Ok(StoredEvent {
             sequence: self.sequence,
-            event_id: self.event_id,
-            command_id: self.command_id,
-            thread_id: self.stream_id,
-            run_id,
+            event_id: self.event_id.into(),
+            command_id: self.command_id.map(Into::into),
+            thread_id: self.stream_id.into(),
+            run_id: run_id.map(Into::into),
             event_type: self.event_type,
             occurred_at: self.occurred_at,
             payload,
