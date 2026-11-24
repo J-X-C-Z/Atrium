@@ -31,12 +31,26 @@ pub enum RuntimeMode {
 }
 
 impl RuntimeMode {
-    fn rank(self) -> u8 {
+    pub fn rank(self) -> u8 {
         match self {
             Self::ApprovalRequired => 0,
             Self::AutoAcceptEdits => 1,
             Self::Auto => 2,
             Self::FullAccess => 3,
+        }
+    }
+
+    /// Whether `mode` grants the agent more than `ceiling`.
+    pub fn is_above(self, ceiling: Option<RuntimeMode>) -> bool {
+        is_runtime_mode_above(self, ceiling)
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ApprovalRequired => "Supervised",
+            Self::AutoAcceptEdits => "Auto-accept edits",
+            Self::Auto => "Auto",
+            Self::FullAccess => "Full access",
         }
     }
 }
@@ -189,6 +203,24 @@ pub struct ProviderSession {
     pub created_at: String,
     pub updated_at: String,
     pub last_error: Option<String>,
+}
+
+impl Default for ProviderSession {
+    fn default() -> Self {
+        Self {
+            id: ProviderSessionId::new(""),
+            driver: ProviderDriverKind::new(""),
+            provider_instance_id: ProviderInstanceId::new(""),
+            status: ProviderSessionStatus::Stopped,
+            cwd: String::new(),
+            model: None,
+            capabilities: ProviderCapabilities::default(),
+            extension_statuses: Vec::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            last_error: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -513,6 +545,52 @@ pub struct ProviderThread {
     pub goal: Option<ProviderGoal>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+impl Default for ProviderThread {
+    fn default() -> Self {
+        Self {
+            id: ProviderThreadId::new(""),
+            driver: ProviderDriverKind::new(""),
+            provider_instance_id: ProviderInstanceId::new(""),
+            provider_session_id: None,
+            app_thread_id: None,
+            owner_node_id: None,
+            native_thread_ref: None,
+            native_conversation_head_ref: None,
+            status: ProviderThreadStatus::NotLoaded,
+            first_run_ordinal: None,
+            last_run_ordinal: None,
+            handoff_ids: Vec::new(),
+            forked_from: None,
+            pending_background_tasks: Vec::new(),
+            context_usage: None,
+            native_metadata: None,
+            goal: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+}
+
+impl Default for ProviderTurn {
+    fn default() -> Self {
+        Self {
+            id: ProviderTurnId::new(""),
+            provider_thread_id: ProviderThreadId::new(""),
+            node_id: NodeId::new(""),
+            run_attempt_id: None,
+            native_turn_ref: None,
+            native_thread_ref: None,
+            ordinal: 0,
+            status: ProviderTurnStatus::Pending,
+            started_at: None,
+            completed_at: None,
+            token_usage: None,
+            turn_token_usage: None,
+            model: None,
+        }
+    }
 }
 
 /// A queued provider thread reserves a seat for the next run; it does not own

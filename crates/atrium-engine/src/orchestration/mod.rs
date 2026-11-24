@@ -18,7 +18,13 @@
 //!   starting in the same decision ([`orchestrator::plan_run_finished`]);
 //! - approval requested and answered (`runtime-request.respond`);
 //! - `thread.model-selection.set`, `thread.runtime-mode.set`;
-//! - `queue.resume`, `queued-run.start`;
+//! - `queue.resume`, `queued-run.start`, `queued-run.reorder`,
+//!   `queued-run.cancel`, `queued-run.edit`;
+//! - selection transitions and the provider-switch plan ([`selection`]);
+//! - subagent creation, delegated-task progress and child-result reporting
+//!   ([`subagents`]);
+//! - the `subagent.updated` projection record and terminal settling of nodes,
+//!   turn items, provider turns, subagents and runtime requests;
 //! - the `Store` transaction (events + projections + receipt + outbox) and a
 //!   memory reference implementation;
 //! - outbox claim/retry/terminal-fail/cancel/process-loss reconciliation;
@@ -50,8 +56,7 @@
 //! continuations, steer-follow-up ordinal interleaving),
 //! `prepared-run.release`, `prepared-run.progress`, `prepared-run.fail`,
 //! `prepared-run.retry`, `notification.delivery.accept`, `subagent.stop`,
-//! `queued-message.promote-to-steer`, `queued-run.reorder`,
-//! `queued-run.cancel`, `queued-run.edit`, `checkpoint.rollback`,
+//! `queued-message.promote-to-steer`, `checkpoint.rollback`,
 //! `delegated_task.*`, and `runtime-request.delivery.fail`.
 //!
 //! # Unported effects
@@ -59,16 +64,17 @@
 //! `provider-runtime.continue`, `provider-session.detach`,
 //! `provider-session.apply-thread-title`, `provider-thread.rollback`,
 //! `checkpoint.capture`, `scheduled-tasks.cleanup`, `terminal.cleanup`,
-//! `preview.cleanup`, `attachment.cleanup`, and the full restart/session
-//! transition and steer-follow-up fallback logic. The executor for every
-//! effect this module emits is also out of scope: this module only decides and
-//! queues them.
+//! `preview.cleanup`, `attachment.cleanup`, and the steer-follow-up fallback
+//! logic. The executor for every effect this module emits is also out of
+//! scope: this module only decides and queues them.
 
 pub mod effect_worker;
 pub mod event_sink;
 pub mod orchestrator;
 pub mod queued_run_order;
 pub mod runtime_policy;
+pub mod selection;
+pub mod subagents;
 pub mod types;
 
 #[cfg(test)]
@@ -80,14 +86,21 @@ pub use event_sink::{
     ReceiptStatus, RejectedCommandInput, Store, StoreError, StoredEvent,
 };
 pub use orchestrator::{
-    ApprovalRequested, Decision, DispatchResult, decide, dispatch, is_native_maintenance_command,
-    plan_approval_requested, plan_provider_turn_started, plan_run_finished,
-    plan_start_next_queued_run, provider_switch_waits_for_turn, resolve_dispatch_intent,
+    ApprovalRequested, Decision, DispatchResult, SendDeliverySetting, decide, decide_with_limit,
+    dispatch, dispatch_with_limit, is_native_maintenance_command, plan_approval_requested,
+    plan_provider_turn_started, plan_run_finished, plan_start_next_queued_run,
+    provider_switch_waits_for_turn, resolve_dispatch_intent, resolve_message_delivery,
+    resolve_send_delivery,
 };
 pub use queued_run_order::{is_automatic_completion_run, queued_runs_in_delivery_order};
 pub use runtime_policy::{
     ManagedPolicy, PermissionDisposition, ResolvedRuntimePolicy, RuntimePolicy, RuntimePolicyError,
     RuntimePolicyOverride, acp_permission_disposition, managed_runtime_mode_ceiling_message,
     provider_runtime_mode,
+};
+pub use selection::{
+    ProviderInstanceMetadata, ProviderSelectionTransition, ProviderSessionTransition,
+    ProviderSwitchPlan, ProviderSwitchPlanError, ProviderSwitchRegistry,
+    decide_provider_session_transition, plan_provider_switch, provider_switch_waits_for_run,
 };
 pub use types::*;

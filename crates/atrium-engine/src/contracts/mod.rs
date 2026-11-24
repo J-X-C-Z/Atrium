@@ -24,8 +24,8 @@
 //!
 //! * Web/UI-only schemas: terminal, speech, preview automation, relay, theme,
 //!   browser profiles, keybindings and settings.
-//! * `OrchestrationV2Subagent` and `subagent.updated`; the subagent turn item
-//!   is ported, the projection record belongs with item 20.
+//! * Pull-request watch and issue-link records, and the guest-share module;
+//!   their thread fields travel as raw JSON until those modules land.
 //! * Checkpoint scope/record and context handoff/transfer records and their
 //!   events (item 30). The checkpoint turn item and file summaries are ported.
 //! * `ThreadGuestShare`, pull-request link/snapshot/stack and issue link
@@ -79,6 +79,8 @@ pub type OrchestrationV2ConversationMessage = ConversationMessage;
 pub type OrchestrationV2TurnItem = TurnItem;
 pub type OrchestrationV2PlanArtifact = PlanArtifact;
 pub type OrchestrationV2DomainEvent = DomainEvent;
+pub type OrchestrationV2Subagent = Subagent;
+pub type OrchestrationV2SubagentStatus = SubagentStatus;
 
 use serde::{Deserialize, Serialize};
 

@@ -22,7 +22,7 @@ use super::base::{
 use super::capabilities::LimitRecoveryUpdate;
 use super::capabilities::NativeRefStrength;
 use super::chat::{ChatAttachment, OrchestrationMessageContext};
-use super::item::{IdleCompaction, PlanArtifact, TurnItem};
+use super::item::{IdleCompaction, PlanArtifact, Subagent, TurnItem};
 use super::provider::{
     ProviderApprovalDecision, ProviderRef, ProviderSession, ProviderSessionDetached,
     ProviderThread, ProviderTurn, ProviderUserInputAnswers,
@@ -173,6 +173,7 @@ pub enum DomainEvent {
     RuntimeRequestUpdated(EventPayload<RuntimeRequest>),
     MessageUpdated(EventPayload<ConversationMessage>),
     TurnItemUpdated(EventPayload<TurnItem>),
+    SubagentUpdated(EventPayload<Subagent>),
     PlanUpdated(EventPayload<PlanArtifact>),
     Unknown(UnknownUnionMember),
 }
@@ -234,6 +235,9 @@ impl<'de> Deserialize<'de> for DomainEvent {
                 .map_err(D::Error::custom)?,
             "turn-item.updated" => serde_json::from_value(value)
                 .map(Self::TurnItemUpdated)
+                .map_err(D::Error::custom)?,
+            "subagent.updated" => serde_json::from_value(value)
+                .map(Self::SubagentUpdated)
                 .map_err(D::Error::custom)?,
             "plan.updated" => serde_json::from_value(value)
                 .map(Self::PlanUpdated)
@@ -306,6 +310,9 @@ impl Serialize for DomainEvent {
             Self::TurnItemUpdated(event) => {
                 super::base::serialize_tagged("turn-item.updated", event, serializer)
             }
+            Self::SubagentUpdated(event) => {
+                super::base::serialize_tagged("subagent.updated", event, serializer)
+            }
             Self::PlanUpdated(event) => {
                 super::base::serialize_tagged("plan.updated", event, serializer)
             }
@@ -337,6 +344,7 @@ impl DomainEvent {
             Self::RuntimeRequestUpdated(_) => "runtime-request.updated",
             Self::MessageUpdated(_) => "message.updated",
             Self::TurnItemUpdated(_) => "turn-item.updated",
+            Self::SubagentUpdated(_) => "subagent.updated",
             Self::PlanUpdated(_) => "plan.updated",
             Self::Unknown(member) => &member.tag,
         }
@@ -344,6 +352,78 @@ impl DomainEvent {
 
     pub fn is_unknown(&self) -> bool {
         matches!(self, Self::Unknown(_))
+    }
+
+    fn base(&self) -> Option<&DomainEventBase> {
+        Some(match self {
+            Self::ThreadCreated(event) => &event.base,
+            Self::ThreadMetadata { event, .. } => &event.base,
+            Self::ThreadVisitRecorded(event) => &event.base,
+            Self::RunCreated(event) => &event.base,
+            Self::RunUpdated(event) => &event.base,
+            Self::RunBackgroundWorkCancelled(event) => &event.base,
+            Self::RunAttemptCreated(event) => &event.base,
+            Self::RunAttemptUpdated(event) => &event.base,
+            Self::NodeUpdated(event) => &event.base,
+            Self::ProviderSessionAttached(event) => &event.base,
+            Self::ProviderSessionUpdated(event) => &event.base,
+            Self::ProviderSessionDetached(event) => &event.base,
+            Self::ProviderThreadUpdated(event) => &event.base,
+            Self::ProviderTurnUpdated(event) => &event.base,
+            Self::RuntimeRequestUpdated(event) => &event.base,
+            Self::MessageUpdated(event) => &event.base,
+            Self::TurnItemUpdated(event) => &event.base,
+            Self::SubagentUpdated(event) => &event.base,
+            Self::PlanUpdated(event) => &event.base,
+            Self::Unknown(_) => return None,
+        })
+    }
+
+    pub fn event_id(&self) -> Option<&EventId> {
+        self.base().map(|base| &base.id)
+    }
+
+    pub fn thread_id(&self) -> Option<&ThreadId> {
+        self.base().map(|base| &base.thread_id)
+    }
+
+    pub fn run_id(&self) -> Option<&RunId> {
+        self.base().and_then(|base| base.run_id.as_ref())
+    }
+
+    pub fn node_id(&self) -> Option<&NodeId> {
+        self.base().and_then(|base| base.node_id.as_ref())
+    }
+
+    pub fn provider_instance_id(&self) -> Option<&ProviderInstanceId> {
+        self.base()
+            .and_then(|base| base.provider_instance_id.as_ref())
+    }
+
+    pub fn occurred_at(&self) -> Option<&str> {
+        self.base().map(|base| base.occurred_at.as_str())
+    }
+
+    /// The payload as the projection rows store it. Unknown members have none.
+    pub fn payload_json(&self) -> Option<serde_json::Value> {
+        serde_json::to_value(self).ok()?.get("payload").cloned()
+    }
+
+    /// The thread a projection write touches (a provider-thread update also
+    /// touches its app thread).
+    pub fn projected_thread_ids(&self) -> Vec<ThreadId> {
+        let Some(base) = self.base() else {
+            return Vec::new();
+        };
+        match self {
+            Self::ProviderThreadUpdated(event) => match &event.payload.app_thread_id {
+                Some(app_thread_id) if app_thread_id != &base.thread_id => {
+                    vec![base.thread_id.clone(), app_thread_id.clone()]
+                }
+                _ => vec![base.thread_id.clone()],
+            },
+            _ => vec![base.thread_id.clone()],
+        }
     }
 }
 
@@ -397,6 +477,34 @@ pub struct ConversationMessage {
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegated_completion: Option<DelegatedCompletionMessage>,
+}
+
+impl Default for ConversationMessage {
+    fn default() -> Self {
+        Self {
+            notification: None,
+            created_by: Actor::User,
+            creation_source: CreationSource::Web,
+            scheduled_task_id: None,
+            follows_thread_selection: None,
+            sender_thread_id: None,
+            linked_sender: None,
+            idle_compaction: None,
+            workflow_script: None,
+            id: MessageId::new(""),
+            thread_id: ThreadId::new(""),
+            run_id: None,
+            node_id: None,
+            role: MessageRole::User,
+            text: String::new(),
+            context: None,
+            attachments: Vec::new(),
+            streaming: false,
+            created_at: String::new(),
+            updated_at: String::new(),
+            delegated_completion: None,
+        }
+    }
 }
 
 /// A provider request's kind: an approval, or one of the three

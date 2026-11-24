@@ -12,7 +12,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use super::base::{ProviderInstanceId, trim_non_empty};
 
 /// One option's value: a non-blank string or a boolean.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ProviderOptionValue {
     String(String),
@@ -35,7 +35,7 @@ impl ProviderOptionValue {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderOptionSelection {
     pub id: String,
@@ -83,7 +83,7 @@ fn legacy_object_to_array(
 }
 
 /// T3's `ProviderOptionSelections`, in its canonical array form.
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct ProviderOptionSelections(pub Vec<ProviderOptionSelection>);
 
@@ -134,6 +134,8 @@ impl ModelSelection {
         }
     }
 }
+
+impl Eq for ModelSelection {}
 
 impl<'de> Deserialize<'de> for ModelSelection {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>

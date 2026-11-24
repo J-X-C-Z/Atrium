@@ -1,577 +1,80 @@
 // Ported from packages/contracts/src/orchestrationV2.ts and packages/contracts/src/providerPolicy.ts (T3 Code v0.1.11, MIT).
 
-//! Local seed model for the pure orchestration core.
+//! The records and internal commands the orchestration core decides over.
 //!
-//! `crate::contracts` is being ported in parallel. These structs keep the T3
-//! field names and unions so the real contract module can replace them without
-//! changing a decision. **Consolidation:** when `crate::contracts` grows the
-//! `OrchestrationV2*` types, delete the duplicates here and re-export.
+//! Every wire record is the ported `crate::contracts` type: a thread is
+//! [`AppThread`](crate::contracts::AppThread), a run is
+//! [`Run`](crate::contracts::Run), an event is
+//! [`DomainEvent`](crate::contracts::DomainEvent). This module only adds the
+//! pieces T3 keeps server-side (the internal command union, the folded
+//! projection snapshot, outbox requests and decision errors) and the epoch
+//! millisecond clock the pure decisions take as an argument.
 
 use std::collections::BTreeSet;
 
-use serde::{Deserialize, Serialize};
+pub use crate::contracts::{
+    Actor, AppThread as Thread, ApprovalRequestTurnItem, ChatAttachment as Attachment,
+    ConversationMessage as Message, CreationSource,
+    DelegatedCompletionMessage as DelegatedCompletion, DomainEvent, DomainEventBase, EventPayload,
+    ExecutionNode, ExecutionNodeKind as NodeKind, ExecutionNodeStatus as NodeStatus,
+    InitialMessage, MessageDeliveryIntent as DeliveryIntent, MessageDispatchCommand,
+    MessageDispatchMode as DispatchMode, MessageRole, ModelSelection, Notification,
+    NotificationOutcome, NotificationSource, ProviderApprovalDecision as ApprovalDecision,
+    ProviderCapabilities, ProviderInteractionMode as InteractionMode, ProviderRequestKind,
+    ProviderSession, ProviderSessionStatus, ProviderThread, ProviderThreadStatus, ProviderTurn,
+    ProviderTurnStatus, ResponseCapability, Run, RunAttempt, RunAttemptReason, RunAttemptStatus,
+    RunInterruptCommand, RunInterruptRequestTurnItem, RunInterruptResultTurnItem, RunStatus,
+    RuntimeMode, RuntimeRequest, RuntimeRequestKind as RequestKind, RuntimeRequestRespondCommand,
+    RuntimeRequestStatus as RequestStatus, SettledOverride, ThreadCreateCommand,
+    ThreadModelSelectionSetCommand, ThreadRuntimeModeSetCommand, ThreadStopCommand,
+    TitleRegenerationMarker as TitleRegeneration, TurnCapabilities, TurnItem, TurnItemBase,
+    TurnItemStatus, UserMessageInputIntent as InputIntent, UserMessageTurnItem,
+};
 
-pub use crate::contracts::{CommandId, EventId, ProjectId, RunId, ThreadId};
+pub use crate::contracts::{
+    CommandId, EventId, MessageId, NodeId, ProjectId, ProviderDriverKind, ProviderInstanceId,
+    ProviderSessionId, ProviderThreadId, ProviderTurnId, RunAttemptId, RunId, RuntimeRequestId,
+    ScheduledTaskId, ThreadId, TurnItemId,
+};
 
-// Local ids that the seed contract does not carry yet. Consolidation: replace
-// with the contract aliases once they land.
-pub type NodeId = String;
-pub type MessageId = String;
-pub type RunAttemptId = String;
-pub type ProviderThreadId = String;
-pub type ProviderSessionId = String;
-pub type ProviderTurnId = String;
-pub type RuntimeRequestId = String;
-pub type TurnItemId = String;
-pub type SubagentId = String;
+// The internal command union reuses the ported wire payloads; these aliases
+// keep the orchestrator's T3 vocabulary.
+pub use crate::contracts::{
+    MessageDispatchCommand as MessageDispatch, RunInterruptCommand as RunInterrupt,
+    RuntimeRequestRespondCommand as RuntimeRequestRespond, ThreadCreateCommand as ThreadCreate,
+    ThreadModelSelectionSetCommand as ThreadModelSelectionSet,
+    ThreadRuntimeModeSetCommand as ThreadRuntimeModeSet, ThreadStopCommand as ThreadStop,
+};
 
-/// Epoch milliseconds. Time enters every decision as an argument.
+/// Epoch milliseconds. Time enters every decision as an argument; wire records
+/// carry the canonical ISO string [`iso`] produces.
 pub type Timestamp = i64;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ModelSelection {
-    pub instance_id: String,
-    pub model: String,
+/// The ISO-8601 UTC string a T3 `DateTime.Utc` encodes.
+pub fn iso(at: Timestamp) -> String {
+    jiff::Timestamp::from_millisecond(at)
+        .map(|timestamp| timestamp.to_string())
+        .unwrap_or_else(|_| at.to_string())
 }
 
-impl ModelSelection {
-    pub fn new(instance_id: impl Into<String>, model: impl Into<String>) -> Self {
-        Self {
-            instance_id: instance_id.into(),
-            model: model.into(),
-        }
-    }
+/// Epoch milliseconds for a stored ISO timestamp; unparseable values sort first.
+pub fn parse_iso(value: &str) -> Timestamp {
+    value
+        .parse::<jiff::Timestamp>()
+        .map(|timestamp| timestamp.as_millisecond())
+        .unwrap_or(0)
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum RuntimeMode {
-    ApprovalRequired,
-    AutoAcceptEdits,
-    Auto,
-    #[default]
-    FullAccess,
+/// Whether the message came from a monitor wake.
+pub fn notification_is_monitor(notification: &Notification) -> bool {
+    matches!(notification.source, NotificationSource::Monitor { .. })
 }
 
-impl RuntimeMode {
-    pub const fn rank(self) -> u8 {
-        match self {
-            Self::ApprovalRequired => 0,
-            Self::AutoAcceptEdits => 1,
-            Self::Auto => 2,
-            Self::FullAccess => 3,
-        }
-    }
+// ---------------------------------------------------------------------------
+// Folded projection
+// ---------------------------------------------------------------------------
 
-    /// Whether `mode` grants the agent more than `ceiling`.
-    pub fn is_above(self, ceiling: Option<RuntimeMode>) -> bool {
-        ceiling.is_some_and(|ceiling| self.rank() > ceiling.rank())
-    }
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::ApprovalRequired => "Supervised",
-            Self::AutoAcceptEdits => "Auto-accept edits",
-            Self::Auto => "Auto",
-            Self::FullAccess => "Full access",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum InteractionMode {
-    #[default]
-    Default,
-    Plan,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Actor {
-    #[default]
-    User,
-    Agent,
-    System,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CreationSource {
-    #[default]
-    Web,
-    Mobile,
-    Server,
-    Mcp,
-    Provider,
-    Import,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TitleRegeneration {
-    pub request_id: CommandId,
-    pub started_at: Timestamp,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SettledOverride {
-    Settled,
-    Active,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Thread {
-    pub id: ThreadId,
-    pub project_id: ProjectId,
-    pub title: String,
-    pub provider_instance_id: String,
-    pub model_selection: ModelSelection,
-    pub runtime_mode: RuntimeMode,
-    pub interaction_mode: InteractionMode,
-    pub branch: Option<String>,
-    pub worktree_path: Option<String>,
-    pub active_provider_thread_id: Option<ProviderThreadId>,
-    pub created_by: Actor,
-    pub creation_source: CreationSource,
-    pub created_at: Timestamp,
-    pub updated_at: Timestamp,
-    pub archived_at: Option<Timestamp>,
-    pub settled_override: Option<SettledOverride>,
-    pub settled_at: Option<Timestamp>,
-    pub last_visited_at: Option<Timestamp>,
-    pub title_regeneration: Option<TitleRegeneration>,
-    pub deleted_at: Option<Timestamp>,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RunStatus {
-    #[default]
-    Preparing,
-    Queued,
-    Starting,
-    Running,
-    Waiting,
-    Completed,
-    Interrupted,
-    Failed,
-    Cancelled,
-    RolledBack,
-}
-
-impl RunStatus {
-    /// A run that still owns the thread's provider turn.
-    pub const fn is_active(self) -> bool {
-        matches!(
-            self,
-            Self::Preparing | Self::Starting | Self::Running | Self::Waiting
-        )
-    }
-
-    /// A run whose agent is live; waiting runs only drain post-terminal output.
-    pub const fn is_live(self) -> bool {
-        matches!(self, Self::Preparing | Self::Starting | Self::Running)
-    }
-
-    pub const fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Completed | Self::Interrupted | Self::Failed | Self::Cancelled | Self::RolledBack
-        )
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Run {
-    pub id: RunId,
-    pub thread_id: ThreadId,
-    pub ordinal: u32,
-    pub provider_instance_id: String,
-    pub model_selection: ModelSelection,
-    pub provider_thread_id: Option<ProviderThreadId>,
-    pub user_message_id: MessageId,
-    pub root_node_id: Option<NodeId>,
-    pub active_attempt_id: Option<RunAttemptId>,
-    pub status: RunStatus,
-    pub queue_position: Option<u32>,
-    pub queue_held: bool,
-    pub steer_when_ready_run_id: Option<RunId>,
-    pub requested_at: Timestamp,
-    pub started_at: Option<Timestamp>,
-    pub completed_at: Option<Timestamp>,
-    pub restart_continuation_of_run_id: Option<RunId>,
-    pub manual_continuation_of_run_id: Option<RunId>,
-    pub usage_limit_continuation_of_run_id: Option<RunId>,
-    pub fresh_context: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RunAttemptStatus {
-    Pending,
-    Running,
-    Completed,
-    Interrupted,
-    Failed,
-    Cancelled,
-    Superseded,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RunAttemptReason {
-    Initial,
-    SteeringRestart,
-    Retry,
-    ProviderRecovery,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RunAttempt {
-    pub id: RunAttemptId,
-    pub run_id: RunId,
-    pub attempt_ordinal: u32,
-    pub root_node_id: NodeId,
-    pub provider_instance_id: String,
-    pub provider_thread_id: ProviderThreadId,
-    pub provider_turn_id: Option<ProviderTurnId>,
-    pub reason: RunAttemptReason,
-    pub status: RunAttemptStatus,
-    pub started_at: Option<Timestamp>,
-    pub completed_at: Option<Timestamp>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NodeKind {
-    RootTurn,
-    AssistantMessage,
-    Reasoning,
-    Plan,
-    TodoList,
-    ToolCall,
-    ApprovalRequest,
-    UserInputRequest,
-    Subagent,
-    System,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NodeStatus {
-    Idle,
-    Pending,
-    Running,
-    Waiting,
-    Completed,
-    Interrupted,
-    Failed,
-    Cancelled,
-    RolledBack,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExecutionNode {
-    pub id: NodeId,
-    pub thread_id: ThreadId,
-    pub run_id: Option<RunId>,
-    pub parent_node_id: Option<NodeId>,
-    pub root_node_id: NodeId,
-    pub kind: NodeKind,
-    pub status: NodeStatus,
-    pub counts_for_run: bool,
-    pub provider_thread_id: Option<ProviderThreadId>,
-    pub provider_turn_id: Option<ProviderTurnId>,
-    pub runtime_request_id: Option<RuntimeRequestId>,
-    pub started_at: Option<Timestamp>,
-    pub completed_at: Option<Timestamp>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MessageRole {
-    User,
-    Assistant,
-    System,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Attachment {
-    pub id: String,
-    pub name: String,
-    pub mime_type: String,
-    pub size_bytes: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DelegatedCompletion {
-    pub parent_run_id: RunId,
-    pub generation: u32,
-    pub task_ids: Vec<NodeId>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Notification {
-    pub outcome: NotificationOutcome,
-    pub summary: String,
-    pub source_kind: String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NotificationOutcome {
-    Completed,
-    Failed,
-    Cancelled,
-    Updated,
-    Unknown,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Message {
-    pub id: MessageId,
-    pub thread_id: ThreadId,
-    pub run_id: Option<RunId>,
-    pub node_id: Option<NodeId>,
-    pub role: MessageRole,
-    pub text: String,
-    pub attachments: Vec<Attachment>,
-    pub streaming: bool,
-    pub created_by: Actor,
-    pub creation_source: CreationSource,
-    pub scheduled_task_id: Option<String>,
-    pub sender_thread_id: Option<ThreadId>,
-    /// Runs on the thread's selection at start when true.
-    pub follows_thread_selection: bool,
-    pub created_at: Timestamp,
-    pub updated_at: Timestamp,
-    pub delegated_completion: Option<DelegatedCompletion>,
-    pub notification: Option<Notification>,
-}
-
-impl Default for Message {
-    fn default() -> Self {
-        Self {
-            id: String::new(),
-            thread_id: String::new(),
-            run_id: None,
-            node_id: None,
-            role: MessageRole::User,
-            text: String::new(),
-            attachments: Vec::new(),
-            streaming: false,
-            created_by: Actor::default(),
-            creation_source: CreationSource::default(),
-            scheduled_task_id: None,
-            sender_thread_id: None,
-            follows_thread_selection: false,
-            created_at: 0,
-            updated_at: 0,
-            delegated_completion: None,
-            notification: None,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TurnItemStatus {
-    Pending,
-    Running,
-    Waiting,
-    Completed,
-    Interrupted,
-    Failed,
-    Cancelled,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum InputIntent {
-    TurnStart,
-    Steer,
-    QueuedTurn,
-    PromotedQueuedToSteer,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TurnItemKind {
-    UserMessage {
-        message_id: MessageId,
-        text: String,
-        input_intent: InputIntent,
-    },
-    RunInterruptRequest {
-        message: String,
-    },
-    RunInterruptResult {
-        message: String,
-    },
-    ApprovalRequest {
-        request_id: RuntimeRequestId,
-        prompt: Option<String>,
-    },
-    SystemNotice {
-        message: String,
-    },
-}
-
-impl TurnItemKind {
-    pub const fn type_name(&self) -> &'static str {
-        match self {
-            Self::UserMessage { .. } => "user_message",
-            Self::RunInterruptRequest { .. } => "run_interrupt_request",
-            Self::RunInterruptResult { .. } => "run_interrupt_result",
-            Self::ApprovalRequest { .. } => "approval_request",
-            Self::SystemNotice { .. } => "system_notice",
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TurnItem {
-    pub id: TurnItemId,
-    pub thread_id: ThreadId,
-    pub run_id: Option<RunId>,
-    pub node_id: Option<NodeId>,
-    pub provider_thread_id: Option<ProviderThreadId>,
-    pub provider_turn_id: Option<ProviderTurnId>,
-    pub parent_item_id: Option<TurnItemId>,
-    pub ordinal: i64,
-    pub status: TurnItemStatus,
-    pub title: Option<String>,
-    pub created_by: Actor,
-    pub creation_source: CreationSource,
-    pub started_at: Option<Timestamp>,
-    pub completed_at: Option<Timestamp>,
-    pub updated_at: Timestamp,
-    pub kind: TurnItemKind,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RequestKind {
-    Command,
-    FileRead,
-    FileChange,
-    McpElicitation,
-    Permission,
-    DynamicToolCall,
-    UserInput,
-    AuthRefresh,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RequestStatus {
-    Pending,
-    Resolved,
-    Expired,
-    Cancelled,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum ApprovalDecision {
-    Accept,
-    AcceptForSession,
-    AcceptAlways,
-    Decline,
-    Cancel,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RuntimeRequest {
-    pub id: RuntimeRequestId,
-    pub thread_id: ThreadId,
-    pub node_id: NodeId,
-    pub provider_turn_id: Option<ProviderTurnId>,
-    pub kind: RequestKind,
-    pub status: RequestStatus,
-    pub provider_instance_id: String,
-    pub created_at: Timestamp,
-    pub resolved_at: Option<Timestamp>,
-    pub decision: Option<ApprovalDecision>,
-    pub feedback: Option<String>,
-    /// `None` when the answer must arrive as a message on the next turn.
-    pub live_provider_session_id: Option<ProviderSessionId>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProviderThreadStatus {
-    NotLoaded,
-    Idle,
-    Active,
-    Archived,
-    Closed,
-    Error,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProviderThread {
-    pub id: ProviderThreadId,
-    pub driver: String,
-    pub provider_instance_id: String,
-    pub provider_session_id: Option<ProviderSessionId>,
-    pub app_thread_id: ThreadId,
-    pub native_thread_ref: Option<String>,
-    pub status: ProviderThreadStatus,
-    pub first_run_ordinal: Option<u32>,
-    pub last_run_ordinal: Option<u32>,
-    pub created_at: Timestamp,
-    pub updated_at: Timestamp,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProviderTurnStatus {
-    Pending,
-    Running,
-    Completed,
-    Interrupted,
-    Failed,
-    Cancelled,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProviderTurn {
-    pub id: ProviderTurnId,
-    pub provider_thread_id: ProviderThreadId,
-    pub run_attempt_id: RunAttemptId,
-    pub status: ProviderTurnStatus,
-    pub created_at: Timestamp,
-    pub updated_at: Timestamp,
-}
-
-/// The turn capabilities that decide how input reaches a live turn.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TurnCapabilities {
-    pub supports_interrupt: bool,
-    pub supports_active_steering: bool,
-    pub active_steering_interrupts_tools: bool,
-    pub active_steering_accepts_attachments: bool,
-    pub supports_steering_by_interrupt_restart: bool,
-    pub supports_queued_messages: bool,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProviderCapabilities {
-    pub turns: TurnCapabilities,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProviderSession {
-    pub id: ProviderSessionId,
-    pub provider_instance_id: String,
-    pub provider_thread_id: ProviderThreadId,
-    pub capabilities: ProviderCapabilities,
-    pub cwd: Option<String>,
-    pub model: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Projection {
     pub thread: Thread,
     pub runs: Vec<Run>,
@@ -583,7 +86,8 @@ pub struct Projection {
     pub provider_turns: Vec<ProviderTurn>,
     pub turn_items: Vec<TurnItem>,
     pub runtime_requests: Vec<RuntimeRequest>,
-    pub subagent_ids: BTreeSet<SubagentId>,
+    pub subagents: Vec<crate::orchestration::subagents::Subagent>,
+    pub subagent_ids: BTreeSet<NodeId>,
 }
 
 impl Projection {
@@ -594,40 +98,57 @@ impl Projection {
         }
     }
 
-    pub fn run(&self, id: &str) -> Option<&Run> {
-        self.runs.iter().find(|run| run.id == id)
+    pub fn run(&self, id: impl AsRef<str>) -> Option<&Run> {
+        self.runs.iter().find(|run| run.id.as_str() == id.as_ref())
     }
 
-    pub fn message(&self, id: &str) -> Option<&Message> {
-        self.messages.iter().find(|message| message.id == id)
+    pub fn message(&self, id: impl AsRef<str>) -> Option<&Message> {
+        self.messages
+            .iter()
+            .find(|message| message.id.as_str() == id.as_ref())
     }
 
-    pub fn attempt(&self, id: &str) -> Option<&RunAttempt> {
-        self.attempts.iter().find(|attempt| attempt.id == id)
+    pub fn attempt(&self, id: impl AsRef<str>) -> Option<&RunAttempt> {
+        self.attempts
+            .iter()
+            .find(|attempt| attempt.id.as_str() == id.as_ref())
     }
 
-    pub fn node(&self, id: &str) -> Option<&ExecutionNode> {
-        self.nodes.iter().find(|node| node.id == id)
+    pub fn node(&self, id: impl AsRef<str>) -> Option<&ExecutionNode> {
+        self.nodes
+            .iter()
+            .find(|node| node.id.as_str() == id.as_ref())
     }
 
-    pub fn provider_thread(&self, id: &str) -> Option<&ProviderThread> {
-        self.provider_threads.iter().find(|row| row.id == id)
+    pub fn provider_thread(&self, id: impl AsRef<str>) -> Option<&ProviderThread> {
+        self.provider_threads
+            .iter()
+            .find(|row| row.id.as_str() == id.as_ref())
     }
 
-    pub fn provider_session(&self, id: &str) -> Option<&ProviderSession> {
-        self.provider_sessions.iter().find(|row| row.id == id)
+    pub fn provider_session(&self, id: impl AsRef<str>) -> Option<&ProviderSession> {
+        self.provider_sessions
+            .iter()
+            .find(|row| row.id.as_str() == id.as_ref())
     }
 
-    pub fn provider_turn(&self, id: &str) -> Option<&ProviderTurn> {
-        self.provider_turns.iter().find(|row| row.id == id)
+    pub fn provider_turn(&self, id: impl AsRef<str>) -> Option<&ProviderTurn> {
+        self.provider_turns
+            .iter()
+            .find(|row| row.id.as_str() == id.as_ref())
     }
 
-    pub fn turn_item(&self, id: &str) -> Option<&TurnItem> {
-        self.turn_items.iter().find(|item| item.id == id)
+    pub fn turn_item(&self, id: impl AsRef<str>) -> Option<&TurnItem> {
+        self.turn_items.iter().find(|item| {
+            item.id()
+                .is_some_and(|item_id| item_id.as_str() == id.as_ref())
+        })
     }
 
-    pub fn runtime_request(&self, id: &str) -> Option<&RuntimeRequest> {
-        self.runtime_requests.iter().find(|row| row.id == id)
+    pub fn runtime_request(&self, id: impl AsRef<str>) -> Option<&RuntimeRequest> {
+        self.runtime_requests
+            .iter()
+            .find(|row| row.id.as_str() == id.as_ref())
     }
 
     pub fn active_run(&self) -> Option<&Run> {
@@ -637,18 +158,19 @@ impl Projection {
     pub fn active_provider_thread(&self) -> Option<&ProviderThread> {
         self.thread
             .active_provider_thread_id
-            .as_deref()
-            .and_then(|id| self.provider_thread(id))
+            .as_ref()
+            .and_then(|id| self.provider_thread(id.as_str()))
     }
 
     pub fn next_run_ordinal(&self) -> u32 {
         self.runs.iter().map(|run| run.ordinal).max().unwrap_or(0) + 1
     }
 
-    pub fn next_turn_item_ordinal(&self) -> i64 {
+    pub fn next_turn_item_ordinal(&self) -> u32 {
         self.turn_items
             .iter()
-            .map(|item| item.ordinal)
+            .filter_map(TurnItem::base)
+            .map(|base| base.ordinal)
             .max()
             .map_or(0, |max| max + 1)
     }
@@ -671,65 +193,109 @@ impl Projection {
     }
 
     /// Stop reached this run when its interrupt request item is stored.
-    pub fn stop_reached(&self, run_id: &str) -> bool {
+    pub fn stop_reached(&self, run_id: impl AsRef<str>) -> bool {
         self.turn_items.iter().any(|item| {
-            item.run_id.as_deref() == Some(run_id)
-                && matches!(item.kind, TurnItemKind::RunInterruptRequest { .. })
+            item.base().is_some_and(|base| {
+                base.run_id
+                    .as_ref()
+                    .is_some_and(|id| id.as_str() == run_id.as_ref())
+            }) && matches!(item, TurnItem::RunInterruptRequest(_))
         })
     }
 
     pub fn provider_turn_capabilities(&self, run: &Run) -> Option<TurnCapabilities> {
-        let provider_thread = self.provider_thread(run.provider_thread_id.as_deref()?)?;
-        let session = self.provider_session(provider_thread.provider_session_id.as_deref()?)?;
-        Some(session.capabilities.turns)
+        let provider_thread = self.provider_thread(run.provider_thread_id.as_ref()?)?;
+        let session = self.provider_session(provider_thread.provider_session_id.as_ref()?)?;
+        Some(session.capabilities.turns.clone())
     }
 
     pub fn running_provider_turn(&self, run: &Run) -> Option<&ProviderTurn> {
-        let attempt_id = run.active_attempt_id.as_deref()?;
+        let attempt_id = run.active_attempt_id.as_ref()?;
         self.provider_turns.iter().rev().find(|turn| {
-            turn.run_attempt_id == attempt_id && turn.status == ProviderTurnStatus::Running
+            turn.run_attempt_id.as_ref() == Some(attempt_id)
+                && turn.status == ProviderTurnStatus::Running
         })
     }
 
     pub fn apply(&mut self, event: &DomainEvent) {
-        match &event.kind {
-            EventKind::ThreadCreated(thread)
-            | EventKind::ThreadUpdated(thread)
-            | EventKind::ThreadMetadataUpdated(thread)
-            | EventKind::ThreadModelSelectionUpdated(thread)
-            | EventKind::ThreadProviderSwitched(thread)
-            | EventKind::ThreadRuntimeModeUpdated(thread) => {
-                self.thread = thread.clone();
+        match event {
+            DomainEvent::ThreadCreated(event) | DomainEvent::ThreadMetadata { event, .. } => {
+                self.thread = event.payload.clone();
             }
-            EventKind::RunCreated(run) | EventKind::RunUpdated(run) => {
-                upsert(&mut self.runs, run, |r| r.id.as_str());
+            DomainEvent::RunCreated(event) | DomainEvent::RunUpdated(event) => {
+                upsert(&mut self.runs, &event.payload, |run| run.id.as_str());
             }
-            EventKind::RunAttemptCreated(attempt) | EventKind::RunAttemptUpdated(attempt) => {
-                upsert(&mut self.attempts, attempt, |a| a.id.as_str());
-            }
-            EventKind::NodeUpdated(node) => upsert(&mut self.nodes, node, |n| n.id.as_str()),
-            EventKind::MessageUpdated(message) => {
-                upsert(&mut self.messages, message, |m| m.id.as_str());
-            }
-            EventKind::TurnItemUpdated(item) => {
-                upsert(&mut self.turn_items, item, |i| i.id.as_str());
-            }
-            EventKind::RuntimeRequestUpdated(request) => {
-                upsert(&mut self.runtime_requests, request, |r| r.id.as_str());
-            }
-            EventKind::ProviderTurnUpdated(provider_turn) => {
-                upsert(&mut self.provider_turns, provider_turn, |p| p.id.as_str());
-            }
-            EventKind::ProviderThreadUpdated(provider_thread) => {
-                upsert(&mut self.provider_threads, provider_thread, |p| {
-                    p.id.as_str()
+            DomainEvent::RunAttemptCreated(event) | DomainEvent::RunAttemptUpdated(event) => {
+                upsert(&mut self.attempts, &event.payload, |attempt| {
+                    attempt.id.as_str()
                 });
-                if provider_thread.app_thread_id == self.thread.id
+            }
+            DomainEvent::NodeUpdated(event) => {
+                upsert(&mut self.nodes, &event.payload, |node| node.id.as_str());
+            }
+            DomainEvent::MessageUpdated(event) => {
+                upsert(&mut self.messages, &event.payload, |message| {
+                    message.id.as_str()
+                });
+            }
+            DomainEvent::TurnItemUpdated(event) => {
+                let Some(id) = event.payload.id().map(|id| id.as_str().to_owned()) else {
+                    return;
+                };
+                if let Some(existing) = self
+                    .turn_items
+                    .iter_mut()
+                    .find(|item| item.id().is_some_and(|item_id| item_id.as_str() == id))
+                {
+                    *existing = event.payload.clone();
+                } else {
+                    self.turn_items.push(event.payload.clone());
+                }
+            }
+            DomainEvent::SubagentUpdated(event) => {
+                let Some(existing) = self
+                    .subagents
+                    .iter_mut()
+                    .find(|subagent| subagent.id == event.payload.id)
+                else {
+                    self.subagent_ids.insert(event.payload.id.clone());
+                    self.subagents.push(event.payload.clone());
+                    return;
+                };
+                *existing = event.payload.clone();
+            }
+            DomainEvent::RuntimeRequestUpdated(event) => {
+                upsert(&mut self.runtime_requests, &event.payload, |request| {
+                    request.id.as_str()
+                });
+            }
+            DomainEvent::ProviderTurnUpdated(event) => {
+                upsert(&mut self.provider_turns, &event.payload, |turn| {
+                    turn.id.as_str()
+                });
+            }
+            DomainEvent::ProviderSessionAttached(event)
+            | DomainEvent::ProviderSessionUpdated(event) => {
+                upsert(&mut self.provider_sessions, &event.payload, |session| {
+                    session.id.as_str()
+                });
+            }
+            DomainEvent::ProviderThreadUpdated(event) => {
+                upsert(&mut self.provider_threads, &event.payload, |thread| {
+                    thread.id.as_str()
+                });
+                let provider_thread = &event.payload;
+                if provider_thread.app_thread_id.as_ref() == Some(&self.thread.id)
                     && !matches!(provider_thread.status, ProviderThreadStatus::Closed)
                 {
                     self.thread.active_provider_thread_id = Some(provider_thread.id.clone());
                 }
             }
+            DomainEvent::RunBackgroundWorkCancelled(_)
+            | DomainEvent::ThreadVisitRecorded(_)
+            | DomainEvent::ProviderSessionDetached(_)
+            | DomainEvent::PlanUpdated(_)
+            | DomainEvent::Unknown(_) => {}
         }
     }
 }
@@ -746,294 +312,42 @@ where
     }
 }
 
+fn run_end(candidate: &Run) -> &str {
+    candidate
+        .completed_at
+        .as_deref()
+        .unwrap_or("9999-12-31T23:59:59.999Z")
+}
+
 pub fn run_ran_after(run: &Run, other: &Run) -> bool {
-    let end = |candidate: &Run| candidate.completed_at.unwrap_or(Timestamp::MAX);
-    match end(run).cmp(&end(other)) {
+    match run_end(run).cmp(run_end(other)) {
         std::cmp::Ordering::Greater => true,
         std::cmp::Ordering::Equal => run.ordinal > other.ordinal,
         std::cmp::Ordering::Less => false,
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ThreadUpdate {
-    Updated,
-    Metadata,
-    ModelSelection,
-    ProviderSwitched,
-    RuntimeMode,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum EventKind {
-    ThreadCreated(Thread),
-    ThreadUpdated(Thread),
-    ThreadMetadataUpdated(Thread),
-    ThreadModelSelectionUpdated(Thread),
-    ThreadProviderSwitched(Thread),
-    ThreadRuntimeModeUpdated(Thread),
-    RunCreated(Run),
-    RunUpdated(Run),
-    RunAttemptCreated(RunAttempt),
-    RunAttemptUpdated(RunAttempt),
-    NodeUpdated(ExecutionNode),
-    MessageUpdated(Message),
-    TurnItemUpdated(TurnItem),
-    RuntimeRequestUpdated(RuntimeRequest),
-    ProviderThreadUpdated(ProviderThread),
-    ProviderTurnUpdated(ProviderTurn),
-}
-
-impl EventKind {
-    pub const fn type_name(&self) -> &'static str {
-        match self {
-            Self::ThreadCreated(_) => "thread.created",
-            Self::ThreadUpdated(_) => "thread.updated",
-            Self::ThreadMetadataUpdated(_) => "thread.metadata-updated",
-            Self::ThreadModelSelectionUpdated(_) => "thread.model-selection-updated",
-            Self::ThreadProviderSwitched(_) => "thread.provider-switched",
-            Self::ThreadRuntimeModeUpdated(_) => "thread.runtime-mode-updated",
-            Self::RunCreated(_) => "run.created",
-            Self::RunUpdated(_) => "run.updated",
-            Self::RunAttemptCreated(_) => "run-attempt.created",
-            Self::RunAttemptUpdated(_) => "run-attempt.updated",
-            Self::NodeUpdated(_) => "node.updated",
-            Self::MessageUpdated(_) => "message.updated",
-            Self::TurnItemUpdated(_) => "turn-item.updated",
-            Self::RuntimeRequestUpdated(_) => "runtime-request.updated",
-            Self::ProviderThreadUpdated(_) => "provider-thread.updated",
-            Self::ProviderTurnUpdated(_) => "provider-turn.updated",
-        }
-    }
-
-    /// The thread a projection write touches (a provider-thread update also touches its app thread).
-    pub fn projected_thread_ids(&self, event_thread_id: &ThreadId) -> Vec<ThreadId> {
-        match self {
-            Self::ProviderThreadUpdated(row) if &row.app_thread_id != event_thread_id => {
-                vec![event_thread_id.clone(), row.app_thread_id.clone()]
-            }
-            _ => vec![event_thread_id.clone()],
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DomainEvent {
-    pub id: EventId,
-    pub thread_id: ThreadId,
-    pub run_id: Option<RunId>,
-    pub node_id: Option<NodeId>,
-    pub provider_instance_id: Option<String>,
-    pub occurred_at: Timestamp,
-    pub kind: EventKind,
-}
-
-impl DomainEvent {
-    pub fn new(
-        id: impl Into<EventId>,
-        thread_id: impl Into<ThreadId>,
-        occurred_at: Timestamp,
-        kind: EventKind,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            thread_id: thread_id.into(),
-            run_id: None,
-            node_id: None,
-            provider_instance_id: None,
-            occurred_at,
-            kind,
-        }
-    }
-
-    pub fn with_run(mut self, run_id: impl ToString) -> Self {
-        self.run_id = Some(run_id.to_string());
-        self
-    }
-
-    pub fn with_node(mut self, node_id: impl ToString) -> Self {
-        self.node_id = Some(node_id.to_string());
-        self
-    }
-
-    pub fn with_provider_instance(mut self, instance_id: impl ToString) -> Self {
-        self.provider_instance_id = Some(instance_id.to_string());
-        self
-    }
-}
-
 // ---------------------------------------------------------------------------
-// Commands
+// Internal commands
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DispatchMode {
-    DeferStart { workspace_strategy: Option<String> },
-    SteerActive { target_run_id: RunId },
-    RestartActive { target_run_id: RunId },
-    QueueAfterActive,
-    StartImmediately,
-}
-
-impl DispatchMode {
-    pub const fn name(&self) -> &'static str {
-        match self {
-            Self::DeferStart { .. } => "defer_start",
-            Self::SteerActive { .. } => "steer_active",
-            Self::RestartActive { .. } => "restart_active",
-            Self::QueueAfterActive => "queue_after_active",
-            Self::StartImmediately => "start_immediately",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DeliveryIntent {
-    Auto,
-    Steer,
-    Restart,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A dispatch limit is server policy, not part of the wire command: the
+/// orchestrator receives it as a decision argument.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DispatchModeLimit {
     pub runtime_mode: RuntimeMode,
     pub interaction_mode: InteractionMode,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InitialMessage {
-    pub message_id: MessageId,
-    pub text: String,
-    pub attachments: Vec<Attachment>,
-    pub title_seed: Option<String>,
-    pub scheduled_task_id: Option<String>,
-    pub sender_thread_id: Option<ThreadId>,
-    pub workspace_strategy: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ThreadCreate {
-    pub command_id: CommandId,
-    pub thread_id: ThreadId,
-    pub project_id: ProjectId,
-    pub title: String,
-    pub model_selection: ModelSelection,
-    pub runtime_mode: RuntimeMode,
-    pub interaction_mode: InteractionMode,
-    pub branch: Option<String>,
-    pub worktree_path: Option<String>,
-    pub created_by: Actor,
-    pub creation_source: CreationSource,
-    pub initial_message: Option<InitialMessage>,
-    /// Enforced when an agent launches; a user's own client is not limited here.
-    pub mode_limit: Option<DispatchModeLimit>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MessageDispatch {
-    pub command_id: CommandId,
-    pub thread_id: ThreadId,
-    pub message_id: MessageId,
-    pub text: String,
-    pub attachments: Vec<Attachment>,
-    pub created_by: Actor,
-    pub creation_source: CreationSource,
-    pub model_selection: Option<ModelSelection>,
-    pub dispatch_mode: DispatchMode,
-    pub delivery_intent: Option<DeliveryIntent>,
-    pub scheduled_task_id: Option<String>,
-    pub sender_thread_id: Option<ThreadId>,
-    pub title_seed: Option<String>,
-    pub fresh_context: bool,
-    pub notification: Option<Notification>,
-    pub delegated_completion: Option<DelegatedCompletion>,
-    pub steer_follow_up_of_run_id: Option<RunId>,
-    pub steer_follow_up_after_run_ordinal: Option<u32>,
-    pub mode_limit: Option<DispatchModeLimit>,
-}
-
-impl MessageDispatch {
-    pub fn new(
-        command_id: impl Into<CommandId>,
-        thread_id: impl Into<ThreadId>,
-        message_id: impl Into<MessageId>,
-        text: impl Into<String>,
-    ) -> Self {
-        Self {
-            command_id: command_id.into(),
-            thread_id: thread_id.into(),
-            message_id: message_id.into(),
-            text: text.into(),
-            attachments: Vec::new(),
-            created_by: Actor::User,
-            creation_source: CreationSource::Web,
-            model_selection: None,
-            dispatch_mode: DispatchMode::StartImmediately,
-            delivery_intent: None,
-            scheduled_task_id: None,
-            sender_thread_id: None,
-            title_seed: None,
-            fresh_context: false,
-            notification: None,
-            delegated_completion: None,
-            steer_follow_up_of_run_id: None,
-            steer_follow_up_after_run_ordinal: None,
-            mode_limit: None,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ThreadStop {
-    pub command_id: CommandId,
-    pub thread_id: ThreadId,
-    pub reason: Option<String>,
-    pub stop_delegated_tasks: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RunInterrupt {
-    pub command_id: CommandId,
-    pub thread_id: ThreadId,
-    pub run_id: RunId,
-    pub reason: Option<String>,
-    pub hold_queue: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RuntimeRequestRespond {
-    pub command_id: CommandId,
-    pub thread_id: ThreadId,
-    pub request_id: RuntimeRequestId,
-    pub decision: Option<ApprovalDecision>,
-    pub feedback: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ThreadModelSelectionSet {
-    pub command_id: CommandId,
-    pub thread_id: ThreadId,
-    pub model_selection: ModelSelection,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ThreadRuntimeModeSet {
-    pub command_id: CommandId,
-    pub thread_id: ThreadId,
-    pub runtime_mode: RuntimeMode,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Command {
-    ThreadCreate(ThreadCreate),
-    MessageDispatch(MessageDispatch),
-    ThreadStop(ThreadStop),
-    RunInterrupt(RunInterrupt),
-    RuntimeRequestRespond(RuntimeRequestRespond),
-    ThreadModelSelectionSet(ThreadModelSelectionSet),
-    ThreadRuntimeModeSet(ThreadRuntimeModeSet),
+    ThreadCreate(ThreadCreateCommand),
+    MessageDispatch(MessageDispatchCommand),
+    ThreadStop(ThreadStopCommand),
+    RunInterrupt(RunInterruptCommand),
+    RuntimeRequestRespond(RuntimeRequestRespondCommand),
+    ThreadModelSelectionSet(ThreadModelSelectionSetCommand),
+    ThreadRuntimeModeSet(ThreadRuntimeModeSetCommand),
     QueueResume {
         command_id: CommandId,
         thread_id: ThreadId,
@@ -1043,7 +357,26 @@ pub enum Command {
         thread_id: ThreadId,
         run_id: RunId,
     },
-    /// A close on a thread that never had a share; it changes nothing but still records a receipt.
+    QueuedRunReorder {
+        command_id: CommandId,
+        thread_id: ThreadId,
+        run_id: RunId,
+        before_run_id: Option<RunId>,
+    },
+    QueuedRunCancel {
+        command_id: CommandId,
+        thread_id: ThreadId,
+        run_id: RunId,
+    },
+    QueuedRunEdit {
+        command_id: CommandId,
+        thread_id: ThreadId,
+        run_id: RunId,
+        text: String,
+        attachments: Option<Vec<Attachment>>,
+    },
+    /// A close on a thread that never had a share; it changes nothing but
+    /// still records a receipt.
     ThreadGuestShareClose {
         command_id: CommandId,
         thread_id: ThreadId,
@@ -1051,7 +384,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub fn command_id(&self) -> &str {
+    pub fn command_id(&self) -> &CommandId {
         match self {
             Self::ThreadCreate(command) => &command.command_id,
             Self::MessageDispatch(command) => &command.command_id,
@@ -1062,6 +395,9 @@ impl Command {
             Self::ThreadRuntimeModeSet(command) => &command.command_id,
             Self::QueueResume { command_id, .. }
             | Self::QueuedRunStart { command_id, .. }
+            | Self::QueuedRunReorder { command_id, .. }
+            | Self::QueuedRunCancel { command_id, .. }
+            | Self::QueuedRunEdit { command_id, .. }
             | Self::ThreadGuestShareClose { command_id, .. } => command_id,
         }
     }
@@ -1077,6 +413,9 @@ impl Command {
             Self::ThreadRuntimeModeSet(_) => "thread.runtime-mode.set",
             Self::QueueResume { .. } => "queue.resume",
             Self::QueuedRunStart { .. } => "queued-run.start",
+            Self::QueuedRunReorder { .. } => "queued-run.reorder",
+            Self::QueuedRunCancel { .. } => "queued-run.cancel",
+            Self::QueuedRunEdit { .. } => "queued-run.edit",
             Self::ThreadGuestShareClose { .. } => "thread.guest-share.close",
         }
     }
@@ -1092,6 +431,9 @@ impl Command {
             Self::ThreadRuntimeModeSet(command) => &command.thread_id,
             Self::QueueResume { thread_id, .. }
             | Self::QueuedRunStart { thread_id, .. }
+            | Self::QueuedRunReorder { thread_id, .. }
+            | Self::QueuedRunCancel { thread_id, .. }
+            | Self::QueuedRunEdit { thread_id, .. }
             | Self::ThreadGuestShareClose { thread_id, .. } => thread_id,
         }
     }
@@ -1100,8 +442,51 @@ impl Command {
     pub fn allows_empty_events(&self) -> bool {
         matches!(
             self,
-            Self::ThreadStop(_) | Self::ThreadGuestShareClose { .. } | Self::QueueResume { .. }
+            Self::ThreadStop(_)
+                | Self::ThreadGuestShareClose { .. }
+                | Self::QueueResume { .. }
+                | Self::QueuedRunReorder { .. }
         )
+    }
+}
+
+impl MessageDispatchCommand {
+    /// The common client send, with every optional field unset.
+    pub fn new(
+        command_id: impl Into<CommandId>,
+        thread_id: impl Into<ThreadId>,
+        message_id: impl Into<MessageId>,
+        text: impl Into<String>,
+    ) -> Self {
+        Self {
+            notification: None,
+            guest_message_id: None,
+            created_by: Actor::User,
+            creation_source: CreationSource::Web,
+            scheduled_task_id: None,
+            sender_thread_id: None,
+            linked_sender: None,
+            idle_compaction: None,
+            fresh_context: None,
+            command_id: command_id.into(),
+            thread_id: thread_id.into(),
+            message_id: message_id.into(),
+            text: text.into(),
+            context: None,
+            attachments: Vec::new(),
+            title_seed: None,
+            model_selection: None,
+            source_plan_ref: None,
+            restart_continuation_of_run_id: None,
+            usage_limit_continuation_of_run_id: None,
+            manual_continuation_of_run_id: None,
+            steer_follow_up_of_run_id: None,
+            steer_follow_up_after_run_ordinal: None,
+            usage_limit_recovery_request_id: None,
+            delivery_intent: None,
+            delegated_completion: None,
+            dispatch_mode: None,
+        }
     }
 }
 
@@ -1109,16 +494,18 @@ impl Command {
 // Effects (the outbox)
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all_fields = "camelCase")]
 pub enum EffectRequest {
-    ProviderTurnStart {
-        run_id: RunId,
-    },
+    #[serde(rename = "provider-turn.start")]
+    ProviderTurnStart { run_id: RunId },
+    #[serde(rename = "provider-turn.interrupt")]
     ProviderTurnInterrupt {
         provider_session_id: ProviderSessionId,
         provider_thread_id: ProviderThreadId,
         provider_turn_id: ProviderTurnId,
     },
+    #[serde(rename = "provider-turn.steer")]
     ProviderTurnSteer {
         provider_session_id: ProviderSessionId,
         provider_thread_id: ProviderThreadId,
@@ -1126,6 +513,7 @@ pub enum EffectRequest {
         message_id: MessageId,
         model_selection: Option<ModelSelection>,
     },
+    #[serde(rename = "provider-turn.restart")]
     ProviderTurnRestart {
         provider_session_id: ProviderSessionId,
         provider_thread_id: ProviderThreadId,
@@ -1133,22 +521,22 @@ pub enum EffectRequest {
         interrupted_attempt_id: RunAttemptId,
         run_id: RunId,
     },
+    #[serde(rename = "runtime-request.respond")]
     RuntimeRequestRespond {
         provider_session_id: ProviderSessionId,
         request_id: RuntimeRequestId,
         decision: Option<ApprovalDecision>,
     },
+    #[serde(rename = "provider-session.apply-model-selection")]
     ProviderSessionApplyModelSelection {
         provider_session_id: ProviderSessionId,
         provider_thread_id: ProviderThreadId,
         model_selection: ModelSelection,
     },
-    ThreadTitleGenerate {
-        message_id: MessageId,
-    },
-    DelegatedTasksStop {
-        reason: Option<String>,
-    },
+    #[serde(rename = "thread-title.generate")]
+    ThreadTitleGenerate { message_id: MessageId },
+    #[serde(rename = "delegated-tasks.stop")]
+    DelegatedTasksStop { reason: Option<String> },
 }
 
 impl EffectRequest {
@@ -1197,7 +585,7 @@ impl EffectRequest {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingEffect {
     pub id: String,
     pub command_id: CommandId,
@@ -1268,7 +656,7 @@ impl OrchestratorError {
         )
     }
 
-    pub fn command_id(&self) -> Option<&str> {
+    pub fn command_id(&self) -> Option<&CommandId> {
         match self {
             Self::ThreadAlreadyExists { command_id, .. }
             | Self::CommandIdConflict { command_id, .. }
@@ -1282,13 +670,41 @@ impl OrchestratorError {
 }
 
 pub fn model_selections_equal(left: &ModelSelection, right: &ModelSelection) -> bool {
-    left.instance_id == right.instance_id && left.model == right.model
+    if left.instance_id != right.instance_id || left.model != right.model {
+        return false;
+    }
+    let canonical = |selection: &ModelSelection| {
+        let mut options: Vec<(String, String)> = selection
+            .options
+            .as_ref()
+            .map(|options| {
+                options
+                    .0
+                    .iter()
+                    .map(|option| {
+                        let value = match &option.value {
+                            crate::contracts::ProviderOptionValue::String(value) => {
+                                format!("s:{value}")
+                            }
+                            crate::contracts::ProviderOptionValue::Boolean(value) => {
+                                format!("b:{value}")
+                            }
+                        };
+                        (option.id.clone(), value)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        options.sort();
+        options
+    };
+    canonical(left) == canonical(right)
 }
 
 pub fn next_queued_run(projection: &Projection) -> Option<Run> {
     crate::orchestration::queued_run_order::queued_runs_in_delivery_order(projection)
         .into_iter()
-        .find(|run| !run.queue_held)
+        .find(|run| !run.queue_held.unwrap_or(false))
 }
 
 /// A run that still owns the thread's provider turn.
@@ -1300,11 +716,11 @@ pub fn is_active_run(run: &Run) -> bool {
 pub fn follows_current_conversation(message: Option<&Message>) -> bool {
     message.is_some_and(|message| {
         message.delegated_completion.is_some()
-            || message.follows_thread_selection
+            || message.follows_thread_selection.unwrap_or(false)
             || message
                 .notification
                 .as_ref()
-                .is_some_and(|notification| notification.source_kind == "monitor")
+                .is_some_and(notification_is_monitor)
     })
 }
 

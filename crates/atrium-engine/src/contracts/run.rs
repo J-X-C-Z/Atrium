@@ -33,6 +33,28 @@ pub enum RunStatus {
     RolledBack,
 }
 
+impl RunStatus {
+    /// A run that still owns the thread's provider turn.
+    pub const fn is_active(self) -> bool {
+        matches!(
+            self,
+            Self::Preparing | Self::Starting | Self::Running | Self::Waiting
+        )
+    }
+
+    /// A run whose agent is live; waiting runs only drain post-terminal output.
+    pub const fn is_live(self) -> bool {
+        matches!(self, Self::Preparing | Self::Starting | Self::Running)
+    }
+
+    pub const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Interrupted | Self::Failed | Self::Cancelled | Self::RolledBack
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RestartCancelledBackgroundWorkKind {
@@ -185,6 +207,41 @@ pub struct Run {
     pub fresh_context: Option<bool>,
 }
 
+impl Default for Run {
+    fn default() -> Self {
+        Self {
+            id: RunId::new(""),
+            thread_id: ThreadId::new(""),
+            ordinal: 0,
+            provider_instance_id: ProviderInstanceId::new(""),
+            model_selection: ModelSelection::new("", ""),
+            provider_thread_id: None,
+            user_message_id: MessageId::new(""),
+            root_node_id: None,
+            active_attempt_id: None,
+            status: RunStatus::Preparing,
+            queue_position: None,
+            queue_held: None,
+            steer_when_ready_run_id: None,
+            requested_at: String::new(),
+            started_at: None,
+            completed_at: None,
+            checkpoint_id: None,
+            context_handoff_id: None,
+            restart_continuation_of_run_id: None,
+            manual_continuation_of_run_id: None,
+            usage_limit_continuation_of_run_id: None,
+            delegated_task_id: None,
+            work_started_at: None,
+            restart_cancelled_background_work: None,
+            source_plan_ref: None,
+            delegated_completion: None,
+            workspace_preparation: None,
+            fresh_context: None,
+        }
+    }
+}
+
 /// The timestamp work actually started, falling back to the request time.
 pub fn run_work_started_at(run: &Run) -> &str {
     run.work_started_at
@@ -233,6 +290,25 @@ pub struct RunAttempt {
     pub status: RunAttemptStatus,
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
+}
+
+impl Default for RunAttempt {
+    fn default() -> Self {
+        Self {
+            id: RunAttemptId::new(""),
+            native_thread_id: None,
+            run_id: RunId::new(""),
+            attempt_ordinal: 0,
+            root_node_id: NodeId::new(""),
+            provider_instance_id: ProviderInstanceId::new(""),
+            provider_thread_id: ProviderThreadId::new(""),
+            provider_turn_id: None,
+            reason: RunAttemptReason::Initial,
+            status: RunAttemptStatus::Pending,
+            started_at: None,
+            completed_at: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -284,6 +360,28 @@ pub struct ExecutionNode {
     pub checkpoint_scope_id: Option<CheckpointScopeId>,
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
+}
+
+impl Default for ExecutionNode {
+    fn default() -> Self {
+        Self {
+            id: NodeId::new(""),
+            thread_id: ThreadId::new(""),
+            run_id: None,
+            parent_node_id: None,
+            root_node_id: NodeId::new(""),
+            kind: ExecutionNodeKind::RootTurn,
+            status: ExecutionNodeStatus::Pending,
+            counts_for_run: true,
+            provider_thread_id: None,
+            provider_turn_id: None,
+            native_item_ref: None,
+            runtime_request_id: None,
+            checkpoint_scope_id: None,
+            started_at: None,
+            completed_at: None,
+        }
+    }
 }
 
 /// `pending`, `running` and `waiting` are work in progress.

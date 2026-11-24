@@ -74,28 +74,31 @@ pub fn queued_runs_in_delivery_order(projection: &Projection) -> Vec<Run> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::orchestration::types::{DelegatedCompletion, Message, MessageRole, ModelSelection};
+    use crate::orchestration::types::{
+        DelegatedCompletion, Message, MessageRole, ModelSelection, RunAttemptId,
+    };
+    use crate::orchestration::types::{NodeId, iso};
 
-    fn at(minute: i64) -> i64 {
+    fn at(minute: i64) -> String {
         // 2026-01-01T10:00:00Z plus `minute` minutes.
-        1_767_261_600_000 + minute * 60_000
+        iso(1_767_261_600_000 + minute * 60_000)
     }
 
-    fn run(id: &str, ordinal: u32, queue_position: u32, requested_at: i64) -> Run {
+    fn run(id: &str, ordinal: u32, queue_position: u32, requested_at: String) -> Run {
         let message_id = id.replacen("run:", "message:", 1);
         Run {
-            id: id.to_owned(),
+            id: id.into(),
             thread_id: "thread:queue".into(),
             ordinal,
             provider_instance_id: "codex".into(),
             model_selection: ModelSelection::new("codex", "test"),
             provider_thread_id: Some("provider-thread:queue".into()),
-            user_message_id: message_id,
-            root_node_id: Some(format!("node:{id}")),
-            active_attempt_id: Some(format!("attempt:{id}")),
+            user_message_id: message_id.into(),
+            root_node_id: Some(NodeId::new(format!("node:{id}"))),
+            active_attempt_id: Some(RunAttemptId::new(format!("attempt:{id}"))),
             status: RunStatus::Queued,
             queue_position: Some(queue_position),
-            queue_held: false,
+            queue_held: Some(false),
             steer_when_ready_run_id: None,
             requested_at,
             started_at: None,
@@ -103,13 +106,14 @@ mod tests {
             restart_continuation_of_run_id: None,
             manual_continuation_of_run_id: None,
             usage_limit_continuation_of_run_id: None,
-            fresh_context: false,
+            fresh_context: Some(false),
+            ..Run::default()
         }
     }
 
     fn message(id: &str, delegated_completion: bool) -> Message {
         Message {
-            id: id.to_owned(),
+            id: id.into(),
             thread_id: "thread:queue".into(),
             role: MessageRole::User,
             delegated_completion: delegated_completion.then(|| DelegatedCompletion {

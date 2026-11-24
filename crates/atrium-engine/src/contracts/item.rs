@@ -22,11 +22,13 @@ use super::provider::{
     AuthMcpClientAccess, ProviderApprovalFullAccessOverride, ProviderApprovalOption, ProviderRef,
     ProviderRequestKind, UserInputAttachmentAnswerPayload,
 };
+use super::run::DelegatedCompletionTaskDelivery;
 use super::thread::{CreationSource, ForkSource, LinkedSender};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TurnItemStatus {
+    #[default]
     Idle,
     Pending,
     Running,
@@ -499,7 +501,7 @@ pub struct DeferredWork {
 }
 
 /// The fields every turn item shares.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnItemBase {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -913,6 +915,107 @@ pub enum SubagentOrigin {
     AppOwned,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SubagentStatus {
+    Idle,
+    Pending,
+    #[default]
+    Running,
+    Waiting,
+    Completed,
+    Failed,
+    Cancelled,
+    Interrupted,
+}
+
+impl SubagentStatus {
+    pub const fn is_active(self) -> bool {
+        matches!(self, Self::Pending | Self::Running | Self::Waiting)
+    }
+}
+
+/// T3's `OrchestrationV2Subagent` projection record.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Subagent {
+    pub id: NodeId,
+    pub thread_id: ThreadId,
+    pub run_id: Option<RunId>,
+    pub parent_node_id: NodeId,
+    pub origin: SubagentOrigin,
+    pub created_by: Actor,
+    pub driver: ProviderDriverKind,
+    pub provider_instance_id: ProviderInstanceId,
+    pub provider_thread_id: Option<ProviderThreadId>,
+    pub child_thread_id: Option<ThreadId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_child: Option<RemoteTaskChild>,
+    pub native_task_ref: Option<ProviderRef>,
+    pub prompt: String,
+    pub title: Option<String>,
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_selection: Option<ModelSelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executed_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_wake: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_delivery: Option<DelegatedCompletionTaskDelivery>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancelled_run_id: Option<RunId>,
+    pub status: SubagentStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<serde_json::Value>,
+    pub result: Option<String>,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_omitted: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_omitted: Option<bool>,
+}
+
+impl Default for Subagent {
+    fn default() -> Self {
+        Self {
+            id: NodeId::default(),
+            thread_id: ThreadId::default(),
+            run_id: None,
+            parent_node_id: NodeId::default(),
+            origin: SubagentOrigin::AppOwned,
+            created_by: Actor::Agent,
+            driver: ProviderDriverKind::default(),
+            provider_instance_id: ProviderInstanceId::default(),
+            provider_thread_id: None,
+            child_thread_id: None,
+            remote_child: None,
+            native_task_ref: None,
+            prompt: String::new(),
+            title: None,
+            model: None,
+            model_selection: None,
+            executed_model: None,
+            completion_wake: None,
+            completion_delivery: None,
+            cancelled_run_id: None,
+            status: SubagentStatus::Idle,
+            progress: None,
+            workflow: None,
+            result: None,
+            started_at: None,
+            completed_at: None,
+            updated_at: String::new(),
+            prompt_omitted: None,
+            result_omitted: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubagentTurnItem {
@@ -1048,6 +1151,37 @@ impl TurnItem {
 
     pub fn id(&self) -> Option<&TurnItemId> {
         self.base().map(|base| &base.id)
+    }
+
+    pub fn base_mut(&mut self) -> Option<&mut TurnItemBase> {
+        Some(match self {
+            Self::Notification(item) => &mut item.base,
+            Self::UserMessage(item) => &mut item.base,
+            Self::AssistantMessage(item) => &mut item.base,
+            Self::Reasoning(item) => &mut item.base,
+            Self::ProposedPlan(item) => &mut item.base,
+            Self::TodoList(item) => &mut item.base,
+            Self::UserInputRequest(item) => &mut item.base,
+            Self::FileChange(item) => &mut item.base,
+            Self::CommandExecution(item) => &mut item.base,
+            Self::FileSearch(item) => &mut item.base,
+            Self::WebSearch(item) => &mut item.base,
+            Self::ApprovalRequest(item) => &mut item.base,
+            Self::Checkpoint(item) => &mut item.base,
+            Self::RunInterruptRequest(item) => &mut item.base,
+            Self::RunInterruptResult(item) => &mut item.base,
+            Self::SystemNotice(item) => &mut item.base,
+            Self::Error(item) => &mut item.base,
+            Self::Compaction(item) => &mut item.base,
+            Self::Handoff(item) => &mut item.base,
+            Self::Fork(item) => &mut item.base,
+            Self::ThreadCreated(item) => &mut item.base,
+            Self::SecretRequest(item) => &mut item.base,
+            Self::LinkRequest(item) => &mut item.base,
+            Self::Subagent(item) => &mut item.base,
+            Self::DynamicTool(item) => &mut item.base,
+            Self::Unknown(_) => return None,
+        })
     }
 
     pub fn type_name(&self) -> &str {

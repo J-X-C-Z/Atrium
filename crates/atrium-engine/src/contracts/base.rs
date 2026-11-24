@@ -151,6 +151,12 @@ macro_rules! entity_id {
             }
         }
 
+        impl Default for $name {
+            fn default() -> Self {
+                Self(String::new())
+            }
+        }
+
         impl std::fmt::Display for $name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 f.write_str(&self.0)
@@ -160,6 +166,26 @@ macro_rules! entity_id {
         impl AsRef<str> for $name {
             fn as_ref(&self) -> &str {
                 &self.0
+            }
+        }
+
+        // The orchestration core keeps ids opaque but still compares them
+        // against the string keys it reads from the store.
+        impl PartialEq<str> for $name {
+            fn eq(&self, other: &str) -> bool {
+                self.0 == other
+            }
+        }
+
+        impl PartialEq<&str> for $name {
+            fn eq(&self, other: &&str) -> bool {
+                self.0 == *other
+            }
+        }
+
+        impl PartialEq<String> for $name {
+            fn eq(&self, other: &String) -> bool {
+                &self.0 == other
             }
         }
 

@@ -24,7 +24,7 @@ use super::types::{CommandId, DomainEvent, PendingEffect, Projection, ThreadId, 
 /// One appended event's id.
 pub use super::types::EventId;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct StoredEvent {
     pub sequence: i64,
     pub command_id: Option<CommandId>,
@@ -54,7 +54,7 @@ pub struct CancelUnsettled {
     pub reason: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct WriteInput {
     pub command_id: Option<CommandId>,
     pub events: Vec<DomainEvent>,
@@ -62,7 +62,7 @@ pub struct WriteInput {
     pub now: Timestamp,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CommitCommandInput {
     pub command_id: CommandId,
     pub thread_id: ThreadId,
@@ -73,7 +73,7 @@ pub struct CommitCommandInput {
     pub cancel_unsettled: Option<CancelUnsettled>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CommitCommandOutput {
     pub receipt: CommandReceipt,
     pub stored_events: Vec<StoredEvent>,
@@ -104,15 +104,15 @@ pub trait Store {
     type Error: std::error::Error + Send + Sync + 'static;
 
     /// A consistent snapshot of one thread's projection.
-    fn projection(&self, thread_id: &str) -> Option<Projection>;
+    fn projection(&self, thread_id: &ThreadId) -> Option<Projection>;
 
     /// The latest committed sequence, globally or for one thread.
-    fn latest_sequence(&self, thread_id: Option<&str>) -> i64;
+    fn latest_sequence(&self, thread_id: Option<&ThreadId>) -> i64;
 
     /// Events recorded under a command id, in sequence order.
-    fn read_by_command_id(&self, command_id: &str) -> Vec<StoredEvent>;
+    fn read_by_command_id(&self, command_id: &CommandId) -> Vec<StoredEvent>;
 
-    fn command_receipt(&self, command_id: &str) -> Option<CommandReceipt>;
+    fn command_receipt(&self, command_id: &CommandId) -> Option<CommandReceipt>;
 
     /// Append non-command events (provider output, control writes) atomically.
     fn write(&mut self, input: WriteInput) -> Result<Vec<StoredEvent>, Self::Error>;
@@ -145,7 +145,7 @@ impl MemoryStore {
     }
 
     pub fn projection_snapshot(&self, thread_id: &str) -> Option<&Projection> {
-        self.projections.get(thread_id)
+        self.projections.get(&ThreadId::new(thread_id))
     }
 
     pub fn events(&self) -> &[StoredEvent] {
@@ -161,7 +161,7 @@ impl MemoryStore {
     }
 
     pub fn receipt(&self, command_id: &str) -> Option<&CommandReceipt> {
-        self.receipts.get(command_id)
+        self.receipts.get(&CommandId::new(command_id))
     }
 
     fn append_events(
@@ -172,7 +172,7 @@ impl MemoryStore {
         let mut stored = Vec::with_capacity(events.len());
         for event in events {
             self.next_sequence += 1;
-            let projected_thread_ids = event.kind.projected_thread_ids(&event.thread_id);
+            let projected_thread_ids = event.projected_thread_ids();
             for thread_id in projected_thread_ids {
                 let projection = self.projections.entry(thread_id).or_default();
                 projection.apply(&event);
@@ -191,29 +191,29 @@ impl MemoryStore {
 impl Store for MemoryStore {
     type Error = StoreError;
 
-    fn projection(&self, thread_id: &str) -> Option<Projection> {
+    fn projection(&self, thread_id: &ThreadId) -> Option<Projection> {
         self.projections.get(thread_id).cloned()
     }
 
-    fn latest_sequence(&self, thread_id: Option<&str>) -> i64 {
+    fn latest_sequence(&self, thread_id: Option<&ThreadId>) -> i64 {
         thread_id.map_or(self.next_sequence, |thread_id| {
             self.events
                 .iter()
                 .rev()
-                .find(|stored| stored.event.thread_id == thread_id)
+                .find(|stored| stored.event.thread_id() == Some(thread_id))
                 .map_or(0, |stored| stored.sequence)
         })
     }
 
-    fn read_by_command_id(&self, command_id: &str) -> Vec<StoredEvent> {
+    fn read_by_command_id(&self, command_id: &CommandId) -> Vec<StoredEvent> {
         self.events
             .iter()
-            .filter(|stored| stored.command_id.as_deref() == Some(command_id))
+            .filter(|stored| stored.command_id.as_ref() == Some(command_id))
             .cloned()
             .collect()
     }
 
-    fn command_receipt(&self, command_id: &str) -> Option<CommandReceipt> {
+    fn command_receipt(&self, command_id: &CommandId) -> Option<CommandReceipt> {
         self.receipts.get(command_id).cloned()
     }
 
@@ -297,7 +297,7 @@ pub fn effects_for_command(outbox: &OutboxQueue, command_id: &str) -> Vec<Pendin
     outbox
         .effects()
         .iter()
-        .filter(|effect| effect.command_id == command_id)
+        .filter(|effect| effect.command_id.as_str() == command_id)
         .map(|effect| PendingEffect {
             id: effect.id.clone(),
             command_id: effect.command_id.clone(),
@@ -321,23 +321,31 @@ pub fn event_matches(
     thread_id: Option<&str>,
     event_type: Option<&str>,
 ) -> bool {
-    thread_id.is_none_or(|thread_id| event.thread_id == thread_id)
-        && event_type.is_none_or(|event_type| event.kind.type_name() == event_type)
+    thread_id.is_none_or(|thread_id| event.thread_id().is_some_and(|id| id.as_str() == thread_id))
+        && event_type.is_none_or(|event_type| event.type_name() == event_type)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::orchestration::types::{
-        Actor, CreationSource, EventKind, InteractionMode, ModelSelection, RuntimeMode, Thread,
+        Actor, CreationSource, DomainEventBase, EventPayload, InteractionMode, ModelSelection,
+        RuntimeMode, Thread,
     };
 
     fn created(thread_id: &str) -> DomainEvent {
-        DomainEvent::new(
-            format!("event:created:{thread_id}"),
-            thread_id,
-            1,
-            EventKind::ThreadCreated(Thread {
+        DomainEvent::ThreadCreated(EventPayload {
+            base: DomainEventBase {
+                id: EventId::new(format!("event:created:{thread_id}")),
+                thread_id: ThreadId::new(thread_id),
+                run_id: None,
+                node_id: None,
+                driver: None,
+                provider_instance_id: None,
+                raw_event_id: None,
+                occurred_at: "1970-01-01T00:00:00.001Z".into(),
+            },
+            payload: Thread {
                 id: thread_id.into(),
                 project_id: "project:store".into(),
                 title: thread_id.into(),
@@ -347,11 +355,11 @@ mod tests {
                 interaction_mode: InteractionMode::Default,
                 created_by: Actor::User,
                 creation_source: CreationSource::Web,
-                created_at: 1,
-                updated_at: 1,
+                created_at: "1970-01-01T00:00:00.001Z".into(),
+                updated_at: "1970-01-01T00:00:00.001Z".into(),
                 ..Thread::default()
-            }),
-        )
+            },
+        })
     }
 
     #[test]

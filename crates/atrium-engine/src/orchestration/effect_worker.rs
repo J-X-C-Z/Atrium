@@ -17,7 +17,7 @@
 
 use std::collections::BTreeSet;
 
-use super::types::{EffectRequest, PendingEffect, ThreadId, Timestamp};
+use super::types::{CommandId, EffectRequest, PendingEffect, ThreadId, Timestamp};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EffectStatus {
@@ -31,7 +31,7 @@ pub enum EffectStatus {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueuedEffect {
     pub id: String,
-    pub command_id: String,
+    pub command_id: CommandId,
     pub thread_id: ThreadId,
     pub request: EffectRequest,
     pub status: EffectStatus,
@@ -324,7 +324,7 @@ impl OutboxQueue {
     /// Cancel every unsettled effect of the named types on one thread.
     pub fn cancel_unsettled(
         &mut self,
-        thread_id: &str,
+        thread_id: impl AsRef<str>,
         effect_types: &[&str],
         reason: &str,
         now: Timestamp,
@@ -335,7 +335,7 @@ impl OutboxQueue {
         self.effects
             .iter_mut()
             .filter(|effect| {
-                effect.thread_id == thread_id
+                effect.thread_id.as_str() == thread_id.as_ref()
                     && matches!(effect.status, EffectStatus::Pending | EffectStatus::Running)
                     && effect_types.contains(&effect.type_name())
             })
@@ -726,5 +726,100 @@ mod tests {
             EffectRequest::ProviderTurnSteer { ref model_selection, .. }
                 if model_selection.as_ref() == Some(&selection)
         ));
+    }
+
+    /// T3 `RunFinalizationQueue.test.ts`: a failed earlier effect keeps the
+    /// next turn's start pending until it succeeds.
+    #[test]
+    fn a_failed_earlier_effect_keeps_the_next_turn_start_pending() {
+        let mut outbox = OutboxQueue::new();
+        outbox.enqueue(
+            [
+                effect(
+                    "finalization:capture",
+                    "thread:a",
+                    EffectRequest::ProviderTurnStart {
+                        run_id: "run:capture".into(),
+                    },
+                    None,
+                ),
+                effect(
+                    "finalization:start",
+                    "thread:a",
+                    EffectRequest::ProviderTurnStart {
+                        run_id: "run:next".into(),
+                    },
+                    None,
+                ),
+            ],
+            1_000,
+        );
+        let attempted = outbox.run_once("worker", 1_000, 3, None, |effect| {
+            if effect.id == "finalization:capture" {
+                Err(EffectExecutionError::new("checkpoint storage unavailable"))
+            } else {
+                Ok(())
+            }
+        });
+        assert!(attempted);
+        let capture = outbox.get("finalization:capture").expect("capture");
+        assert_eq!(capture.status, EffectStatus::Pending);
+        assert_eq!(capture.attempt_count, 1);
+        assert!(
+            capture
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("checkpoint storage unavailable"))
+        );
+        assert_eq!(
+            outbox.get("finalization:start").unwrap().status,
+            EffectStatus::Pending
+        );
+        // The retry's backoff keeps the later turn start from being claimed.
+        assert!(outbox.claim_next("worker", 1_000, false, None).is_none());
+
+        let retry_at = outbox.get("finalization:capture").unwrap().available_at;
+        assert!(outbox.run_once("worker", retry_at, 3, None, |_| Ok(())));
+        assert_eq!(
+            outbox.get("finalization:capture").unwrap().status,
+            EffectStatus::Succeeded
+        );
+        assert!(outbox.run_once("worker", retry_at, 3, None, |_| Ok(())));
+        assert_eq!(
+            outbox.get("finalization:start").unwrap().status,
+            EffectStatus::Succeeded
+        );
+    }
+
+    #[test]
+    fn a_successful_capture_releases_the_next_turn_start() {
+        let mut outbox = OutboxQueue::new();
+        outbox.enqueue(
+            [
+                effect(
+                    "finalization:capture",
+                    "thread:a",
+                    EffectRequest::ProviderTurnStart {
+                        run_id: "run:capture".into(),
+                    },
+                    None,
+                ),
+                effect(
+                    "finalization:start",
+                    "thread:a",
+                    EffectRequest::ProviderTurnStart {
+                        run_id: "run:next".into(),
+                    },
+                    None,
+                ),
+            ],
+            1_000,
+        );
+        let drained = outbox.drain("worker", 1_000, 3, 2, |_| Ok(()));
+        assert_eq!(drained, 2);
+        assert_eq!(
+            outbox.get("finalization:start").unwrap().status,
+            EffectStatus::Succeeded
+        );
     }
 }

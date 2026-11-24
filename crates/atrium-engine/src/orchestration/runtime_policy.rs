@@ -185,17 +185,17 @@ impl RuntimePolicy {
         Self {
             resolve: Box::new(move |thread, selection| {
                 refuse_above_ceiling(managed_policy.as_ref(), thread)?;
-                let supported = instances(&selection.instance_id);
+                let supported = instances(selection.instance_id.as_str());
                 let runtime_mode = provider_runtime_mode(thread.runtime_mode, supported.as_deref());
                 let cwd = match &thread.worktree_path {
                     Some(path) => path.clone(),
-                    None => {
-                        projects(&thread.project_id).ok_or_else(|| RuntimePolicyError::Resolve {
-                            project_id: thread.project_id.clone(),
-                            provider_instance_id: selection.instance_id.clone(),
+                    None => projects(thread.project_id.as_str()).ok_or_else(|| {
+                        RuntimePolicyError::Resolve {
+                            project_id: thread.project_id.to_string(),
+                            provider_instance_id: selection.instance_id.to_string(),
                             cause: "Project not found.".into(),
-                        })?
-                    }
+                        }
+                    })?,
                 };
                 Ok(ResolvedRuntimePolicy {
                     runtime_mode,
@@ -265,7 +265,7 @@ fn refuse_above_ceiling(
     };
     if thread.runtime_mode.is_above(Some(max_runtime_mode)) {
         return Err(RuntimePolicyError::AboveCeiling {
-            thread_id: thread.id.clone(),
+            thread_id: thread.id.to_string(),
             runtime_mode: thread.runtime_mode,
             max_runtime_mode,
             organization: managed_policy.organization.clone(),
@@ -287,7 +287,7 @@ pub struct TurnRuntimePolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::orchestration::types::{Actor, CreationSource};
+    use crate::orchestration::types::{Actor, CreationSource, iso};
 
     fn make_thread(runtime_mode: RuntimeMode, worktree_path: Option<&str>) -> Thread {
         Thread {
@@ -302,8 +302,8 @@ mod tests {
             worktree_path: worktree_path.map(str::to_owned),
             created_by: Actor::User,
             creation_source: CreationSource::Web,
-            created_at: 1,
-            updated_at: 1,
+            created_at: iso(1),
+            updated_at: iso(1),
             ..Thread::default()
         }
     }
