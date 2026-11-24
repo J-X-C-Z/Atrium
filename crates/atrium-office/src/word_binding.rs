@@ -159,10 +159,10 @@ fn load_footnotes(
 }
 
 fn collect_note_references(node: &XmlNode, ns: &str, out: &mut Vec<(NodeId, String)>) {
-    if node.is(ns, "footnoteReference") || node.is(ns, "endnoteReference") {
-        if let Some(id) = node.attr(Some(ns), "id") {
-            out.push((node.range.start as NodeId, id.to_owned()));
-        }
+    if (node.is(ns, "footnoteReference") || node.is(ns, "endnoteReference"))
+        && let Some(id) = node.attr(Some(ns), "id")
+    {
+        out.push((node.range.start as NodeId, id.to_owned()));
     }
     for child in &node.children {
         collect_note_references(child, ns, out);
