@@ -124,6 +124,117 @@ def find_t3(explicit: str | None) -> Path:
     )
 
 
+MOCK_WRAPPER = r'''#!/usr/bin/env python3
+"""Forward to the real mock-codex, logging every request line.
+
+T3 probes `<bin> --version` before it starts app-server; that path is passed
+through untouched so the probe sees the real binary's output.
+"""
+import os
+import subprocess
+import sys
+import threading
+
+real = os.environ["MOCK_REAL"]
+log = os.environ.get("MOCK_LOG")
+args = sys.argv[1:]
+if "--version" in args:
+    os.execv(real, [real] + args)
+
+child = subprocess.Popen(
+    [real] + args,
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    bufsize=0,
+)
+lock = threading.Lock()
+
+
+def log_line(line: bytes) -> None:
+    if not log:
+        return
+    with lock:
+        with open(log, "ab") as sink:
+            sink.write(line)
+
+
+def pump_input() -> None:
+    for line in sys.stdin.buffer:
+        log_line(line)
+        child.stdin.write(line)
+        child.stdin.flush()
+    try:
+        child.stdin.close()
+    except OSError:
+        pass
+
+
+def pump_output() -> None:
+    for line in child.stdout:
+        sys.stdout.buffer.write(line)
+        sys.stdout.buffer.flush()
+
+
+threading.Thread(target=pump_input, daemon=True).start()
+threading.Thread(target=pump_output, daemon=True).start()
+sys.exit(child.wait())
+'''
+
+
+def make_mock_wrapper(outdir: Path) -> Path:
+    wrapper = outdir / "mock-wrap.py"
+    wrapper.write_text(MOCK_WRAPPER, encoding="utf-8")
+    wrapper.chmod(0o755)
+    return wrapper
+
+
+def provider_methods(log_path: Path) -> list[str]:
+    """The JSON-RPC request method names the provider received, in order."""
+    methods: list[str] = []
+    try:
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return methods
+    for line in lines:
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        method = message.get("method")
+        if isinstance(method, str) and message.get("id") is not None:
+            methods.append(method)
+    return methods
+
+
+def subset_match(expected: dict, actual: dict) -> bool:
+    for key, value in expected.items():
+        if key not in actual:
+            return False
+        candidate = actual[key]
+        if isinstance(value, str) and isinstance(candidate, str):
+            if value not in candidate:
+                return False
+        elif value != candidate:
+            return False
+    return True
+
+
+def stream_contains(stream_text: str, wanted: list[dict]) -> list[str]:
+    lines: list[dict] = []
+    for line in stream_text.splitlines():
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            lines.append(value)
+    problems: list[str] = []
+    for expected in wanted:
+        if not any(subset_match(expected, actual) for actual in lines):
+            problems.append(f"stream lacks {json.dumps(expected, ensure_ascii=False)}")
+    return problems
+
+
 # --------------------------------------------------------------------------
 # scenarios
 
@@ -258,11 +369,15 @@ def run_engine(
     outdir: Path,
     args: argparse.Namespace,
     mock: Path,
+    wrapper: Path,
+    mock_log: Path,
 ) -> str:
     engine = find_tool("atrium-engine-driver", args.engine_bin, "ENGINE_BIN")
     scratch = outdir / "scratch-engine"
     env = os.environ.copy()
-    env["MOCK_CODEX_BIN"] = str(mock)
+    env["MOCK_CODEX_BIN"] = str(wrapper)
+    env["MOCK_REAL"] = str(mock)
+    env["MOCK_LOG"] = str(mock_log)
     env.setdefault("NO_PROXY", "*")
     command = [
         str(engine),
@@ -441,6 +556,8 @@ def run_t3(
     outdir: Path,
     args: argparse.Namespace,
     mock: Path,
+    wrapper: Path,
+    mock_log: Path,
 ) -> tuple[list[dict], dict | None]:
     t3 = find_t3(args.t3_bin)
     texts = turn_texts(scenario)
@@ -469,7 +586,7 @@ def run_t3(
                 "driver": "codex",
                 "displayName": "Mock Codex",
                 "config": {
-                    "binaryPath": str(mock),
+                    "binaryPath": str(wrapper),
                     "homePath": str(codex_home),
                 },
             }
@@ -482,6 +599,8 @@ def run_t3(
     env = os.environ.copy()
     env["T3CODE_HOME"] = str(t3_home)
     env["HOME"] = str(t3_home)
+    env["MOCK_REAL"] = str(mock)
+    env["MOCK_LOG"] = str(mock_log)
     env.setdefault("NO_PROXY", "*")
 
     logs: list[str] = []
@@ -662,6 +781,27 @@ def compare_and_report(
     return not problems, problems
 
 
+def check_expectations(
+    scenario: dict,
+    engine_text: str,
+    *,
+    require_final_status: bool,
+) -> list[str]:
+    problems: list[str] = []
+    expect = scenario.get("expect") or {}
+    expected = (expect.get("final_status") or "").strip()
+    actual = final_status(engine_text)
+    if require_final_status and expected:
+        if actual and normalize_status(expected) != actual:
+            problems.append(f"expected final status {expected}, got {actual}")
+        elif actual is None:
+            problems.append(f"expected final status {expected}, but the stream has none")
+    wanted = expect.get("stream_contains") or []
+    if wanted:
+        problems.extend(stream_contains(engine_text, wanted))
+    return problems
+
+
 def run_scenario(path: Path, args: argparse.Namespace) -> bool:
     scenario = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(scenario, dict):
@@ -675,41 +815,69 @@ def run_scenario(path: Path, args: argparse.Namespace) -> bool:
     )
 
     mock = find_tool("mock-codex", args.mock_codex_bin, "MOCK_CODEX_BIN")
-    engine_text = run_engine(scenario, path, outdir, args, mock)
+    wrapper = make_mock_wrapper(outdir)
+    engine_log = outdir / "engine-mock.log"
+    t3_log = outdir / "t3-mock.log"
+    engine_text = run_engine(scenario, path, outdir, args, mock, wrapper, engine_log)
+    engine_methods = provider_methods(engine_log)
+    (outdir / "engine-methods.json").write_text(
+        json.dumps(engine_methods, indent=2) + "\n", encoding="utf-8"
+    )
 
-    if args.no_t3:
-        expected = ((scenario.get("expect") or {}).get("final_status") or "").strip()
-        actual = final_status(engine_text)
-        (outdir / "diff.txt").write_text(
-            "SKIPPED (--no-t3): no T3 side and no diff\n", encoding="utf-8"
+    skip_reason = scenario.get("t3")
+    if args.no_t3 or (isinstance(skip_reason, str) and skip_reason.startswith("skip:")):
+        reason = (
+            "(--no-t3)"
+            if args.no_t3
+            else skip_reason.removeprefix("skip:").strip()
         )
-        problems = []
-        if expected and actual and normalize_status(expected) != actual:
-            problems.append(f"expected final status {expected}, got {actual}")
-        elif expected and actual is None:
-            problems.append(f"expected final status {expected}, but the stream has none")
+        (outdir / "diff.txt").write_text(
+            f"SKIPPED {reason}: no T3 side and no diff\n", encoding="utf-8"
+        )
+        problems = check_expectations(scenario, engine_text, require_final_status=True)
+        wanted_methods = (scenario.get("expect") or {}).get("provider_methods") or []
+        for method in wanted_methods:
+            if method not in engine_methods:
+                problems.append(f"engine never called provider method {method}")
         for problem in problems:
             print(f"  {problem}")
         print(
             f"  engine-only: {len(engine_text.splitlines())} lines, "
-            f"final status {actual or 'unknown'}"
+            f"final status {final_status(engine_text) or 'unknown'}"
         )
         return not problems
 
-    results, show = run_t3(scenario, path, outdir, args, mock)
+    results, show = run_t3(scenario, path, outdir, args, mock, wrapper, t3_log)
+    t3_methods = provider_methods(t3_log)
+    (outdir / "t3-methods.json").write_text(
+        json.dumps(t3_methods, indent=2) + "\n", encoding="utf-8"
+    )
     t3_lines = t3_stream(results, show)
     t3_text = render(t3_lines)
     (outdir / "t3.jsonl").write_text(t3_text, encoding="utf-8")
     write_engine_stream(outdir, engine_text)
     ok, problems = compare_and_report(scenario, outdir, t3_text, engine_text)
-    if ok:
-        print(f"  MATCH ({len(t3_text.splitlines())} lines)")
+    wanted_methods = (scenario.get("expect") or {}).get("provider_methods") or []
+    for method in wanted_methods:
+        if method not in t3_methods:
+            problems.append(f"T3 never called provider method {method}")
+        if method not in engine_methods:
+            problems.append(f"engine never called provider method {method}")
+    if problems:
+        (outdir / "diff.txt").write_text(
+            "\n".join(problems) + "\n", encoding="utf-8"
+        )
+    if ok and not problems:
+        print(
+            f"  MATCH ({len(t3_text.splitlines())} lines, "
+            f"{len(engine_methods)} provider methods)"
+        )
     else:
         print("  MISMATCH")
         for problem in problems:
             print(f"  {problem}")
         print(f"  see {outdir / 'diff.txt'}")
-    return ok
+    return ok and not problems
 
 
 def main() -> int:

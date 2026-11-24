@@ -476,10 +476,7 @@ impl Workspace {
         };
         let named = self.codex_for(&backend);
         cx.spawn(async move |this, cx| {
-            let started = cx
-                .background_executor()
-                .spawn(async move { crate::runtime_adapters::start_session(&*runtime, spec, sink) })
-                .await;
+            let started = crate::runtime_adapters::start_session_async(runtime, spec, sink).await;
             let thread = match started {
                 Ok(thread) => thread,
                 Err(error) => {
@@ -535,17 +532,13 @@ impl Workspace {
                 }
             });
             let call_thread = thread.clone();
-            let sent = cx
-                .background_executor()
-                .spawn(async move {
-                    crate::runtime_adapters::send_turn(
-                        &*send_runtime,
-                        &call_thread,
-                        TurnInput::text(text),
-                        Delivery::Start,
-                    )
-                })
-                .await;
+            let sent = crate::runtime_adapters::send_turn_async(
+                send_runtime,
+                call_thread,
+                TurnInput::text(text),
+                Delivery::Start,
+            )
+            .await;
             match sent {
                 Ok(turn) => {
                     let _ = this.update(cx, |_, _| {
@@ -906,7 +899,7 @@ impl Workspace {
             let id = thread.to_string();
             cx.background_executor()
                 .spawn(async move {
-                    let _ = crate::runtime_adapters::interrupt_turn(&*runtime, &id);
+                    let _ = crate::runtime_adapters::interrupt_turn_async(runtime, id).await;
                 })
                 .detach();
             return;

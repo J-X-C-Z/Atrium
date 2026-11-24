@@ -163,6 +163,141 @@ pub enum AgentEvent {
 }
 
 impl AgentEvent {
+    /// The same event, attributed to `thread_id`.
+    ///
+    /// A runtime that owns sessions itself gives each session its own id but
+    /// receives the provider's native thread id on every event. Retargeting
+    /// keeps the app's bookkeeping (keyed by the runtime's session id) and the
+    /// provider's identity separate; the runtime keeps the native id for
+    /// resume and handoff.
+    pub fn with_thread_id(self, thread_id: &str) -> Self {
+        let id = || thread_id.to_string();
+        match self {
+            AgentEvent::ThreadStarted(mut meta) => {
+                meta.id = id();
+                AgentEvent::ThreadStarted(meta)
+            }
+            AgentEvent::ThreadNameUpdated { name, .. } => AgentEvent::ThreadNameUpdated {
+                thread_id: id(),
+                name,
+            },
+            AgentEvent::TurnStarted { turn_id, .. } => AgentEvent::TurnStarted {
+                thread_id: id(),
+                turn_id,
+            },
+            AgentEvent::TurnCompleted {
+                turn_id,
+                status,
+                error,
+                duration_ms,
+                ..
+            } => AgentEvent::TurnCompleted {
+                thread_id: id(),
+                turn_id,
+                status,
+                error,
+                duration_ms,
+            },
+            AgentEvent::ItemStarted { turn_id, item, .. } => AgentEvent::ItemStarted {
+                thread_id: id(),
+                turn_id,
+                item,
+            },
+            AgentEvent::ItemCompleted { turn_id, item, .. } => AgentEvent::ItemCompleted {
+                thread_id: id(),
+                turn_id,
+                item,
+            },
+            AgentEvent::AgentMessageDelta {
+                turn_id,
+                item_id,
+                delta,
+                ..
+            } => AgentEvent::AgentMessageDelta {
+                thread_id: id(),
+                turn_id,
+                item_id,
+                delta,
+            },
+            AgentEvent::ReasoningDelta {
+                turn_id,
+                item_id,
+                delta,
+                ..
+            } => AgentEvent::ReasoningDelta {
+                thread_id: id(),
+                turn_id,
+                item_id,
+                delta,
+            },
+            AgentEvent::CommandOutputDelta {
+                turn_id,
+                item_id,
+                delta,
+                ..
+            } => AgentEvent::CommandOutputDelta {
+                thread_id: id(),
+                turn_id,
+                item_id,
+                delta,
+            },
+            AgentEvent::PlanUpdated {
+                turn_id,
+                explanation,
+                steps,
+                ..
+            } => AgentEvent::PlanUpdated {
+                thread_id: id(),
+                turn_id,
+                explanation,
+                steps,
+            },
+            AgentEvent::TokenUsage { usage, .. } => AgentEvent::TokenUsage {
+                thread_id: id(),
+                usage,
+            },
+            AgentEvent::ApprovalRequested(mut request) => {
+                request.thread_id = id();
+                AgentEvent::ApprovalRequested(request)
+            }
+            AgentEvent::UserInputRequested(mut request) => {
+                request.thread_id = id();
+                AgentEvent::UserInputRequested(request)
+            }
+            AgentEvent::PredictionUpdated { text, .. } => AgentEvent::PredictionUpdated {
+                thread_id: id(),
+                text,
+            },
+            AgentEvent::GoalUpdated { goal, .. } => AgentEvent::GoalUpdated {
+                thread_id: id(),
+                goal,
+            },
+            AgentEvent::ConfigUpdated { options, .. } => AgentEvent::ConfigUpdated {
+                thread_id: id(),
+                options,
+            },
+            AgentEvent::CommandsUpdated { commands, .. } => AgentEvent::CommandsUpdated {
+                thread_id: id(),
+                commands,
+            },
+            AgentEvent::ApprovalResolved { request_id, .. } => AgentEvent::ApprovalResolved {
+                thread_id: id(),
+                request_id,
+            },
+            AgentEvent::Error {
+                message,
+                will_retry,
+                ..
+            } => AgentEvent::Error {
+                thread_id: Some(id()),
+                message,
+                will_retry,
+            },
+            // These carry no thread id; they are unchanged.
+            other => other,
+        }
+    }
+
     /// The thread this event belongs to, if any.
     pub fn thread_id(&self) -> Option<&str> {
         match self {

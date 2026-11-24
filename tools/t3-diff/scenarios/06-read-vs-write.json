@@ -1,0 +1,22 @@
+{
+  "name": "06-read-vs-write",
+  "kind": "adapter",
+  "provider": "mockcodex",
+  "model": "mock-1",
+  "t3": "skip: T3's CLI reads the server projection, and its provider snapshot is not reachable from the CLI; the engine's thread/read versus thread/resume split is asserted here",
+  "actions": [
+    {"op": "hold_writer"},
+    {"op": "read_vs_write"}
+  ],
+  "expect": {
+    "final_status": "completed",
+    "stream_contains": [
+      {"kind": "adapter.writerHeld"},
+      {
+        "kind": "adapter.readVsWrite",
+        "read": "ok",
+        "resume": "in use by another process"
+      }
+    ]
+  }
+}

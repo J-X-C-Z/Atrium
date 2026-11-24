@@ -73,13 +73,40 @@ struct Thread {
     turns: Vec<Value>,
     /// A throwaway fork, such as one that predicts the next message.
     ephemeral: bool,
+    /// The settings a loaded thread carries. Older session files predate them.
+    #[serde(default = "default_model")]
+    model: String,
+    #[serde(default)]
+    effort: Option<String>,
+    #[serde(default)]
+    service_tier: Option<String>,
+    #[serde(default = "default_approval_policy")]
+    approval_policy: String,
+}
+
+fn default_model() -> String {
+    "mock-1".to_string()
+}
+
+fn default_approval_policy() -> String {
+    "never".to_string()
+}
+
+/// `approvalPolicy` is a string, or (full access as T3 sends it) a granular
+/// object. Settings only need a name to report back.
+fn approval_policy_name(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| value.get("granular").map(|_| "never".to_string()))
 }
 
 fn thread_json(t: &Thread, with_turns: bool) -> Value {
     json!({
         "id": t.id, "sessionId": t.id, "preview": t.preview, "name": null, "cwd": t.cwd,
-        "model": "mock-1", "modelProvider": "mock", "createdAt": t.created, "updatedAt": t.updated,
+        "model": t.model, "modelProvider": "mock", "createdAt": t.created, "updatedAt": t.updated,
         "recencyAt": t.updated, "status": {"type": "idle"}, "ephemeral": t.ephemeral,
+        "reasoningEffort": t.effort, "serviceTier": t.service_tier,
         "turns": if with_turns { Value::Array(t.turns.clone()) } else { json!([]) },
         // T3 Code decodes these on every thread it receives.
         "cliVersion": CODEX_VERSION, "projectId": null, "source": "appServer",
@@ -92,9 +119,20 @@ fn thread_response(t: &Thread, with_turns: bool) -> Value {
     let body = thread_json(t, with_turns);
     json!({
         "thread": body.clone(),
-        "model": "mock-1", "modelProvider": "mock", "cwd": body["cwd"],
-        "approvalPolicy": "never", "approvalsReviewer": "user",
+        "model": t.model, "modelProvider": "mock", "cwd": body["cwd"],
+        "approvalPolicy": t.approval_policy, "approvalsReviewer": "user",
         "sandbox": {"type": "dangerFullAccess"},
+        "reasoningEffort": t.effort, "serviceTier": t.service_tier,
+    })
+}
+
+/// The `threadSettings` payload of `thread/settings/updated`.
+fn thread_settings_json(t: &Thread) -> Value {
+    json!({
+        "model": t.model,
+        "effort": t.effort,
+        "serviceTier": t.service_tier,
+        "approvalPolicy": t.approval_policy,
     })
 }
 
@@ -225,6 +263,9 @@ struct State {
     /// Threads loaded with `thread/resume` in this process. `thread/read`
     /// deliberately does not count: real Codex refuses turns on those.
     resumed: Mutex<HashSet<String>>,
+    /// A thread another process has the writer lock on. `thread/read` still
+    /// works; `thread/resume` (the write path) reports it as in use.
+    writer_held: Mutex<Option<String>>,
 }
 
 fn main() {
@@ -246,6 +287,7 @@ fn main() {
         running: Mutex::new(HashMap::new()),
         steered: Mutex::new(HashMap::new()),
         resumed: Mutex::new(HashSet::new()),
+        writer_held: Mutex::new(None),
     });
     // Two stored threads so the sidebar has history.
     {
@@ -270,6 +312,10 @@ fn main() {
                 created: now() - ago,
                 updated: now() - ago,
                 ephemeral: false,
+                model: default_model(),
+                effort: None,
+                service_tier: None,
+                approval_policy: default_approval_policy(),
                 turns: vec![json!({
                     "id": next_id("turn"), "status": "completed", "items": [
                         {"type": "userMessage", "id": next_id("item"), "content": [{"type": "text", "text": text, "text_elements": []}]},
@@ -429,6 +475,10 @@ fn handle(method: &str, id: Value, params: Value, out: &Out, state: &Arc<State>)
                 updated: now(),
                 turns,
                 ephemeral,
+                model: parent.model.clone(),
+                effort: parent.effort.clone(),
+                service_tier: parent.service_tier.clone(),
+                approval_policy: parent.approval_policy.clone(),
             };
             let body = thread_json(&fork, false);
             if !fork.ephemeral {
@@ -618,6 +668,14 @@ fn handle(method: &str, id: Value, params: Value, out: &Out, state: &Arc<State>)
                 updated: now(),
                 turns: Vec::new(),
                 ephemeral: params["ephemeral"].as_bool().unwrap_or(false),
+                model: params["model"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(default_model),
+                effort: params["effort"].as_str().map(str::to_owned),
+                service_tier: params["serviceTier"].as_str().map(str::to_owned),
+                approval_policy: approval_policy_name(&params["approvalPolicy"])
+                    .unwrap_or_else(default_approval_policy),
             };
             let body = thread_json(&thread, false);
             persist_thread(&thread);
@@ -630,6 +688,17 @@ fn handle(method: &str, id: Value, params: Value, out: &Out, state: &Arc<State>)
         "thread/resume" | "thread/read" => {
             let wanted = params["threadId"].as_str().unwrap_or_default();
             let resume = method == "thread/resume";
+            // The write path takes the writer lock; reading a snapshot does not.
+            if resume
+                && let Some(held) = state.writer_held.lock().unwrap().clone()
+                && held == wanted
+            {
+                send(
+                    out,
+                    json!({"id": id, "error": {"code": -32600, "message": format!("thread {wanted} is in use by another process")}}),
+                );
+                return;
+            }
             match find_thread(state, wanted) {
                 Some(mut thread) => {
                     if resume {
@@ -655,6 +724,45 @@ fn handle(method: &str, id: Value, params: Value, out: &Out, state: &Arc<State>)
                     json!({"id": id, "error": {"code": -32602, "message": format!("no thread {wanted}")}}),
                 ),
             }
+        }
+        "thread/settings/update" => {
+            let wanted = params["threadId"].as_str().unwrap_or_default().to_string();
+            let mut threads = state.threads.lock().unwrap();
+            let Some(thread) = threads.iter_mut().find(|t| t.id == wanted) else {
+                drop(threads);
+                send(
+                    out,
+                    json!({"id": id, "error": {"code": -32602, "message": format!("no thread {wanted}")}}),
+                );
+                return;
+            };
+            if let Some(model) = params["model"].as_str() {
+                thread.model = model.to_string();
+            }
+            if let Some(effort) = params["effort"].as_str() {
+                thread.effort = Some(effort.to_string());
+            }
+            if let Some(tier) = params["serviceTier"].as_str() {
+                thread.service_tier = Some(tier.to_string());
+            }
+            if let Some(policy) = approval_policy_name(&params["approvalPolicy"]) {
+                thread.approval_policy = policy;
+            }
+            thread.updated = now();
+            let settings = thread_settings_json(thread);
+            persist_thread(thread);
+            drop(threads);
+            reply(out, id, json!({}));
+            // T3 Code watches this notification to update a running thread's options.
+            notify(
+                out,
+                "thread/settings/updated",
+                json!({"threadId": wanted, "threadSettings": settings}),
+            );
+        }
+        "debug/holdWriter" => {
+            *state.writer_held.lock().unwrap() = params["threadId"].as_str().map(str::to_owned);
+            reply(out, id, json!({}));
         }
         "thread/archive" => {
             let wanted = params["threadId"].as_str().unwrap_or_default().to_string();
@@ -1092,6 +1200,32 @@ fn run_turn(
             .to_string();
         chosen = Some(picked);
     }
+    if !interrupted && (lower.contains("elicit") || lower.contains("permission")) {
+        // A browser-style MCP elicitation: Codex asks before an app may be used.
+        let answer = ask(
+            out,
+            state,
+            "mcpServer/elicitation/request",
+            with(json!({
+                "serverName": "browser",
+                "mode": "form",
+                "message": "Allow ChatGPT to use Google Chrome?",
+                "requestedSchema": {
+                    "type": "object",
+                    "properties": {
+                        "approval": {"type": "string", "enum": ["once", "always"]}
+                    },
+                    "required": ["approval"]
+                }
+            })),
+        );
+        chosen = Some(
+            answer["content"]["approval"]
+                .as_str()
+                .unwrap_or("cancelled")
+                .to_string(),
+        );
+    }
     if !interrupted && lower.contains("search") {
         let item = json!({"type": "webSearch", "id": next_id("item"), "query": "gpui text input ime",
             "action": {"type": "open_page", "url": "https://www.gpui.rs/"}, "results": null});
@@ -1430,6 +1564,10 @@ mod tests {
             updated: 2,
             turns: Vec::new(),
             ephemeral: false,
+            model: default_model(),
+            effort: None,
+            service_tier: None,
+            approval_policy: default_approval_policy(),
         }
     }
 
@@ -1484,6 +1622,29 @@ mod tests {
         let config = config_read_result();
         assert_eq!(config["config"], json!({}));
         assert_eq!(config["origins"], json!({}));
+    }
+
+    #[test]
+    fn thread_settings_report_the_fields_the_adapter_applies() {
+        let mut thread = sample_thread();
+        thread.model = "mock-1-pro".into();
+        thread.effort = Some("high".into());
+        thread.service_tier = Some("priority".into());
+        thread.approval_policy = "on-request".into();
+        assert_eq!(
+            thread_settings_json(&thread),
+            json!({
+                "model": "mock-1-pro",
+                "effort": "high",
+                "serviceTier": "priority",
+                "approvalPolicy": "on-request",
+            })
+        );
+        // Full access arrives as a granular object, as T3 sends it.
+        assert_eq!(
+            approval_policy_name(&json!({"granular": {"mcp_elicitations": true}})),
+            Some("never".into())
+        );
     }
 
     #[test]

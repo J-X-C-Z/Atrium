@@ -1,0 +1,17 @@
+{
+  "name": "07-provider-probe",
+  "provider": "mockcodex",
+  "model": "mock-1",
+  "turns": [{"text": "say hi"}],
+  "expect": {
+    "final_status": "completed",
+    "provider_methods": [
+      "initialize",
+      "model/list",
+      "skills/list",
+      "config/read",
+      "thread/start",
+      "turn/start"
+    ]
+  }
+}
