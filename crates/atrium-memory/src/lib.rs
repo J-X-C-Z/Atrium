@@ -191,7 +191,11 @@ pub fn project_root(cwd: &Path) -> PathBuf {
 
 /// A stable, readable key for a project folder: its name, lower-case,
 /// and a short hash of its full path, such as `atrium-3f2a9c1d`.
+///
+/// The path is resolved through symlinks first, so the same project opened
+/// as `/var/...` and `/private/var/...` on macOS gets one key.
 pub fn project_key(root: &Path) -> String {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let name: String = root
         .file_name()
         .map(|n| n.to_string_lossy().to_lowercase())
@@ -253,6 +257,37 @@ mod tests {
         let deep = dir.path().join("src/ui");
         std::fs::create_dir_all(&deep).unwrap();
         assert_eq!(project_root(&deep), dir.path().canonicalize().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_folder_has_one_project_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("project");
+        std::fs::create_dir_all(real.join(".git")).unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+
+        // macOS temp folders live under /var, a link to /private/var; the
+        // alias makes the mismatch explicit on every Unix.
+        assert_eq!(project_root(&alias), real.canonicalize().unwrap());
+        assert_eq!(project_root(&real), project_root(&alias));
+        assert_eq!(project_key(&alias), project_key(&real));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_folder_below_a_symlink_meets_the_git_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("project");
+        std::fs::create_dir_all(real.join(".git")).unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+
+        // `cwd` does not exist yet, so the walk starts uncanonical; the git
+        // root it finds must still come back resolved.
+        let missing = alias.join("src/not/created/yet");
+        assert_eq!(project_root(&missing), real.canonicalize().unwrap());
     }
 
     #[test]

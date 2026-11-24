@@ -105,7 +105,7 @@ impl Workspace {
     /// The other device that runs `root`'s scheduler, while its lease holds.
     pub fn scheduler_elsewhere(&self, root: &Path) -> Option<String> {
         let sync = self.sync.as_ref()?;
-        let id = sync.project_ids.get(root)?;
+        let id = sync.project_ids.get(&super::canonical_path(root))?;
         let lease: Lease = serde_json::from_value(
             sync.state
                 .store()
