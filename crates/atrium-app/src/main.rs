@@ -5,6 +5,7 @@
 
 mod agents;
 mod alerts;
+mod capabilities;
 mod i18n;
 use atrium_project as project;
 mod docmap;
@@ -12,6 +13,7 @@ mod export;
 mod links;
 mod opener;
 mod pageedit;
+mod runtime_adapters;
 mod schedule;
 mod settings;
 mod skills;

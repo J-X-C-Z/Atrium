@@ -17,7 +17,7 @@ use atrium_core::{
     AgentEvent, EntryKind, GoalStatus, Item, ItemStatus, McpServer, ThreadMeta, Transcript,
     TurnStatus,
 };
-use codex_client::StartThread;
+use atrium_runtime::SessionSpec;
 use gpui::Context;
 
 use super::notice_dispatch::{
@@ -275,6 +275,8 @@ impl BackgroundDispatch {
 
 impl Workspace {
     pub(super) fn init_projects(&mut self, cx: &mut Context<Self>) {
+        self.ensure_runtime_clients();
+        self.ensure_runtime_events(cx);
         cx.on_app_quit(|ws, _| {
             ws.previews.clear();
             async {}
@@ -918,75 +920,69 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let title: String = text.chars().take(60).collect();
-        if backend == CODEX {
-            let Some(client) = self.client.clone() else {
-                return;
-            };
-            let options = StartThread {
-                cwd: Some(cwd.display().to_string()),
-                model: self.settings.model.clone(),
-                approval_policy: Some(self.settings.mode.approval_policy().into()),
-                sandbox: Some(self.settings.mode.sandbox_mode().into()),
-                mcp_servers: self.user_mcp(&backend),
-                env: self.session_env(),
-                developer_instructions: None,
-            };
-            cx.spawn(async move |this, cx| {
-                let meta = match client.thread_start(options).await {
-                    Ok(meta) => meta,
-                    Err(error) => {
-                        let _ =
-                            this.update(cx, |_, cx| cx.emit(Notice::Error(format!("{error:#}"))));
-                        return;
-                    }
-                };
-                let thread = meta.id.clone();
-                let _ = client.thread_set_name(&thread, &title).await;
-                let _ = this.update(cx, |ws, cx| {
-                    ws.upsert_thread(ThreadMeta {
-                        name: Some(title.clone()),
-                        ..meta
-                    });
-                    ws.transcripts.insert(thread.clone(), Transcript::new());
-                    ws.send_to_thread(thread.clone(), Composed::text(text), cx);
-                    if open {
-                        ws.show_started(thread, cx);
-                    }
-                });
-            })
-            .detach();
-            return;
-        }
-        let Some(client) = self.acp(&backend) else {
+        let codex = agents::is_codex(&backend);
+        if !codex && self.acp(&backend).is_none() {
             self.new_chat(cx);
             cx.emit(super::Fill(Composed::text(text)));
             return;
+        }
+        if codex && self.client.is_none() {
+            return;
+        }
+        self.ensure_runtime_clients();
+        let runtime = self.runtime.clone();
+        let options_runtime = runtime.clone();
+        let sink = self.runtime_sink(&backend);
+        let thread_model = codex.then(|| self.settings.model.clone()).flatten();
+        let spec = SessionSpec {
+            agent: backend.clone(),
+            model: thread_model.clone(),
+            effort: codex.then(|| self.settings.effort.clone()).flatten(),
+            service_tier: None,
+            folder: cwd.clone(),
+            worktree: None,
+            device: agents::split_backend(&backend).1.map(str::to_owned),
+            mcp_servers: self.user_mcp(&backend),
+            first_message: None,
+            access_mode: codex
+                .then(|| crate::runtime_adapters::access_mode_name(self.settings.mode).to_string()),
         };
-        let mcp = self.user_mcp(&backend);
+        let named = codex.then(|| self.codex_for(&backend)).flatten();
         cx.spawn(async move |this, cx| {
-            let start = match client.new_session_with(&cwd, &mcp).await {
-                Ok(start) => start,
+            let started = cx
+                .background_executor()
+                .spawn(async move { crate::runtime_adapters::start_session(&*runtime, spec, sink) })
+                .await;
+            let thread = match started {
+                Ok(thread) => thread,
                 Err(error) => {
-                    let _ = this.update(cx, |_, cx| cx.emit(Notice::Error(format!("{error:#}"))));
+                    let _ = this.update(cx, |_, cx| {
+                        cx.emit(Notice::Error(format!("{error:#}")));
+                    });
                     return;
                 }
             };
+            if let Some(client) = &named {
+                let _ = client.thread_set_name(&thread, &title).await;
+            }
+            let options = options_runtime.session_options(&thread).unwrap_or_default();
             let _ = this.update(cx, |ws, cx| {
                 let now = jiff::Timestamp::now().as_second();
-                let thread = start.session_id.clone();
                 ws.upsert_thread(ThreadMeta {
                     id: thread.clone(),
                     backend: backend.clone(),
                     name: Some(title.clone()),
                     preview: title.clone(),
                     cwd: cwd.display().to_string(),
-                    model: None,
+                    model: thread_model.clone(),
                     created_at: now,
                     updated_at: now,
                 });
-                ws.session_options.insert(thread.clone(), start.options);
-                if let Some(commands) = ws.agent_commands.get(&backend).cloned() {
-                    ws.commands.insert(thread.clone(), commands);
+                if !codex {
+                    ws.session_options.insert(thread.clone(), options);
+                    if let Some(commands) = ws.agent_commands.get(&backend).cloned() {
+                        ws.commands.insert(thread.clone(), commands);
+                    }
                 }
                 ws.transcripts.insert(thread.clone(), Transcript::new());
                 ws.send_to_thread(thread.clone(), Composed::text(text), cx);
@@ -1170,151 +1166,119 @@ impl Workspace {
             );
             return;
         }
-        if agents::is_codex(&backend) {
-            let Some(client) = self.codex_for(&backend) else {
-                self.stream_failed(
-                    &root,
-                    &id,
-                    anyhow::anyhow!("backend {backend} disconnected"),
-                    cx,
-                );
-                return;
-            };
-            let mode = self.project_access_mode(unattended);
-            let options = StartThread {
-                cwd: Some(cwd.display().to_string()),
-                model: if agents::split_backend(&backend).1.is_some() {
-                    None
-                } else {
-                    self.settings.model.clone()
-                },
-                approval_policy: Some(mode.approval_policy().into()),
-                sandbox: Some(mode.sandbox_mode().into()),
-                mcp_servers: {
-                    let mut servers = self.user_mcp(&backend);
-                    servers.extend(Self::mcp_servers(&root, &id, &backend));
-                    servers
-                },
-                env: self.session_env(),
-                developer_instructions: None,
-            };
-            // Controllers are event-driven; never give them an auto-continuing goal.
-            let objective = if stream.role == Role::Controller {
-                String::new()
-            } else {
-                stream.goal.clone()
-            };
-            cx.spawn(async move |this, cx| {
-                let meta = match client.thread_start(options).await {
-                    Ok(meta) => meta,
-                    Err(error) => {
-                        let _ = this.update(cx, |ws, cx| ws.stream_failed(&root, &id, error, cx));
-                        return;
-                    }
-                };
-                let thread = meta.id.clone();
-                let _ = client.thread_set_name(&thread, &title).await;
-                let bound = this
-                    .update(cx, |ws, cx| match ws.attach_thread(&root, &id, &thread) {
-                        Ok(()) => true,
-                        Err(error) => {
-                            ws.stream_failed(&root, &id, error, cx);
-                            false
-                        }
-                    })
-                    .unwrap_or(false);
-                if !bound {
+        self.ensure_runtime_clients();
+        let runtime = self.runtime.clone();
+        let device = agents::split_backend(&backend).1.map(str::to_owned);
+        let sink = self.runtime_sink(&backend);
+        let codex = agents::is_codex(&backend);
+        let mode = self.project_access_mode(unattended);
+        let model = if codex && device.is_none() {
+            self.settings.model.clone()
+        } else {
+            None
+        };
+        let mut mcp_servers = self.user_mcp(&backend);
+        mcp_servers.extend(Self::mcp_servers(&root, &id, &backend));
+        let spec = SessionSpec {
+            agent: backend.clone(),
+            model: model.clone(),
+            effort: codex.then(|| self.settings.effort.clone()).flatten(),
+            service_tier: None,
+            folder: cwd.clone(),
+            worktree: None,
+            device,
+            mcp_servers,
+            first_message: None,
+            access_mode: codex.then(|| crate::runtime_adapters::access_mode_name(mode).to_string()),
+        };
+        // Controllers are event-driven; never give them an auto-continuing goal.
+        let objective = if stream.role == Role::Controller {
+            String::new()
+        } else {
+            stream.goal.clone()
+        };
+        let named = codex.then(|| self.codex_for(&backend)).flatten();
+        let session_runtime = runtime.clone();
+        cx.spawn(async move |this, cx| {
+            let started = cx
+                .background_executor()
+                .spawn(async move { crate::runtime_adapters::start_session(&*runtime, spec, sink) })
+                .await;
+            let thread = match started {
+                Ok(thread) => thread,
+                Err(error) => {
+                    let error = anyhow::anyhow!("{error}");
+                    let _ = this.update(cx, |ws, cx| ws.stream_failed(&root, &id, error, cx));
                     return;
                 }
-                // Establish the goal before kickoff so a fast worker cannot be
-                // reactivated by a late goal_set after it has already finished.
-                let goal = if objective.is_empty() {
-                    None
-                } else {
-                    client
-                        .goal_set(&thread, Some(&objective), Some(GoalStatus::Active), None)
-                        .await
-                        .ok()
-                        .flatten()
-                };
-                let _ = this.update(cx, |ws, cx| {
-                    ws.project_schedule
-                        .task_pool
-                        .starting
-                        .remove(&(root.clone(), id.clone()));
-                    ws.upsert_thread(ThreadMeta {
-                        name: Some(title.clone()),
-                        backend: backend.clone(),
-                        ..meta
-                    });
-                    ws.transcripts.insert(thread.clone(), Transcript::new());
-                    if let Some(goal) = goal {
-                        ws.goals.insert(thread.clone(), goal);
-                    }
-                    // The user may have removed it while goal setup was in flight.
-                    if ws.projects.iter().any(|p| {
-                        p.root == root
-                            && p.stream(&id).is_some_and(|s| {
-                                !s.retired && s.thread_id.as_ref() == Some(&thread)
-                            })
-                    }) {
-                        ws.send_stream_kickoff(&root, &id, thread, kickoff, cx);
-                    }
-                });
-            })
-            .detach();
-        } else {
-            let Some(client) = self.acp(&backend) else {
-                self.stream_failed(
-                    &root,
-                    &id,
-                    anyhow::anyhow!("backend {backend} disconnected"),
-                    cx,
-                );
-                return;
             };
-            let mut mcp = self.user_mcp(&backend);
-            mcp.extend(Self::mcp_servers(&root, &id, &backend));
-            cx.spawn(async move |this, cx| {
-                let start = match client.new_session_with(&cwd, &mcp).await {
-                    Ok(start) => start,
+            if let Some(client) = &named {
+                let _ = client.thread_set_name(&thread, &title).await;
+            }
+            let bound = this
+                .update(cx, |ws, cx| match ws.attach_thread(&root, &id, &thread) {
+                    Ok(()) => true,
                     Err(error) => {
-                        let _ = this.update(cx, |ws, cx| ws.stream_failed(&root, &id, error, cx));
-                        return;
+                        ws.stream_failed(&root, &id, error, cx);
+                        false
                     }
-                };
-                let _ = this.update(cx, |ws, cx| {
-                    let now = jiff::Timestamp::now().as_second();
-                    let thread = start.session_id.clone();
-                    ws.project_schedule
-                        .task_pool
-                        .starting
-                        .remove(&(root.clone(), id.clone()));
-                    ws.upsert_thread(ThreadMeta {
-                        id: thread.clone(),
-                        backend: backend.clone(),
-                        name: Some(title.clone()),
-                        preview: title.clone(),
-                        cwd: cwd.display().to_string(),
-                        model: None,
-                        created_at: now,
-                        updated_at: now,
-                    });
-                    ws.known_options
-                        .insert(backend.clone(), start.options.clone());
-                    ws.session_options.insert(thread.clone(), start.options);
+                })
+                .unwrap_or(false);
+            if !bound {
+                return;
+            }
+            // Establish the goal before kickoff so a fast worker cannot be
+            // reactivated by a late goal_set after it has already finished.
+            let goal = if !codex || objective.is_empty() {
+                None
+            } else if let Some(client) = &named {
+                client
+                    .goal_set(&thread, Some(&objective), Some(GoalStatus::Active), None)
+                    .await
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            };
+            let options = session_runtime.session_options(&thread).unwrap_or_default();
+            let _ = this.update(cx, |ws, cx| {
+                let now = jiff::Timestamp::now().as_second();
+                ws.project_schedule
+                    .task_pool
+                    .starting
+                    .remove(&(root.clone(), id.clone()));
+                ws.upsert_thread(ThreadMeta {
+                    id: thread.clone(),
+                    backend: backend.clone(),
+                    name: Some(title.clone()),
+                    preview: title.clone(),
+                    cwd: cwd.display().to_string(),
+                    model: model.clone(),
+                    created_at: now,
+                    updated_at: now,
+                });
+                if !codex {
+                    ws.known_options.insert(backend.clone(), options.clone());
+                    ws.session_options.insert(thread.clone(), options);
                     if let Some(commands) = ws.agent_commands.get(&backend).cloned() {
                         ws.commands.insert(thread.clone(), commands);
                     }
-                    ws.transcripts.insert(thread.clone(), Transcript::new());
-                    match ws.attach_thread(&root, &id, &thread) {
-                        Ok(()) => ws.send_stream_kickoff(&root, &id, thread, kickoff, cx),
-                        Err(error) => ws.stream_failed(&root, &id, error, cx),
-                    }
-                });
-            })
-            .detach();
-        }
+                }
+                ws.transcripts.insert(thread.clone(), Transcript::new());
+                if let Some(goal) = goal {
+                    ws.goals.insert(thread.clone(), goal);
+                }
+                // The user may have removed it while goal setup was in flight.
+                if ws.projects.iter().any(|p| {
+                    p.root == root
+                        && p.stream(&id)
+                            .is_some_and(|s| !s.retired && s.thread_id.as_ref() == Some(&thread))
+                }) {
+                    ws.send_stream_kickoff(&root, &id, thread, kickoff, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     fn attach_thread(&mut self, root: &PathBuf, stream: &str, thread: &str) -> anyhow::Result<()> {

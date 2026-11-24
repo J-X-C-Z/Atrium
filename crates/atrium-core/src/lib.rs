@@ -6,12 +6,14 @@
 //! that. Keeping this crate free of UI and IO makes it trivially testable and
 //! lets a headless orchestrator reuse it unchanged.
 
+mod capabilities;
 mod claude_limits;
 mod event;
 mod model;
 mod pace;
 mod transcript;
 
+pub use capabilities::Capabilities;
 pub use claude_limits::{parse_meta_limits, parse_oauth_usage};
 pub use event::{AgentEvent, ApprovalDecision, ApprovalKind, ApprovalRequest, UserInputRequest};
 pub use model::{

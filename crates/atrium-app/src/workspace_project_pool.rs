@@ -2,7 +2,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -431,7 +431,7 @@ impl Workspace {
 
     fn complete_retired_pool_goal(
         &mut self,
-        root: &PathBuf,
+        root: &Path,
         worker: &Workstream,
         now: Instant,
         cx: &mut Context<Self>,
@@ -451,7 +451,7 @@ impl Workspace {
         let Some(client) = self.codex_for(&worker.backend) else {
             return;
         };
-        let key = (root.clone(), worker.id.clone());
+        let key = (root.to_path_buf(), worker.id.clone());
         let schedule = &mut self.project_schedule.task_pool;
         if schedule.goal_cleaned.contains(&key)
             || schedule

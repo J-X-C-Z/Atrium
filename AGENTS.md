@@ -59,7 +59,7 @@ do not mark it done from mocks.
 | 29 | **Engine on the node**: threads live on the device that runs them and continue from any device; heartbeat and wake probe | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | 21, 22 |
 | 30 | **App on the engine**: model pill, quiet extras, queue chips, usage banner, chat list by state, changes panel, work log | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | 25, 26 |
 | 31 | **Overlaps**: scheduled tasks, PR watch, workflows; fold what Atrium lacks into Atrium's own | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | 30 |
-| 32 | **Runtime seam** (`atrium-runtime`): the project layer talks to agents through one trait | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | — |
+| 32 | ✓ done in #8. **Runtime seam** (`atrium-runtime`): the project layer talks to agents through one trait | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | — |
 | 33 | **Team gaps**: apply member model/effort, pool workers through `pick`, persist the stand-in badge, stand-in on ACP limits without the autopilot | [`docs/parallel-lanes.md`](docs/parallel-lanes.md) | — |
 | 34 | **Soak and footprint**: hours-long headless runs with mocks, RSS/files/CPU over time, leak fixes, the same numbers for T3 | [`docs/parallel-lanes.md`](docs/parallel-lanes.md) | — |
 | 35 | **Office vs LibreOffice**: render a generated corpus both ways, per-page diff report, fix the worst differences | [`docs/parallel-lanes.md`](docs/parallel-lanes.md) | — |

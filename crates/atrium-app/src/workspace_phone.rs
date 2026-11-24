@@ -5,6 +5,7 @@ use atrium_phone::{
     snapshot::{Chat, project_snapshot},
 };
 use atrium_project::{Project, YOU};
+use atrium_runtime::AgentRuntime;
 use gpui::{Context, Task};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
@@ -280,7 +281,16 @@ impl Workspace {
                     return Err(Error::Stale);
                 }
                 let (id, d) = (id.clone(), *d);
-                if crate::agents::is_codex(self.backend_of(thread)) {
+                self.ensure_runtime_clients();
+                if self.runtime.has_session(thread) {
+                    let runtime = self.runtime.clone();
+                    let thread = thread.to_owned();
+                    Box::new(move || {
+                        runtime
+                            .answer_approval(&thread, id, d)
+                            .map_err(|error| anyhow::anyhow!("{error}"))
+                    })
+                } else if crate::agents::is_codex(self.backend_of(thread)) {
                     let client = self.thread_codex(thread).ok_or(Error::Unavailable)?;
                     Box::new(move || client.answer_approval(id, d))
                 } else {
