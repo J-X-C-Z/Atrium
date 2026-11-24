@@ -10,7 +10,7 @@ Keep this table current when a module lands or moves.
 | --- | --- | --- |
 | `src/contracts` | `packages/contracts/src` (base schemas, orchestration V2, model selection) | 20 |
 | `src/store` | `apps/server/src/orchestration-v2/EventStore.ts`, `ProjectionStore.ts`, `apps/server/src/persistence/Migrations/055_OrchestrationV2.ts`, `ThreadStream.ts`, `LiveStreamBudget.ts`, `threadHistoryPaging.ts`, `WireProjection.ts`, `packages/shared/src/orchestrationV2BoundedSnapshot.ts` | 21 |
-| `src/orchestration` | `apps/server/src/orchestration-v2/Orchestrator.ts`, `EventSink.ts`, `EffectWorker.ts`, `runtimeLayer.ts` | 25 |
+| `src/orchestration` | `apps/server/src/orchestration-v2/Orchestrator.ts`, `CommandPolicy.ts`, `EventSink.ts`, `EffectWorker.ts`, `QueuedRunOrder.ts`, `RuntimePolicy.ts`, `runtimeLayer.ts`, `ProviderSwitchService.ts`, `ProviderSessionTransitionPolicy.ts`, `RunFinalizationService.ts`; `packages/provider-core/src/server/subagentProjection.ts` | 25 |
 | `src/providers` | `packages/provider-core` (`ProviderAdapter.ts`, `selectionTransition.ts`, `driver.ts`, `client.ts`), `apps/server/src/orchestration-v2/ProviderAdapterRegistry.ts`, `apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts`, `apps/server/src/provider/CodexMcpElicitation.ts`, `packages/effect-codex-app-server` (wire names only; the transport is Atrium's `codex-client`) | 22, 23, 24 |
 | `src/runtime` | Atrium seam over `ProviderAdapterV2` (`atrium-runtime::AgentRuntime`); no single T3 file | 22 |
 | `src/usage` | `orchestration-v2/UsageLimitRecoveryWorker.ts`, limit schemas | 26 |

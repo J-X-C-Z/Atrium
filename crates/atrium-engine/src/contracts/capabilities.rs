@@ -32,7 +32,7 @@ impl Default for RuntimePolicyCapabilities {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionCapabilities {
     pub supports_multiple_provider_threads_per_session: bool,
@@ -42,7 +42,7 @@ pub struct SessionCapabilities {
     pub pending_requests_survive_restart: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadCapabilities {
     pub can_create_empty_thread: bool,
@@ -56,15 +56,16 @@ pub struct ThreadCapabilities {
     pub exposes_native_thread_id: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TerminalStatusQuality {
     Strong,
     Weak,
+    #[default]
     None,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnCapabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -87,7 +88,7 @@ pub struct TurnCapabilities {
     pub terminal_status_quality: TerminalStatusQuality,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamingCapabilities {
     pub streams_assistant_text: bool,
@@ -97,7 +98,7 @@ pub struct StreamingCapabilities {
     pub emits_message_completed: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolCapabilities {
     pub exposes_tool_item_ids: bool,
@@ -108,7 +109,7 @@ pub struct ToolCapabilities {
     pub supports_dynamic_tool_callbacks: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApprovalCapabilities {
     pub supports_command_approval: bool,
@@ -120,7 +121,7 @@ pub struct ApprovalCapabilities {
     pub approvals_can_originate_from_subagents: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanningCapabilities {
     pub emits_plan_updated: bool,
@@ -130,7 +131,7 @@ pub struct PlanningCapabilities {
     pub plan_deltas_have_item_ids: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubagentCapabilities {
     pub supports_subagents: bool,
@@ -141,7 +142,7 @@ pub struct SubagentCapabilities {
     pub can_fork_subagent_thread: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextCapabilities {
     pub accepts_system_context: bool,
@@ -154,7 +155,7 @@ pub struct ContextCapabilities {
     pub max_recommended_handoff_chars: Option<u32>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CheckpointCapabilities {
     pub app_can_checkpoint_filesystem: bool,
@@ -164,15 +165,16 @@ pub struct CheckpointCapabilities {
     pub provider_can_read_conversation_snapshot: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NativeRefStrength {
     Strong,
     Weak,
+    #[default]
     None,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IdentityCapabilities {
     pub native_thread_ids: NativeRefStrength,
@@ -182,7 +184,7 @@ pub struct IdentityCapabilities {
 }
 
 /// T3's `OrchestrationV2ProviderCapabilities`.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderCapabilities {
     pub sessions: SessionCapabilities,

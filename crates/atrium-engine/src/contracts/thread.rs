@@ -263,6 +263,69 @@ pub struct AppThread {
     pub deleted_at: Option<IsoDateTime>,
 }
 
+impl Default for AppThreadLineage {
+    fn default() -> Self {
+        Self {
+            parent_thread_id: None,
+            relationship_to_parent: None,
+            root_thread_id: ThreadId::new(""),
+            side_chat: None,
+        }
+    }
+}
+
+impl Default for AppThread {
+    fn default() -> Self {
+        Self {
+            created_by: Actor::User,
+            creation_source: CreationSource::Web,
+            id: ThreadId::new(""),
+            project_id: ProjectId::new(""),
+            title: String::new(),
+            provider_instance_id: super::base::ProviderInstanceId::new(""),
+            model_selection: ModelSelection::new("", ""),
+            runtime_mode: super::provider::RuntimeMode::FullAccess,
+            interaction_mode: super::provider::ProviderInteractionMode::Default,
+            branch: None,
+            worktree_path: None,
+            linked_pull_request: None,
+            pull_requests: None,
+            branch_pull_request: None,
+            issues: None,
+            active_provider_thread_id: None,
+            history_origin: None,
+            link_origin: None,
+            delegated_from: None,
+            lineage: AppThreadLineage::default(),
+            forked_from: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+            archived_at: None,
+            settled_override: None,
+            settled_at: None,
+            unsettled_at: None,
+            snoozed_until: None,
+            snoozed_at: None,
+            last_snooze_wake_at: None,
+            limit_recovery: None,
+            guest_share: None,
+            pinned_at: None,
+            auto_settle_disabled_at: None,
+            pin_order_key: None,
+            active_order_key: None,
+            tags: None,
+            last_visited_at: None,
+            opens: None,
+            title_regeneration: None,
+            last_title_regeneration: None,
+            title_renamed: None,
+            rollback_request_id: None,
+            rollback_failure: None,
+            deleted_at: None,
+        }
+    }
+}
+
 /// A thread another agent drives: a local subagent or a delegated task.
 pub fn is_delegated_app_thread(thread: &AppThread) -> bool {
     thread.lineage.relationship_to_parent == Some(RelationshipToParent::Subagent)

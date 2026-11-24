@@ -18,6 +18,7 @@
 
 mod events;
 mod migrations;
+mod orchestration;
 mod projections;
 mod stream;
 
