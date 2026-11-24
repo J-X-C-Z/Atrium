@@ -1818,6 +1818,7 @@ mod tests {
                     model_selection: model("mock-1", None, None),
                     runtime_policy: policy(RuntimeMode::ApprovalRequired),
                     app_context: Vec::new(),
+                    attachment_paths: Vec::new(),
                     now: "2026-11-24T00:00:00.000Z".into(),
                 })
                 .expect("start turn");

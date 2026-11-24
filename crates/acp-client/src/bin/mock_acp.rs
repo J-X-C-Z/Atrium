@@ -180,8 +180,17 @@ fn options(name: &str, session: &Session) -> Value {
         "antigravity" => json!({
             "modes": {"currentModeId": session.mode, "availableModes": [
                 {"id": "agent", "name": "Agent", "description": "Plans and acts"}, {"id": "ask", "name": "Ask", "description": "Answers without changes"}]},
-            "configOptions": [{"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": session.model,
-                "options": [{"value": "default", "name": "Gemini 3 Pro"}, {"value": "flash", "name": "Gemini 3 Flash"}]}]}),
+            "configOptions": [
+                {"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": session.model,
+                 "options": [
+                    {"group": "Gemini", "name": "Gemini", "options": [
+                        {"value": "default", "name": "Gemini 3 Pro"}, {"value": "flash", "name": "Gemini 3 Flash"}]},
+                    {"value": "gemini-3.8-flash-high", "name": "Gemini 3.8 Flash (high)"}]},
+                {"id": "thought_level", "name": "Thinking", "category": "thought_level", "type": "select", "currentValue": session.effort,
+                 "options": [{"value": "off", "name": "Off"}, {"value": "low", "name": "Low"}, {"value": "high", "name": "High"}]},
+                {"id": "contextWindow", "name": "Context window", "category": "context_window", "type": "select", "currentValue": "200k",
+                 "options": [{"value": "200k", "name": "200K"}, {"value": "1m", "name": "1M"}]},
+                {"id": "autoCompact", "name": "Auto compact", "type": "boolean", "currentValue": true}]}),
         _ => json!({
             "modes": {"currentModeId": session.mode, "availableModes": [
                 {"id": "default", "name": "Manual", "description": "Always ask before making changes"},
@@ -218,9 +227,11 @@ fn handle(method: &str, id: Value, params: &Value, out: &Out, state: &Arc<State>
                     "sessionCapabilities": {"close": {}, "list": {}, "resume": {}}}),
                 ),
                 "antigravity" => (
-                    "Antigravity",
-                    json!({"loadSession": true, "promptCapabilities": {"image": true},
-                    "sessionCapabilities": {"list": {}}}),
+                    "Google Antigravity",
+                    json!({"loadSession": true,
+                    "promptCapabilities": {"image": true, "audio": true, "embeddedContext": true},
+                    "sessionCapabilities": {"list": {}, "resume": {}},
+                    "auth": {"logout": {}}}),
                 ),
                 _ => (
                     "Claude Agent",
@@ -228,13 +239,50 @@ fn handle(method: &str, id: Value, params: &Value, out: &Out, state: &Arc<State>
                     "sessionCapabilities": {"list": {}, "close": {}, "resume": {}}}),
                 ),
             };
-            let mut result = json!({"protocolVersion": 1, "agentCapabilities": caps, "authMethods": [],
-                "agentInfo": {"name": format!("mock-{name}"), "title": title,
+            let mut result = json!({"protocolVersion": if name == "antigravity" { 2 } else { 1 },
+                "agentCapabilities": caps, "authMethods": [],
+                "agentInfo": {"name": if name == "antigravity" { "antigravity-acp".to_string() } else { format!("mock-{name}") },
+                    "title": title,
                     "version": std::env::var("ATRIUM_MOCK_ACP_VERSION").unwrap_or_else(|_| "0.0.0".into())}});
             if name == "claude" {
                 result["_meta"] = json!({"steering": {"supported": true}});
             }
+            if name == "antigravity" {
+                // The methods the installed agy advertises (T3's fixture).
+                result["authMethods"] = json!([
+                    {"id": "oauth-personal", "name": "Log in with Google", "description": "Log in with your Google account"},
+                    {"id": "oauth-business", "name": "Log in with Gemini Enterprise", "description": "Log in with your Gemini Enterprise account"},
+                    {"id": "gemini-api-key", "name": "Gemini API key", "description": "Use an API key with Gemini Developer API"},
+                    {"id": "agent-platform", "name": "Gemini Enterprise Agent Platform", "description": "Use Gemini Enterprise Agent Platform with Application Default Credentials or an API key"}
+                ]);
+            }
             reply(out, id, result);
+        }
+        "authenticate" => {
+            // No account is needed: the mock records the method so a test can
+            // assert the sign-in path, and answers success. Antigravity's
+            // browser flow announces its authorization link on stderr, as
+            // `agy` does; the client captures it without reading credentials.
+            if name == "antigravity"
+                && params["methodId"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .starts_with("oauth-")
+            {
+                eprintln!(
+                    "Open the following link to authenticate the ACP server: \
+                     https://accounts.google.com/o/oauth2/v2/auth?response_type=code&state=mock-state&redirect_uri=http%3A%2F%2F127.0.0.1%3A4567%2F"
+                );
+            }
+            reply(out, id, json!({}));
+        }
+        "logout" => {
+            // ACP's `logout`; only advertised when `auth.logout` is present.
+            if name == "antigravity" {
+                reply(out, id, json!({}));
+            } else {
+                fail(out, id, -32601, "mock-acp has no credentials to clear");
+            }
         }
         "session/new" => {
             let id_new = next(name);
@@ -313,7 +361,7 @@ fn handle(method: &str, id: Value, params: &Value, out: &Out, state: &Arc<State>
             match params["configId"].as_str() {
                 Some("mode") => session.mode = value,
                 Some("model") => session.model = value,
-                Some("reasoning_effort") => session.effort = value,
+                Some("reasoning_effort" | "thought_level" | "thinking") => session.effort = value,
                 _ => {}
             }
             let result = options(name, session);
@@ -354,6 +402,21 @@ fn stream(out: &Out, session: &str, kind: &str, text: &str, stop: &AtomicBool) -
     true
 }
 
+/// What the person asked: T3 wraps a turn's first prompt in
+/// `<t3_code_instructions>`/`<user_request>` and prefixes later prompts with
+/// its sender note. The mock answers the same subject for both.
+fn prompt_subject(text: &str) -> String {
+    let body = match (text.find("<user_request>"), text.find("</user_request>")) {
+        (Some(start), Some(end)) if end > start => &text[start + "<user_request>".len()..end],
+        _ => text,
+    };
+    body.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("[T3 Code: this message came through"))
+        .unwrap_or_default()
+        .to_string()
+}
+
 fn prompt(out: &Out, state: &State, id: Value, params: &Value) {
     let session_id = params["sessionId"].as_str().unwrap_or_default().to_string();
     let text = params["prompt"]
@@ -365,6 +428,26 @@ fn prompt(out: &Out, state: &State, id: Value, params: &Value) {
     let attached = params["prompt"]
         .as_array()
         .map_or(0, |b| b.len().saturating_sub(1));
+    // What the client actually sent, so a test can assert image/file blocks.
+    let block_types = params["prompt"]
+        .as_array()
+        .map(|blocks| {
+            blocks
+                .iter()
+                .map(|block| match block["type"].as_str() {
+                    Some("image") => {
+                        format!("image:{}", block["mimeType"].as_str().unwrap_or_default())
+                    }
+                    Some("audio") => "audio".to_string(),
+                    Some("resource") => "resource".to_string(),
+                    Some("resource_link") => "resource_link".to_string(),
+                    Some(other) => other.to_string(),
+                    None => "unknown".to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_default();
     let Some(session) = state.sessions.lock().unwrap().get(&session_id).cloned() else {
         return fail(out, id, -32602, "no such session");
     };
@@ -375,28 +458,33 @@ fn prompt(out: &Out, state: &State, id: Value, params: &Value) {
         .unwrap()
         .insert(session_id.clone(), stop.clone());
     let hierarchy = std::env::var_os("ATRIUM_HIERARCHY_MOCK").is_some();
+    // The subject is what the person asked, after T3's instruction
+    // wrappers and sender note; the mock's answer echoes it.
+    let subject = prompt_subject(&text);
     // Kickoff prose contains demo trigger words (for example "failed");
     // the hierarchy fixture exercises the protocol without triggering them.
     let lower = if hierarchy {
         String::new()
     } else {
-        text.to_lowercase()
+        subject.to_lowercase()
     };
     let who = match state.name.as_str() {
         "deepseek" => "DeepSeek",
         "antigravity" => "Antigravity",
         _ => "Claude",
     };
-    let mut cancelled = !stream(
-        out,
-        &session_id,
-        "agent_thought_chunk",
-        &format!(
+    let thought = if lower.contains("attach") || block_types.matches(':').count() > 0 {
+        format!(
+            "The user asked about \"{}\" with {attached} attachment(s): {block_types}. I'll look at the code first.",
+            subject
+        )
+    } else {
+        format!(
             "The user asked about \"{}\" with {attached} attachment(s). I'll look at the code first.",
-            text.lines().next().unwrap_or("")
-        ),
-        &stop,
-    );
+            subject
+        )
+    };
+    let mut cancelled = !stream(out, &session_id, "agent_thought_chunk", &thought, &stop);
     if !cancelled && (lower.contains("plan") || session.mode == "plan") {
         let steps = ["Read the module", "Make the change", "Run the tests"];
         for done in 0..=steps.len() {
@@ -413,6 +501,39 @@ fn prompt(out: &Out, state: &State, id: Value, params: &Value) {
             );
             pause(250);
         }
+    }
+    if !cancelled && state.name == "antigravity" && lower.contains("question") {
+        // agy shares `session/request_permission` for a native question.
+        let call = json!({"toolCallId": "interaction_mock1", "title": "Which approach?",
+            "kind": "other", "status": "pending"});
+        let mut first = call.clone();
+        first["sessionUpdate"] = json!("tool_call");
+        update(out, &session_id, first);
+        let answer = ask(
+            out,
+            state,
+            "session/request_permission",
+            json!({"sessionId": session_id, "toolCall": call, "options": [
+            {"optionId": "stable-choice", "name": "Plan first", "kind": "allow_once"},
+            {"optionId": "deny", "name": "Deny", "kind": "reject_once"}]}),
+        );
+        update(
+            out,
+            &session_id,
+            json!({"sessionUpdate": "tool_call_update", "toolCallId": "interaction_mock1", "status": "completed"}),
+        );
+        if answer["outcome"]["outcome"] != "selected" {
+            cancelled = true;
+        }
+    }
+    if !cancelled && lower.contains("subagent") {
+        update(
+            out,
+            &session_id,
+            json!({"sessionUpdate": "tool_call", "toolCallId": "sub-1", "title": "Run invoke_subagent",
+                "kind": "other", "status": "in_progress",
+                "rawInput": {"Role": "Researcher", "Prompt": "Read the README"}}),
+        );
     }
     if !cancelled && lower.contains("read") {
         update(
@@ -482,15 +603,14 @@ fn prompt(out: &Out, state: &State, id: Value, params: &Value) {
     }
     let answer = if session.mode == "plan" {
         format!("**{who}** is in plan mode: here is the plan above. Switch the mode to act on it.")
-    } else if lower.contains("long") {
+    } else if lower.contains("write something long") {
         (1..=10)
             .map(|n| format!("{n}. {who} keeps writing so there is time to stop it.\n"))
             .collect()
     } else {
         format!(
             "**{who}** here. I looked at *{}*.\n\n```rust\nfn main() {{\n    println!(\"hello from {}\");\n}}\n```",
-            text.lines().next().unwrap_or(""),
-            state.name
+            subject, state.name
         )
     };
     let answer = if hierarchy && text.starts_with("[Atrium] New notices for you:") {
@@ -513,13 +633,19 @@ fn prompt(out: &Out, state: &State, id: Value, params: &Value) {
         if state.name == "claude" {
             usage["cost"] = json!({"amount": 0.042 * (turns + 1) as f64, "currency": "USD"});
         }
+        if std::env::var_os("ATRIUM_MOCK_ACP_RATE_LIMITS").is_some() {
+            usage["_meta"] = json!({"claude/rateLimit": {
+                "five_hour": {"utilization": 42.0, "resets_at": "2026-11-24T12:00:00Z"},
+                "seven_day": {"utilization": 17.0, "resets_at": "2026-11-30T00:00:00Z"}
+            }});
+        }
         usage
     });
     {
         let mut sessions = state.sessions.lock().unwrap();
         if let Some(s) = sessions.get_mut(&session_id) {
             if s.title.is_none() {
-                s.title = Some(text.lines().next().unwrap_or("").to_string());
+                s.title = Some(subject.clone());
                 update(
                     out,
                     &session_id,
@@ -535,9 +661,15 @@ fn prompt(out: &Out, state: &State, id: Value, params: &Value) {
         id,
         json!({
             "stopReason": if cancelled || stop.load(Ordering::Relaxed) { "cancelled" } else { "end_turn" },
-            // This turn's counts, as claude-agent-acp reports them.
-            "usage": {"inputTokens": 1_200, "cachedReadTokens": 14_800, "cachedWriteTokens": 900,
-                "outputTokens": 640, "totalTokens": 17_540},
+            // This turn's counts, as claude-agent-acp reports them. agy also
+            // reports thoughts separately, which T3 folds into output.
+            "usage": if state.name == "antigravity" {
+                json!({"inputTokens": 1_200, "cachedReadTokens": 14_800, "cachedWriteTokens": 900,
+                    "outputTokens": 640, "thoughtTokens": 300, "totalTokens": 17_840})
+            } else {
+                json!({"inputTokens": 1_200, "cachedReadTokens": 14_800, "cachedWriteTokens": 900,
+                    "outputTokens": 640, "totalTokens": 17_540})
+            },
         }),
     );
 }

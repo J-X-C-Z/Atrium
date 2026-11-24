@@ -86,41 +86,72 @@ pub fn config_options(result: &Value) -> Vec<ConfigOption> {
 pub const MODE_OPTION: &str = "__mode";
 
 fn config_option(option: &Value) -> Option<ConfigOption> {
-    if option["type"].as_str().is_some_and(|t| t != "select") {
-        return None;
-    }
-    let mut choices = Vec::new();
-    for entry in option["options"].as_array()? {
-        // Options may be grouped: `{ group, name, options: [...] }`.
-        if let Some(inner) = entry["options"].as_array() {
-            let group = opt_s(entry, "name").or_else(|| opt_s(entry, "group"));
-            for choice in inner {
-                choices.push(ConfigChoice {
-                    value: s(choice, "value"),
-                    name: s(choice, "name"),
-                    description: opt_s(choice, "description"),
-                    group: group.clone(),
-                });
-            }
-        } else {
-            choices.push(ConfigChoice {
-                value: s(entry, "value"),
-                name: s(entry, "name"),
-                description: opt_s(entry, "description"),
+    // T3's `ProviderOptionDescriptor` keeps both kinds: a boolean is a
+    // two-choice select over `true`/`false`.
+    let choices = match option["type"].as_str().unwrap_or("select") {
+        "boolean" => vec![
+            ConfigChoice {
+                value: "true".into(),
+                name: "On".into(),
+                description: None,
                 group: None,
-            });
+            },
+            ConfigChoice {
+                value: "false".into(),
+                name: "Off".into(),
+                description: None,
+                group: None,
+            },
+        ],
+        "select" => {
+            let mut choices = Vec::new();
+            for entry in option["options"].as_array().into_iter().flatten() {
+                // Options may be grouped: `{ group, name, options: [...] }`.
+                if let Some(inner) = entry["options"].as_array() {
+                    let group = opt_s(entry, "name").or_else(|| opt_s(entry, "group"));
+                    for choice in inner {
+                        choices.push(choice_of(choice, group.clone()));
+                    }
+                } else {
+                    choices.push(choice_of(entry, None));
+                }
+            }
+            choices
         }
-    }
+        _ => return None,
+    };
+    let current = match &option["currentValue"] {
+        // An empty (unset) value stays empty: T3's `_t3/empty`, applied back
+        // as "". It must not become a literal `null`/`"null"` selection.
+        Value::Null => String::new(),
+        Value::String(value) => value.clone(),
+        other => other.to_string(),
+    };
     Some(ConfigOption {
         id: s(option, "id"),
         name: s(option, "name"),
         category: opt_s(option, "category"),
-        current: match &option["currentValue"] {
-            Value::String(value) => value.clone(),
-            other => other.to_string(),
-        },
+        current,
         choices,
     })
+}
+
+/// One select choice, flattening grouped entries as T3's
+/// `flattenSelectChoices` does.
+fn choice_of(choice: &Value, group: Option<String>) -> ConfigChoice {
+    ConfigChoice {
+        value: s(choice, "value"),
+        name: {
+            let name = s(choice, "name");
+            if name.is_empty() {
+                s(choice, "value")
+            } else {
+                name
+            }
+        },
+        description: opt_s(choice, "description"),
+        group,
+    }
 }
 
 /// An ACP `SessionInfo` as a sidebar entry.
@@ -188,6 +219,14 @@ impl Translator {
     /// Remembers a session's settings, so mode updates can patch them.
     pub fn set_options(&mut self, session: &str, options: Vec<ConfigOption>) {
         self.session(session).options = options;
+    }
+
+    /// The session's latest settings, after `set_option` or a mode update.
+    pub fn options(&self, session: &str) -> Vec<ConfigOption> {
+        self.sessions
+            .get(session)
+            .map(|state| state.options.clone())
+            .unwrap_or_default()
     }
 
     pub fn active_turn(&self, session: &str) -> Option<&str> {

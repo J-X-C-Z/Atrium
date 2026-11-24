@@ -1,0 +1,18 @@
+{
+  "name": "12-acp-subagent-tool",
+  "kind": "acp-adapter",
+  "provider": "mockacp",
+  "mock_name": "antigravity",
+  "flavor": "antigravity",
+  "model": "default",
+  "t3": "skip: T3 reads Antigravity's child work from the agent's session database, which the mock does not write; the wire-level invoke_subagent tool call is asserted here",
+  "actions": [
+    {"op": "turn", "text": "spawn a subagent"}
+  ],
+  "expect": {
+    "final_status": "completed",
+    "stream_contains": [
+      {"kind": "adapter.usage", "hasSubagents": true}
+    ]
+  }
+}

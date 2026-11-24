@@ -7,6 +7,12 @@ use std::{
     thread,
 };
 
+/// The line `agy acp` writes when it wants a browser sign-in (T3's
+/// `ANTIGRAVITY_AUTH_STDOUT_PREFIX`), and the marker its browser helper
+/// writes on stderr (`ANTIGRAVITY_AUTH_BROWSER_MARKER`).
+const AUTH_STDOUT_PREFIX: &str = "Open the following link to authenticate the ACP server: ";
+const AUTH_BROWSER_MARKER: &str = "__T3_ANTIGRAVITY_AUTH_URL__";
+
 use agent_rpc::{Connection, Incoming, RpcError, process};
 use anyhow::{Context as _, Result, anyhow};
 use atrium_core::{AgentEvent, ApprovalDecision, ConfigOption, McpServer, RequestId, ThreadMeta};
@@ -41,6 +47,12 @@ pub struct AgentInfo {
     /// `session/resume`: reopening continues without replaying history.
     pub resume_session: bool,
     pub images: bool,
+    /// The agent embeds text files as `resource` blocks.
+    pub embedded_context: bool,
+    /// The agent takes audio attachments as `audio` blocks.
+    pub audio: bool,
+    /// `logout`: the agent can clear its own stored credentials.
+    pub logout: bool,
     /// Prompts may be sent while one runs (Claude Code queues or steers them).
     pub steering: bool,
     /// `(id, name, description)` of each way to sign in.
@@ -52,6 +64,17 @@ pub struct AgentInfo {
 pub struct SessionStart {
     pub session_id: String,
     pub options: Vec<ConfigOption>,
+}
+
+/// One host file to send with a prompt. The adapter resolves a contract
+/// attachment id to this path; the client decides the ACP block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromptAttachment {
+    pub path: PathBuf,
+    pub name: String,
+    pub mime_type: String,
+    /// The contract said `image`; the agent may still refuse non-image MIME.
+    pub image: bool,
 }
 
 /// Reliable delivery evidence from a completed prompt RPC. Errors cannot prove
@@ -66,6 +89,18 @@ pub enum PromptDelivery {
 pub struct PromptOutcome {
     pub events: Vec<AgentEvent>,
     pub delivery: PromptDelivery,
+    /// The prompt response's `usage` object, when the agent reported one. The
+    /// events already carry the folded transcript view; an adapter that keeps
+    /// per-turn usage (T3's `TurnTokenUsage`) reads it here.
+    pub usage: Option<Value>,
+}
+
+/// A prompt's wire outcome, before the translator closes the turn.
+pub struct PromptParts {
+    pub result: Result<String, String>,
+    pub usage: Option<Value>,
+    pub delivery: PromptDelivery,
+    pub limits: Option<atrium_core::RateLimits>,
 }
 
 fn prompt_delivery(result: &std::result::Result<Value, RpcError>) -> PromptDelivery {
@@ -90,6 +125,42 @@ fn prompt_delivery(result: &std::result::Result<Value, RpcError>) -> PromptDeliv
 /// A permission option: `(option id, kind)`, kind such as `allow_once`.
 type PermissionOption = (String, String);
 
+/// A request id as the map keys it: a JSON string by its text, anything else
+/// by its JSON text, so `"100"` and `100` name the same pending request.
+fn permission_key(id: &RequestId) -> String {
+    match id {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// A sign-in URL on an agent's stderr: either the plain agy line or the
+/// browser helper's JSON-string marker.
+fn auth_url_in_line(line: &str) -> Option<String> {
+    let line = line.trim_end();
+    if let Some(rest) = line.strip_prefix(AUTH_STDOUT_PREFIX) {
+        return Some(rest.trim().to_string()).filter(|url| !url.is_empty());
+    }
+    if let Some(rest) = line.strip_prefix(AUTH_BROWSER_MARKER) {
+        return serde_json::from_str::<String>(rest.trim())
+            .ok()
+            .filter(|url| !url.is_empty());
+    }
+    None
+}
+
+/// What a pending `session/request_permission` carried, kept until the
+/// approval UI answers it. The raw params let a flavor recognize native
+/// questions (which share the method) without re-parsing the notification.
+#[derive(Clone, Default)]
+struct PendingPermission {
+    /// The id exactly as the agent sent it. A host that carries the id as
+    /// text (the engine's runtime request id) still answers the wire id.
+    id: Value,
+    options: Vec<PermissionOption>,
+    params: Value,
+}
+
 struct ProcessGuard(Mutex<Option<Child>>);
 
 impl Drop for ProcessGuard {
@@ -108,11 +179,18 @@ pub struct AcpClient {
     /// Keeps the agent alive while a clone remains: the child process, or
     /// a process on another device.
     _process: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    /// The local child, when this client spawned one, so a host can stop it
+    /// instead of waiting for the last clone to drop.
+    process: Option<Arc<ProcessGuard>>,
     pub backend: String,
     pub info: AgentInfo,
     translator: Arc<Mutex<Translator>>,
-    /// The options each pending permission request offered, by request id.
-    permissions: Arc<Mutex<HashMap<String, Vec<PermissionOption>>>>,
+    /// The options and raw params each pending permission request offered, by
+    /// request id.
+    permissions: Arc<Mutex<HashMap<String, PendingPermission>>>,
+    /// Sign-in URLs the agent announced on stderr, oldest first. The native
+    /// process performs the exchange; Atrium only forwards the link.
+    auth_urls: Arc<Mutex<Vec<String>>>,
 }
 
 impl AcpClient {
@@ -132,20 +210,43 @@ impl AcpClient {
         let stdout = child.stdout.take().context("no stdout")?;
         let stderr = child.stderr.take().context("no stderr")?;
         let backend = config.backend.clone();
+        let auth_urls = Arc::new(Mutex::new(Vec::new()));
+        let stderr_urls = auth_urls.clone();
         thread::Builder::new()
             .name(format!("{backend}-stderr"))
             .spawn(move || {
                 for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                     log::debug!("{backend} stderr: {line}");
+                    if let Some(url) = auth_url_in_line(&line)
+                        && let Ok(mut urls) = stderr_urls.lock()
+                    {
+                        urls.push(url);
+                    }
                 }
             })?;
-        Self::over(
+        let guard = Arc::new(ProcessGuard(Mutex::new(Some(child))));
+        let (mut client, incoming) = Self::over(
             config.backend,
             BufReader::new(stdout),
             stdin,
-            Some(Arc::new(ProcessGuard(Mutex::new(Some(child))))),
+            Some(guard.clone() as Arc<dyn std::any::Any + Send + Sync>),
         )
-        .await
+        .await?;
+        client.process = Some(guard);
+        client.auth_urls = auth_urls;
+        Ok((client, incoming))
+    }
+
+    /// Stops a locally spawned agent. A process reached over other pipes is
+    /// owned elsewhere and is left alone.
+    pub fn stop(&self) {
+        if let Some(guard) = &self.process {
+            let child = guard.0.lock().ok().and_then(|mut child| child.take());
+            if let Some(mut child) = child {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
     }
 
     /// An agent reached through other pipes, such as a process an
@@ -161,10 +262,12 @@ impl AcpClient {
         let mut client = Self {
             connection,
             _process: keep,
+            process: None,
             backend: backend.clone(),
             info: AgentInfo::default(),
             translator: Arc::new(Mutex::new(Translator::new(backend))),
             permissions: Arc::default(),
+            auth_urls: Arc::default(),
         };
         client.initialize().await?;
         Ok((client, events))
@@ -199,6 +302,13 @@ impl AcpClient {
             images: caps["promptCapabilities"]["image"]
                 .as_bool()
                 .unwrap_or(false),
+            embedded_context: caps["promptCapabilities"]["embeddedContext"]
+                .as_bool()
+                .unwrap_or(false),
+            audio: caps["promptCapabilities"]["audio"]
+                .as_bool()
+                .unwrap_or(false),
+            logout: !caps["auth"]["logout"].is_null(),
             steering: result["_meta"]["steering"]["supported"]
                 .as_bool()
                 .unwrap_or(false)
@@ -247,10 +357,14 @@ impl AcpClient {
                             .collect()
                     })
                     .unwrap_or_default();
-                self.permissions
-                    .lock()
-                    .expect("permissions")
-                    .insert(id.to_string(), options);
+                self.permissions.lock().expect("permissions").insert(
+                    permission_key(&id),
+                    PendingPermission {
+                        id: id.clone(),
+                        options,
+                        params: params.clone(),
+                    },
+                );
                 vec![
                     self.translator
                         .lock()
@@ -279,11 +393,11 @@ impl AcpClient {
         request_id: RequestId,
         decision: ApprovalDecision,
     ) -> Result<()> {
-        let options = self
+        let pending = self
             .permissions
             .lock()
             .expect("permissions")
-            .remove(&request_id.to_string())
+            .remove(&permission_key(&request_id))
             .unwrap_or_default();
         let wanted: &[&str] = match decision {
             ApprovalDecision::Accept => &["allow_once", "allow_always"],
@@ -293,15 +407,79 @@ impl AcpClient {
         };
         let picked = wanted
             .iter()
-            .find_map(|kind| options.iter().find(|(_, k)| k == kind))
+            .find_map(|kind| pending.options.iter().find(|(_, k)| k == kind))
             .map(|(id, _)| id.clone());
         let outcome = match picked {
             Some(option) => json!({ "outcome": "selected", "optionId": option }),
             None => json!({ "outcome": "cancelled" }),
         };
-        self.connection
-            .respond(request_id, json!({ "outcome": outcome }))?;
+        let id = if pending.id.is_null() {
+            request_id
+        } else {
+            pending.id
+        };
+        self.connection.respond(id, json!({ "outcome": outcome }))?;
         Ok(())
+    }
+
+    /// Answers a permission request with an exact native option id. Native
+    /// questions (Antigravity's `interaction_` prompt) are not approvals, so
+    /// their selected option is the answer; an unknown id cancels.
+    pub fn answer_permission_option(&self, request_id: RequestId, option_id: &str) -> Result<()> {
+        let pending = self
+            .permissions
+            .lock()
+            .expect("permissions")
+            .remove(&permission_key(&request_id))
+            .unwrap_or_default();
+        let known = pending
+            .options
+            .iter()
+            .any(|(id, _)| id == option_id)
+            .then(|| option_id.to_string());
+        let outcome = match known {
+            Some(option) => json!({ "outcome": "selected", "optionId": option }),
+            None => json!({ "outcome": "cancelled" }),
+        };
+        let id = if pending.id.is_null() {
+            request_id
+        } else {
+            pending.id
+        };
+        self.connection.respond(id, json!({ "outcome": outcome }))?;
+        Ok(())
+    }
+
+    /// The raw params of a pending permission request, for a flavor that
+    /// recognizes native questions sharing the method. `None` once answered.
+    pub fn permission_params(&self, request_id: &RequestId) -> Option<Value> {
+        self.permissions
+            .lock()
+            .expect("permissions")
+            .get(&permission_key(request_id))
+            .map(|pending| pending.params.clone())
+    }
+
+    /// The option ids and kinds a pending permission offered.
+    pub fn permission_options(&self, request_id: &RequestId) -> Vec<(String, String)> {
+        self.permissions
+            .lock()
+            .expect("permissions")
+            .get(&permission_key(request_id))
+            .map(|pending| pending.options.clone())
+            .unwrap_or_default()
+    }
+
+    /// How many permission requests are awaiting an answer. A prompt is not
+    /// idle while one is open, so the inactivity watchdog must not fire.
+    pub fn pending_permission_count(&self) -> usize {
+        self.permissions.lock().expect("permissions").len()
+    }
+
+    /// Sign-in URLs the agent announced, draining them. The native process
+    /// owns the token exchange and storage; nothing here reads a credential.
+    pub fn take_auth_urls(&self) -> Vec<String> {
+        std::mem::take(&mut *self.auth_urls.lock().expect("auth urls"))
     }
 
     pub async fn new_session(&self, cwd: &Path) -> Result<SessionStart> {
@@ -416,6 +594,14 @@ impl AcpClient {
             .map(str::to_owned)
     }
 
+    /// The session's latest settings (as last set or patched).
+    pub fn session_options(&self, session_id: &str) -> Vec<ConfigOption> {
+        self.translator
+            .lock()
+            .expect("translator")
+            .options(session_id)
+    }
+
     /// Sends a prompt and waits for the turn to end; updates stream meanwhile.
     /// Returns the events that close the turn.
     pub async fn prompt(
@@ -439,17 +625,106 @@ impl AcpClient {
         images: &[PathBuf],
         mentions: &[PathBuf],
     ) -> PromptOutcome {
-        let mut blocks = vec![json!({ "type": "text", "text": text })];
-        for path in images {
-            match image_block(path) {
-                Ok(block) if self.info.images => blocks.push(block),
-                Ok(_) => blocks.push(link_block(path)),
-                Err(error) => log::warn!("could not attach {}: {error:#}", path.display()),
+        let parts = self.prompt_parts(session_id, text, images, mentions).await;
+        let mut events = self.finish_prompt(session_id, parts.result, parts.usage.as_ref());
+        events.extend(parts.limits.map(AgentEvent::RateLimitsUpdated));
+        PromptOutcome {
+            events,
+            delivery: parts.delivery,
+            usage: parts.usage,
+        }
+    }
+
+    /// Sends a prompt and returns its outcome without closing the turn.
+    ///
+    /// A host that owns the `session/update` stream closes the turn itself
+    /// with [`Self::finish_prompt`] after the stream is quiet, so trailing
+    /// updates cannot arrive after `TurnCompleted`.
+    pub async fn prompt_parts(
+        &self,
+        session_id: &str,
+        text: &str,
+        images: &[PathBuf],
+        mentions: &[PathBuf],
+    ) -> PromptParts {
+        let attachments: Vec<PromptAttachment> = images
+            .iter()
+            .map(|path| prompt_attachment(path, true))
+            .chain(mentions.iter().map(|path| prompt_attachment(path, false)))
+            .collect();
+        let blocks = match self.prompt_blocks_for(text, &attachments) {
+            Ok(blocks) => blocks,
+            Err(error) => {
+                return PromptParts {
+                    result: Err(error.to_string()),
+                    usage: None,
+                    delivery: PromptDelivery::Uncertain {
+                        error: RpcError::Decode(error.to_string()),
+                    },
+                    limits: None,
+                };
+            }
+        };
+        self.prompt_with_blocks(session_id, blocks).await
+    }
+
+    /// The blocks T3's ACP adapter sends: the text with a saved-path note for
+    /// every attachment, then image blocks for supported images. Files ride
+    /// on their path note, as T3's `providerMessageTextWithAttachmentPaths`
+    /// does; a flavor that embeds them builds its own blocks.
+    pub fn prompt_blocks_for(
+        &self,
+        text: &str,
+        attachments: &[PromptAttachment],
+    ) -> Result<Vec<Value>> {
+        let mut text = text.to_string();
+        for attachment in attachments {
+            let kind = if attachment.image { "image" } else { "file" };
+            let note = format!(
+                "[Attached {kind} \"{}\" is saved at: {}]",
+                attachment.name,
+                attachment.path.display()
+            );
+            if text.is_empty() {
+                text = note;
+            } else {
+                text.push_str("\n\n");
+                text.push_str(&note);
             }
         }
-        for path in mentions {
-            blocks.push(link_block(path));
+        let mut blocks = Vec::new();
+        if !text.is_empty() {
+            blocks.push(json!({ "type": "text", "text": text }));
         }
+        for attachment in attachments.iter().filter(|attachment| attachment.image) {
+            let mime = attachment.mime_type.to_ascii_lowercase();
+            // T3's `isProviderNativeImageAttachment`.
+            if !matches!(
+                mime.as_str(),
+                "image/gif" | "image/jpeg" | "image/png" | "image/webp"
+            ) {
+                continue;
+            }
+            if !self.info.images {
+                return Err(anyhow!("ACP driver did not negotiate image prompt support"));
+            }
+            let bytes = std::fs::read(&attachment.path)
+                .with_context(|| format!("Failed to read attachment '{}'", attachment.name))?;
+            blocks.push(json!({
+                "type": "image",
+                "mimeType": attachment.mime_type,
+                "data": base64::engine::general_purpose::STANDARD.encode(bytes),
+                "uri": format!("file://{}", attachment.path.display()),
+            }));
+        }
+        if blocks.is_empty() {
+            return Err(anyhow!("A turn requires text or supported attachments"));
+        }
+        Ok(blocks)
+    }
+
+    /// Sends already-built ACP prompt blocks and returns the wire outcome.
+    pub async fn prompt_with_blocks(&self, session_id: &str, blocks: Vec<Value>) -> PromptParts {
         let result = self
             .connection
             .request(
@@ -459,20 +734,36 @@ impl AcpClient {
             .await;
         let delivery = prompt_delivery(&result);
         let result = result.map_err(|e| self.explain(e).to_string());
-        let usage = result.as_ref().ok().map(|r| r["usage"].clone());
+        let usage = result
+            .as_ref()
+            .ok()
+            .map(|r| r["usage"].clone())
+            .filter(Value::is_object);
         let limits = result
             .as_ref()
             .ok()
             .and_then(atrium_core::parse_meta_limits);
         let result = result.map(|r| str_of(&r, "stopReason"));
-        let events = self.translator.lock().expect("translator").finish_prompt(
-            session_id,
+        PromptParts {
             result,
-            usage.as_ref(),
-        );
-        let mut events = events;
-        events.extend(limits.map(AgentEvent::RateLimitsUpdated));
-        PromptOutcome { events, delivery }
+            usage,
+            delivery,
+            limits,
+        }
+    }
+
+    /// Closes the session's running turn: `result` is the prompt's
+    /// `stopReason` or error.
+    pub fn finish_prompt(
+        &self,
+        session_id: &str,
+        result: Result<String, String>,
+        usage: Option<&Value>,
+    ) -> Vec<AgentEvent> {
+        self.translator
+            .lock()
+            .expect("translator")
+            .finish_prompt(session_id, result, usage)
     }
 
     /// Asks the running turn to stop; its prompt then ends as cancelled.
@@ -525,6 +816,19 @@ impl AcpClient {
         Ok(())
     }
 
+    /// Clears the agent's stored credentials through ACP `logout`. T3 only
+    /// offers this when the handshake advertised `auth.logout`.
+    pub async fn logout(&self) -> Result<()> {
+        if !self.info.logout {
+            return Err(anyhow!(
+                "{} does not support sign-out",
+                self.info.title_or(&self.backend)
+            ));
+        }
+        self.connection.request("logout", json!({})).await?;
+        Ok(())
+    }
+
     pub async fn close_session(&self, session_id: &str) -> Result<()> {
         self.connection
             .request("session/close", json!({ "sessionId": session_id }))
@@ -569,17 +873,22 @@ fn str_of(value: &Value, key: &str) -> String {
     value[key].as_str().unwrap_or_default().to_string()
 }
 
-fn link_block(path: &Path) -> Value {
+/// A path-only prompt attachment, with the MIME its extension implies.
+fn prompt_attachment(path: &Path, image: bool) -> PromptAttachment {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| path.display().to_string());
-    json!({ "type": "resource_link", "name": name, "uri": format!("file://{}", path.display()) })
+    PromptAttachment {
+        path: path.to_path_buf(),
+        name,
+        mime_type: mime_for_path(path).to_string(),
+        image,
+    }
 }
 
-fn image_block(path: &Path) -> Result<Value> {
-    let bytes = std::fs::read(path)?;
-    let mime = match path
+fn mime_for_path(path: &Path) -> &'static str {
+    match path
         .extension()
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase)
@@ -588,14 +897,16 @@ fn image_block(path: &Path) -> Result<Value> {
         Some("jpg" | "jpeg") => "image/jpeg",
         Some("gif") => "image/gif",
         Some("webp") => "image/webp",
-        _ => "image/png",
-    };
-    Ok(json!({
-        "type": "image",
-        "mimeType": mime,
-        "data": base64::engine::general_purpose::STANDARD.encode(bytes),
-        "uri": format!("file://{}", path.display()),
-    }))
+        Some("bmp") => "image/bmp",
+        Some("txt" | "md" | "log") => "text/plain",
+        Some("json") => "application/json",
+        Some("pdf") => "application/pdf",
+        Some("mp3") => "audio/mpeg",
+        Some("wav") => "audio/wav",
+        Some("ogg") => "audio/ogg",
+        Some("png") => "image/png",
+        _ => "application/octet-stream",
+    }
 }
 
 #[cfg(test)]
@@ -656,10 +967,12 @@ mod prompt_outcome_tests {
                 let client = AcpClient {
                     connection,
                     _process: None,
+                    process: None,
                     backend: "test".into(),
                     info: AgentInfo::default(),
                     translator: Arc::new(Mutex::new(Translator::new("test"))),
                     permissions: Arc::default(),
+                    auth_urls: Arc::default(),
                 };
                 client.begin_turn("session");
                 let outcome = futures::executor::block_on(client.prompt_with_outcome(

@@ -1,0 +1,25 @@
+{
+  "name": "09-acp-antigravity-settings",
+  "kind": "acp-adapter",
+  "provider": "mockacp",
+  "mock_name": "antigravity",
+  "flavor": "antigravity",
+  "model": "default",
+  "t3": "skip: T3's CLI starts a provider through its registry and does not expose per-session config-option writes; the engine's option categories (mode/model/thought_level) are asserted here",
+  "actions": [
+    {"op": "settings", "model": "flash", "effort": "low"},
+    {"op": "skills"},
+    {"op": "config"},
+    {"op": "sign_in", "text": "oauth-personal"},
+    {"op": "turn", "text": "say hi"}
+  ],
+  "expect": {
+    "final_status": "completed",
+    "stream_contains": [
+      {"kind": "adapter.settings", "model": "flash"},
+      {"kind": "adapter.skills", "groups": 1},
+      {"kind": "adapter.config", "configIsObject": true, "originsIsObject": true},
+      {"kind": "adapter.signIn", "methods": 4}
+    ]
+  }
+}
