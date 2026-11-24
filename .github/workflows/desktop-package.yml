@@ -11,6 +11,17 @@ name: Native desktop packages
       - 'rust-toolchain.toml'
       - 'script/**'
       - '.github/workflows/desktop-package.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - 'third_party/ely-gpui-components/**'
+      - 'skills/atrium/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'script/**'
+      - '.github/workflows/desktop-package.yml'
   workflow_dispatch:
 
 permissions:

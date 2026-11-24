@@ -9,7 +9,7 @@ use std::{
     fs,
     io::{BufRead, BufReader, ErrorKind, Write},
     os::unix::net::UnixStream,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -220,7 +220,7 @@ fn exercise_notice_delivery(cx: &mut TestAppContext, rpc_error: bool, unattended
     }
 }
 
-fn assert_reopened_workspace_holds_notice(cx: &mut TestAppContext, root: &PathBuf) {
+fn assert_reopened_workspace_holds_notice(cx: &mut TestAppContext, root: &Path) {
     // A new entity and transport read the same temporary disk state via real
     // startup initialization. This is not a process crash or remote replay.
     let (client, mock) = UnixStream::pair().unwrap();
@@ -230,7 +230,7 @@ fn assert_reopened_workspace_holds_notice(cx: &mut TestAppContext, root: &PathBu
         .unwrap();
     let reopened = cx.new(|cx| {
         let mut ws = Workspace::with_settings(Settings {
-            projects: vec![root.clone()],
+            projects: vec![root.to_path_buf()],
             ..Default::default()
         });
         ws.client = Some(CodexClient::over(connection));
@@ -239,7 +239,7 @@ fn assert_reopened_workspace_holds_notice(cx: &mut TestAppContext, root: &PathBu
         ws.init_projects(cx);
         // Simulate a later wake trigger; a new scheduler has no old cooldown.
         ws.project_schedule
-            .test_queue_first_wake(root.clone(), "controller".into());
+            .test_queue_first_wake(root.to_path_buf(), "controller".into());
         ws
     });
     cx.run_until_parked();
@@ -247,7 +247,7 @@ fn assert_reopened_workspace_holds_notice(cx: &mut TestAppContext, root: &PathBu
     cx.run_until_parked();
     reopened.update(cx, |ws, _| {
         ws.project_schedule
-            .assert_test_wake_attempt_still_pending(root.clone(), "controller".into());
+            .assert_test_wake_attempt_still_pending(root.to_path_buf(), "controller".into());
     });
     let mut unexpected = String::new();
     match BufReader::new(mock).read_line(&mut unexpected) {
