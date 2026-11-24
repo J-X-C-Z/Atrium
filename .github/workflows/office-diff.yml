@@ -1,0 +1,61 @@
+name: Office vs LibreOffice
+
+# Side lane 35: compare Atrium's office layout with LibreOffice on a
+# generated corpus. Nightly and on demand; not on every pull request.
+"on":
+  workflow_dispatch:
+    inputs:
+      fail_under:
+        description: "Fail when a file scores below this (empty: never fail on score)"
+        required: false
+        default: ""
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  diff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: "0"
+      SAL_USE_VCLPLUGIN: svp
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install LibreOffice and fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libreoffice-writer libreoffice-calc libreoffice-impress \
+            fonts-noto-cjk fonts-noto-core fonts-liberation \
+            fonts-crosextra-carlito fonts-crosextra-caladea poppler-utils
+          soffice --version
+
+      - name: Build the tool
+        run: cargo build --locked -p office-diff
+
+      - name: Generate the corpus
+        run: python3 -I tools/office-diff/corpus/generate.py --out tools/office-diff/corpus/out
+
+      - name: Compare
+        shell: bash
+        run: |
+          threshold="${{ github.event.inputs.fail_under }}"
+          args=(--corpus tools/office-diff/corpus/out --report target/office-diff-report)
+          if [ -n "$threshold" ]; then
+            args+=(--fail-under "$threshold")
+          fi
+          ./target/debug/office-diff "${args[@]}"
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: office-diff-report
+          path: target/office-diff-report
+          if-no-files-found: warn

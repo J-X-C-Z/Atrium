@@ -62,7 +62,7 @@ do not mark it done from mocks.
 | 32 | ✓ done in #8. **Runtime seam** (`atrium-runtime`): the project layer talks to agents through one trait | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | — |
 | 33 | ✓ done in #14. **Team gaps**: apply member model/effort, pool workers through `pick`, persist the stand-in badge, stand-in on ACP limits without the autopilot | [`docs/parallel-lanes.md`](docs/parallel-lanes.md) | — |
 | 34 | **Soak and footprint**: hours-long headless runs with mocks, RSS/files/CPU over time, leak fixes, the same numbers for T3 | [`docs/parallel-lanes.md`](docs/parallel-lanes.md) | — |
-| 35 | **Office vs LibreOffice**: render a generated corpus both ways, per-page diff report, fix the worst differences | [`docs/parallel-lanes.md`](docs/parallel-lanes.md) | — |
+| 35 | ✓ done in #23 (LibreOffice comparison runs in the nightly CI job). **Office vs LibreOffice**: render a generated corpus both ways, per-page diff report, fix the worst differences | [`docs/parallel-lanes.md`](docs/parallel-lanes.md) | — |
 | 36 | ✓ done in #15. **Installers and updates**: dmg (signed when secrets exist), installer exe, AppImage/deb, node as a service, release workflow | [`docs/parallel-lanes.md`](docs/parallel-lanes.md) | — |
 | 37 | ✓ done in #11. **Small cleanups**: the `&PathBuf` warning, symlinked-path keys, CI on pushes to main | [`docs/parallel-lanes.md`](docs/parallel-lanes.md) | — |
 

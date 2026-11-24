@@ -10,3 +10,6 @@
 __pycache__/
 *.pyc
 /third_party/ely-gpui-components/target
+
+# office-diff generated corpus
+/tools/office-diff/corpus/out/

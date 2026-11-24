@@ -1207,3 +1207,35 @@ fn a_footnote_is_drawn_at_the_page_bottom_above_a_separator() {
             .any(|i| matches!(i, Item::Rule { .. }))
     );
 }
+
+#[test]
+fn table_cell_lines_do_not_snap_to_the_document_grid() {
+    // 20 pt text on a 15.6 pt grid would occupy two grid lines (31.2 pt) if
+    // the cell used the body's grid. Table rows size to their content.
+    let mut p = Para::new(1, ParaStyle::Normal, "字");
+    p.look = ParaLook {
+        line: LineSpacing::Auto(240),
+        snap_to_grid: true,
+        ..Default::default()
+    };
+    let table = Table {
+        id: 2,
+        rows: vec![vec![vec![Block::Paragraph(p)]]],
+        merged: Vec::new(),
+        look: TableLook::default(),
+    };
+    let mut sections = one_section(2000, 4000);
+    sections[0].page.line_pitch = Some(312);
+    let doc = looked(vec![Block::Table(table)], sections);
+    let out = layout(&doc, &FixedShaper);
+    let line = out
+        .lines
+        .iter()
+        .find(|line| !line.furniture)
+        .expect("a table line");
+    assert!(
+        line.height < 25.0,
+        "a cell line snapped to {} pt",
+        line.height
+    );
+}
