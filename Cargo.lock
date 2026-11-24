@@ -657,7 +657,9 @@ name = "atrium-engine"
 version = "0.1.0"
 dependencies = [
  "atrium-core",
+ "atrium-project",
  "atrium-runtime",
+ "base64 0.22.1",
  "jiff 0.2.46",
  "log",
  "rusqlite",

@@ -14,6 +14,8 @@
 //! * [`chat`] — `chatAttachment.ts`, `composerContext.ts`
 //! * [`provider`] — `providerPolicy.ts`, `providerInstance.ts`, `orchestrationV2.ts`
 //! * [`capabilities`] — `orchestrationV2.ts`
+//! * [`checkpoint`] — `orchestrationV2.ts` (checkpoint scope and record)
+//! * [`transfer`] — `orchestrationV2.ts` (context source points and transfers)
 //! * [`thread`] — `orchestrationV2.ts`, `threadTitle.ts`, `threadTags.ts`
 //! * [`run`] — `orchestrationV2.ts`
 //! * [`item`] — `orchestrationV2.ts`
@@ -26,8 +28,8 @@
 //!   browser profiles, keybindings and settings.
 //! * `OrchestrationV2Subagent` and `subagent.updated`; the subagent turn item
 //!   is ported, the projection record belongs with item 20.
-//! * Checkpoint scope/record and context handoff/transfer records and their
-//!   events (item 30). The checkpoint turn item and file summaries are ported.
+//! * Context handoff records and the checkpoint/context-transfer events; the
+//!   scope, checkpoint and transfer records are ported for item 27.
 //! * `ThreadGuestShare`, pull-request link/snapshot/stack and issue link
 //!   records; on the thread they travel as raw JSON so the wire shape stays
 //!   intact until their own modules land.
@@ -46,6 +48,7 @@
 pub mod base;
 pub mod capabilities;
 pub mod chat;
+pub mod checkpoint;
 pub mod command;
 pub mod event;
 pub mod item;
@@ -53,10 +56,12 @@ pub mod model;
 pub mod provider;
 pub mod run;
 pub mod thread;
+pub mod transfer;
 
 pub use base::*;
 pub use capabilities::*;
 pub use chat::*;
+pub use checkpoint::*;
 pub use command::*;
 pub use event::*;
 pub use item::*;
@@ -64,6 +69,7 @@ pub use model::*;
 pub use provider::*;
 pub use run::*;
 pub use thread::*;
+pub use transfer::*;
 
 // T3 type names, for callers reading the upstream file beside this module.
 pub type OrchestrationV2AppThread = AppThread;
