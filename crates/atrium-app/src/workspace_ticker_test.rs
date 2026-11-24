@@ -298,7 +298,8 @@ fn restart_resumes_with_project_mcp_and_reactivates_goal_before_wake(cx: &mut Te
     let (client, mut socket) = UnixStream::pair().unwrap();
     let (connection, _events) =
         Connection::new(BufReader::new(client.try_clone().unwrap()), client);
-    let root = dir.0.clone();
+    // Projects are keyed by their real path (on macOS /var is /private/var).
+    let root = dir.0.canonicalize().unwrap();
     let (sent, received) = mpsc::channel();
     let mock = thread::spawn(move || {
         socket
