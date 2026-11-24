@@ -12,6 +12,7 @@ members = [
     "crates/agent-rpc",
     "crates/codex-client",
     "crates/acp-client",
+    "crates/claude-client",
     "crates/atrium-project",
     "crates/atrium-office",
     "crates/atrium-layout",
@@ -54,6 +55,7 @@ atrium-sync = { path = "crates/atrium-sync" }
 codex-client = { path = "crates/codex-client" }
 agent-rpc = { path = "crates/agent-rpc" }
 acp-client = { path = "crates/acp-client" }
+claude-client = { path = "crates/claude-client" }
 atrium-project = { path = "crates/atrium-project" }
 atrium-office = { path = "crates/atrium-office" }
 atrium-layout = { path = "crates/atrium-layout" }
