@@ -13,7 +13,7 @@ Keep this table current when a module lands or moves.
 | `src/orchestration` | `apps/server/src/orchestration-v2/Orchestrator.ts`, `EventSink.ts`, `EffectWorker.ts`, `runtimeLayer.ts` | 25 |
 | `src/providers` | `packages/provider-core` (`ProviderAdapter.ts`, `selectionTransition.ts`, `driver.ts`, `client.ts`), `apps/server/src/orchestration-v2/ProviderAdapterRegistry.ts`, `apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts`, `apps/server/src/provider/CodexMcpElicitation.ts`, `packages/effect-codex-app-server` (wire names only; the transport is Atrium's `codex-client`) | 22, 23, 24 |
 | `src/runtime` | Atrium seam over `ProviderAdapterV2` (`atrium-runtime::AgentRuntime`); no single T3 file | 22 |
-| `src/usage` | `orchestration-v2/UsageLimitRecoveryWorker.ts`, limit schemas | 26 |
+| `src/usage` | `packages/contracts/src/providerUsageLimits.ts`, `packages/provider-core/src/server/usageLimits.ts`, `apps/server/src/provider/{claude,codex}UsageLimits.ts`, `apps/server/src/provider/CodexManagedErrors.ts`, `apps/server/src/orchestration-v2/{UsageLimitRecoveryWorker,IdleCompaction}.ts`, `apps/server/src/orchestration-v2/Adapters/{Claude,Codex}AdapterV2.ts` (limit classification), `packages/client-runtime/src/state/contextWindow.ts`, `packages/shared/src/claudeCompaction.ts` | 26 |
 | `src/checkpoint` | `apps/server/src/checkpointing`, `orchestration-v2/Checkpoint*Service.ts` | 27 |
 | `src/mcp` | `packages/contracts/src/orchestratorMcp.ts`, `apps/server/src/mcp` | 28 |
 

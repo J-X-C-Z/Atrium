@@ -768,6 +768,7 @@ const ZH: &[(&str, &str)] = &[
     ("Finish signing in in your browser…", "请在浏览器中完成登录…"),
     ("Goal complete", "目标已完成"),
     ("Usage limit reached. It resets soon; see Usage.", "已达用量上限，很快会重置；详见用量。"),
+    ("Continued after the usage limit reset.", "额度已重置，已继续上次的对话。"),
     ("Signed in to ChatGPT", "已登录 ChatGPT"),
     ("Sign-in failed: {error}", "登录失败：{error}"),
     ("unknown error", "未知错误"),

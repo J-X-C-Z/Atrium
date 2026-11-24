@@ -14,7 +14,7 @@ use codex_client::{CodexClient, Incoming, translate};
 use futures::StreamExt;
 use gpui::{Context, Task};
 
-use super::{AcpAgent, AgentStatus, Notice, Workspace};
+use super::{AcpAgent, AgentStatus, Notice, Workspace, usage};
 use crate::agents::{self, AgentProfile};
 
 /// Whether a device answers.
@@ -241,12 +241,16 @@ impl Workspace {
                             }
                         })
                         .await;
-                    let Some(limits) = usage.and_then(|v| atrium_core::parse_oauth_usage(&v))
-                    else {
+                    let Some(value) = usage else {
                         continue;
                     };
+                    let checked_at = usage::iso_at(usage::now_ms()).unwrap_or_default();
+                    let probe = usage::claude_oauth_probe(&value, &checked_at);
+                    if probe.limits.unavailable.is_some() {
+                        continue;
+                    }
                     if this
-                        .update(cx, |ws, cx| ws.note_limits(&backend, limits, cx))
+                        .update(cx, |ws, cx| ws.note_claude_probe(&backend, probe, cx))
                         .is_err()
                     {
                         return;

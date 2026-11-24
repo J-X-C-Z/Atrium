@@ -340,6 +340,9 @@ impl Workspace {
     /// Every couple of seconds in a project: read the atrium again if it
     /// changed, and open workstream chats whose agent has come up.
     fn tick_project(&mut self, cx: &mut Context<Self>) {
+        // Continue threads whose usage limit has reset, whether they are
+        // chats, team streams or autopilot streams.
+        self.tick_usage_recovery(cx);
         self.tick_pr_badges(cx);
         let roots: Vec<_> = self.projects.iter().map(|p| p.root.clone()).collect();
         for root in roots {
@@ -1343,9 +1346,15 @@ impl Workspace {
         self.show_overview(cx);
     }
 
-    /// Sends `composed` to a thread whatever the main column shows.
-    pub fn send_to_thread(&mut self, thread: String, composed: Composed, cx: &mut Context<Self>) {
-        self.submit_to_thread(thread, composed, cx);
+    /// Sends `composed` to a thread whatever the main column shows. Returns
+    /// whether the turn was submitted.
+    pub fn send_to_thread(
+        &mut self,
+        thread: String,
+        composed: Composed,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.submit_to_thread(thread, composed, cx)
     }
 
     pub(super) fn submit_to_thread(

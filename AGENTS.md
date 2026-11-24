@@ -53,7 +53,7 @@ do not mark it done from mocks.
 | 23 | **Claude adapter**: `claude-client` over the CLI's streaming JSON (permissions, subagents, tasks, skills, usage), `mock-claude` | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | 22 |
 | 24 | **ACP adapter and Antigravity**: generic ACP rules, Antigravity sign-in, usage, skills, child work | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | 22 |
 | 25 | **Turn orchestration**: queue vs steer, interrupt gating, selection transitions, provider switch, subagent bookkeeping | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | 22 |
-| 26 | **Usage, limits, context**: usage readers, limit classification, continue after reset, context budget, auto-compaction | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | 22 |
+| 26 | ✓ done in #12. **Usage, limits, context**: usage readers, limit classification, continue after reset, context budget, auto-compaction | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | 22 |
 | 27 | **Checkpoints, rewind, fork** | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | 22 |
 | 28 | **MCP orchestration toolkit** merged with the `atrium` MCP server | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | 25 |
 | 29 | **Engine on the node**: threads live on the device that runs them and continue from any device; heartbeat and wake probe | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | 21, 22 |
