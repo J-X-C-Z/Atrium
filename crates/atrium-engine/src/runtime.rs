@@ -466,7 +466,9 @@ impl AgentRuntime for CodexEngineRuntime {
     }
 
     fn limits(&self, _agent: &str) -> Result<Option<RateLimits>, RuntimeError> {
-        // The usage and limits reader is item 26.
+        // The typed seam is `ProviderSessionRuntime::usage_limits` (item 26).
+        // Neither the Codex adapter (item 22) nor the Claude adapter (item 23)
+        // implements it yet, so there is no report to project to `RateLimits`.
         Ok(None)
     }
 }

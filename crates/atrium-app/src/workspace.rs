@@ -12,6 +12,7 @@ use atrium_core::{
     Account, AgentCommand, AgentEvent, ApprovalDecision, ConfigOption, Goal, GoalStatus, Item,
     RateLimits, RequestId, ThreadMeta, Transcript, TurnStatus,
 };
+use atrium_engine::usage::{ClaudeUsageProbe, ProviderUsageLimits, UsageLimitsUpdate};
 use atrium_runtime::{AgentRuntime, Delivery, EventSink, TurnInput};
 use codex_client::{
     AccessMode, Answers, CodexClient, CodexConfig, Incoming, ModelInfo, Prediction, ReviewTarget,
@@ -59,6 +60,8 @@ mod sync_view;
 pub mod team;
 #[path = "workspace_updates.rs"]
 mod updates;
+#[path = "usage.rs"]
+pub mod usage;
 #[path = "workspace_workflow_runner.rs"]
 mod workflow_runner;
 #[path = "workspace_workflows.rs"]
@@ -260,8 +263,11 @@ pub struct Workspace {
     /// Threads with memory switched off.
     pub memory_off: HashSet<String>,
     pub account: Option<Account>,
-    /// Plan usage by backend id: `codex`, `codex@studio`, `claude`, ….
-    pub rate_limits: HashMap<String, RateLimits>,
+    /// Plan usage by backend id: `codex`, `codex@studio`, `claude`, …. The
+    /// engine report is canonical; `limits_for` projects it for old views.
+    pub usage: usage::UsageStore,
+    /// Continue threads whose usage limit has reset, persisted across restarts.
+    usage_recovery: usage::UsageRecovery,
     /// Chats folded into memory, and whether memory is ready.
     pub memory: Option<(u64, bool)>,
     /// A ChatGPT sign-in in progress.
@@ -326,6 +332,7 @@ impl EventEmitter<Fill> for Workspace {}
 impl Workspace {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let mut workspace = Self::with_settings(Settings::load());
+        workspace.usage_recovery = usage::UsageRecovery::from_env();
         workspace.connect(cx);
         workspace.init_agents(cx);
         workspace.init_projects(cx);
@@ -401,7 +408,8 @@ impl Workspace {
             goals: HashMap::new(),
             memory_off: HashSet::new(),
             account: None,
-            rate_limits: HashMap::new(),
+            usage: usage::UsageStore::default(),
+            usage_recovery: usage::UsageRecovery::disabled(),
             memory: None,
             login: None,
             editing: None,
@@ -567,9 +575,49 @@ impl Workspace {
         self.refresh_account(cx);
     }
 
-    /// The plan usage of `backend`'s account, when known.
+    /// The plan usage of `backend`'s account, when known. This is the legacy
+    /// projection of the engine report, kept for the existing views.
     pub fn limits_for(&self, backend: &str) -> Option<&RateLimits> {
-        self.rate_limits.get(backend)
+        self.usage.limits_for(backend)
+    }
+
+    /// The canonical engine usage report of `backend`'s account.
+    #[allow(dead_code)] // The typed read API is for item 30's UI.
+    pub fn usage_report(&self, backend: &str) -> Option<&ProviderUsageLimits> {
+        self.usage.report(backend)
+    }
+
+    /// The usage banner and every window of every agent and device, for the
+    /// UI. `now` is data so the banner can hide a reset that has passed.
+    #[allow(dead_code)] // The typed read API is for item 30's UI.
+    pub fn usage_overview(&self, now_ms: i64) -> usage::UsageOverview {
+        self.usage.overview(Some(self.view_backend()), now_ms)
+    }
+
+    /// [`Self::usage_overview`] with the clock read once.
+    #[allow(dead_code)] // The typed read API is for item 30's UI.
+    pub fn usage_overview_now(&self) -> usage::UsageOverview {
+        self.usage_overview(usage::now_ms())
+    }
+
+    /// A thread's context window (used/total) and whether to offer a
+    /// compaction. `now` is data for the idle decision.
+    #[allow(dead_code)] // The typed read API is for item 30's UI.
+    pub fn context_window(&self, thread_id: &str, now_ms: i64) -> Option<usage::ContextWindowView> {
+        let tokens = self.transcripts.get(thread_id)?.usage()?;
+        let updated_at_ms = self
+            .threads
+            .iter()
+            .find(|thread| thread.id == thread_id)
+            .map(|thread| thread.updated_at.saturating_mul(1000))
+            .unwrap_or(now_ms);
+        usage::context_view(self.backend_of(thread_id), tokens, updated_at_ms, now_ms)
+    }
+
+    /// [`Self::context_window`] with the clock read once.
+    #[allow(dead_code)] // The typed read API is for item 30's UI.
+    pub fn context_window_now(&self, thread_id: &str) -> Option<usage::ContextWindowView> {
+        self.context_window(thread_id, usage::now_ms())
     }
 
     /// Merges a usage update for `backend`, tells the team when a limit is
@@ -580,23 +628,122 @@ impl Workspace {
         update: RateLimits,
         cx: &mut Context<Self>,
     ) {
-        let limits = self.rate_limits.entry(backend.to_string()).or_default();
-        let was_reached = limits.reached;
-        limits.merge(update);
-        let reached = limits.reached;
-        let resets_at = [limits.primary, limits.secondary]
-            .into_iter()
-            .flatten()
-            .filter(|w| w.used_percent >= 100.0 || reached)
-            .filter_map(|w| w.resets_at)
-            .max();
-        self.team_limit(backend, reached, resets_at);
-        if reached && !was_reached {
+        let checked_at = usage::iso_at(usage::now_ms()).unwrap_or_default();
+        let effects = self.usage.remember_limits(backend, update, &checked_at);
+        self.apply_limit_effects(backend, effects, cx);
+    }
+
+    /// A whole report from an engine reader (Claude's OAuth probe, or the
+    /// adapter seam when one implements it).
+    #[allow(dead_code)] // For the adapter seam once Codex/Claude implement it.
+    pub(super) fn note_usage_report(
+        &mut self,
+        backend: &str,
+        report: ProviderUsageLimits,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(effects) = self.usage.observe_probe(backend, report) {
+            self.apply_limit_effects(backend, effects, cx);
+        }
+    }
+
+    /// A Claude probe, carrying the bucket names its streamed events use.
+    pub(super) fn note_claude_probe(
+        &mut self,
+        backend: &str,
+        probe: ClaudeUsageProbe,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(effects) = self.usage.observe_claude_probe(backend, probe) {
+            self.apply_limit_effects(backend, effects, cx);
+        }
+    }
+
+    /// A sparse window update (an agent's streamed rate-limit event).
+    #[allow(dead_code)] // For the adapter seam once Codex/Claude implement it.
+    pub(super) fn note_usage_update(
+        &mut self,
+        backend: &str,
+        update: &UsageLimitsUpdate,
+        cx: &mut Context<Self>,
+    ) {
+        let checked_at = usage::iso_at(usage::now_ms()).unwrap_or_default();
+        if let Some(effects) = self.usage.observe_update(backend, update, &checked_at) {
+            self.apply_limit_effects(backend, effects, cx);
+        }
+    }
+
+    fn apply_limit_effects(
+        &mut self,
+        backend: &str,
+        effects: usage::LimitEffects,
+        cx: &mut Context<Self>,
+    ) {
+        self.team_limit(backend, effects.reached, effects.resets_at);
+        if effects.reached && !effects.was_reached {
             cx.emit(Notice::Error(
                 t("Usage limit reached. It resets soon; see Usage.").into(),
             ));
         }
         cx.notify();
+    }
+
+    /// A turn failed saying a usage limit was hit: persist the reset so the
+    /// ticker can continue the thread after it passes.
+    fn note_usage_limit_failure(&mut self, thread_id: &str, turn_id: &str, error: &str) {
+        if !atrium_team::quota::is_limit_message(error) {
+            return;
+        }
+        let now = usage::now_ms();
+        let backend = self.backend_of(thread_id).to_string();
+        let Some(reset_at) = self.usage.usage_limit_reset_at(&backend, now) else {
+            log::info!("usage recovery: {thread_id} failed on a limit but no reset is known");
+            return;
+        };
+        if usage::parse_ms(&reset_at).is_none_or(|reset| reset <= now) {
+            return;
+        }
+        let armed_at = usage::iso_at(now).unwrap_or_default();
+        if self
+            .usage_recovery
+            .arm(thread_id, turn_id, &reset_at, &armed_at)
+        {
+            log::info!("usage recovery: armed {thread_id} for {reset_at}");
+        }
+    }
+
+    /// Continue threads whose usage limit has reset. Driven from the project
+    /// ticker, which also covers team and autopilot streams, and reads the
+    /// persisted journal so a restart does not lose an armed thread.
+    pub(super) fn tick_usage_recovery(&mut self, cx: &mut Context<Self>) {
+        if !self.usage_recovery.enabled() {
+            return;
+        }
+        let now = usage::now_ms();
+        for due in self.usage_recovery.due(now) {
+            let thread = due.thread_id;
+            // After a restart the thread may not be open. Resume it first and
+            // send on a later tick, so the continuation reaches the provider.
+            if !self.transcripts.contains_key(&thread) {
+                self.load_thread(thread.clone(), cx);
+                continue;
+            }
+            if self.loading.contains(&thread)
+                || self
+                    .transcripts
+                    .get(&thread)
+                    .is_some_and(Transcript::is_running)
+            {
+                continue;
+            }
+            if self.send_to_thread(thread.clone(), Composed::text(due.text), cx) {
+                let resumed_at = usage::iso_at(now).unwrap_or_default();
+                self.usage_recovery.record_resume(&thread, &resumed_at);
+                cx.emit(Notice::Info(
+                    t("Continued after the usage limit reset.").into(),
+                ));
+            }
+        }
     }
 
     /// Reloads who is signed in, their usage, and memory's state.
@@ -620,10 +767,11 @@ impl Workspace {
                 }
                 match limits {
                     Some(limits) => {
-                        ws.rate_limits.insert(CODEX.to_string(), limits);
+                        let checked_at = usage::iso_at(usage::now_ms()).unwrap_or_default();
+                        ws.usage.set_limits(CODEX, limits, &checked_at);
                     }
                     None => {
-                        ws.rate_limits.remove(CODEX);
+                        ws.usage.remove(CODEX);
                     }
                 }
                 ws.memory = memory;
@@ -746,13 +894,26 @@ impl Workspace {
                 self.turn_started
                     .entry(thread_id.clone())
                     .or_insert_with(Instant::now);
+                // A new run supersedes an armed continuation: the user or the
+                // autopilot already continued this thread. A failure below
+                // re-arms it for its next reset.
+                if self.usage_recovery.enabled() {
+                    let resumed_at = usage::iso_at(usage::now_ms()).unwrap_or_default();
+                    self.usage_recovery.record_resume(thread_id, &resumed_at);
+                }
             }
             AgentEvent::TurnCompleted {
                 thread_id,
                 turn_id,
                 status,
+                error,
                 ..
             } => {
+                if *status == TurnStatus::Failed
+                    && let Some(error) = error
+                {
+                    self.note_usage_limit_failure(thread_id, turn_id, error);
+                }
                 self.turn_started.remove(thread_id);
                 if !self.loading.contains(thread_id) && self.active_thread_id() != Some(thread_id) {
                     *self.unread.entry(thread_id.clone()).or_default() += 1;
@@ -1664,7 +1825,7 @@ impl Workspace {
             let _ = this.update(cx, |ws, cx| match result {
                 Ok(()) => {
                     ws.account = None;
-                    ws.rate_limits.remove(CODEX);
+                    ws.usage.remove(CODEX);
                     cx.emit(Notice::Info(t("Signed out").into()));
                     ws.refresh_account(cx);
                 }
@@ -2682,6 +2843,49 @@ mod tests {
         );
         assert_eq!(composed.images, vec![PathBuf::from("/a/shot.PNG")]);
         assert_eq!(composed.mentions, vec![PathBuf::from("/a/src/main.rs")]);
+    }
+
+    #[test]
+    fn the_usage_store_keeps_the_report_and_projects_limits_for() {
+        let mut ws = Workspace::with_settings(Settings::default());
+        let limits = RateLimits {
+            name: Some("Claude".into()),
+            primary: Some(atrium_core::RateWindow {
+                used_percent: 82.0,
+                window_mins: Some(300),
+                resets_at: Some(1_788_432_000),
+            }),
+            ..RateLimits::default()
+        };
+        let checked_at = "2026-09-03T12:00:00.000Z";
+        let effects = ws.usage.set_limits("claude@studio", limits, checked_at);
+        assert!(!effects.reached);
+
+        // The legacy view reads the projection; the canonical report is the
+        // engine's shared shape, per agent and device.
+        assert_eq!(
+            ws.limits_for("claude@studio")
+                .unwrap()
+                .primary
+                .unwrap()
+                .used_percent,
+            82.0
+        );
+        let report = ws.usage_report("claude@studio").unwrap();
+        assert_eq!(report.windows[0].id, "primary");
+        assert_eq!(report.windows[0].used_percent, 82.0);
+
+        let overview = ws.usage_overview(usage::now_ms());
+        assert_eq!(overview.agents.len(), 1);
+        assert_eq!(overview.agents[0].device.as_deref(), Some("studio"));
+        assert_eq!(
+            overview.banner.unwrap().level,
+            usage::UsageBannerLevel::Near
+        );
+
+        ws.usage.remove("claude@studio");
+        assert!(ws.limits_for("claude@studio").is_none());
+        assert!(ws.usage_report("claude@studio").is_none());
     }
 }
 

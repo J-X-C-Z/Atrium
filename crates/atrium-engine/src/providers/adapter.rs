@@ -400,6 +400,20 @@ pub trait ProviderSessionRuntime: Send + Sync {
 
     fn config(&self, cwd: Option<&str>) -> Result<ProviderConfig, ProviderAdapterError>;
 
+    /// The provider's usage windows in item 26's shared report shape.
+    ///
+    /// Codex's app-server exposes `account/rateLimits/read` and Claude's CLI
+    /// `get_usage`; the app's usage store consumes [`crate::usage`] records
+    /// through this seam. The Codex adapter (item 22) and the Claude adapter
+    /// (item 23) do not implement it yet, so the default reports no usage
+    /// rather than failing a session.
+    fn usage_limits(
+        &self,
+        _now: &str,
+    ) -> Result<Option<crate::usage::ProviderUsageLimits>, ProviderAdapterError> {
+        Ok(None)
+    }
+
     /// Drop the provider's subscription to a thread; the core can then unload
     /// it once idle.
     fn unload_thread(&self, provider_thread: &ProviderThread) -> Result<(), ProviderAdapterError>;
