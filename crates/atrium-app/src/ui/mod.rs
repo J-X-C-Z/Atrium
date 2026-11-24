@@ -341,7 +341,7 @@ impl RootView {
                 let workspace = self.workspace.clone();
                 let token = *token;
                 Toast::new(text.clone())
-                    .undo(move |_, cx| {
+                    .action(t("Undo"), move |_, cx| {
                         workspace.update(cx, |ws, cx| ws.undo_chat_action(token, cx));
                     })
                     .stay(Some(CHAT_UNDO_WINDOW))
