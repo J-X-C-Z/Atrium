@@ -22,6 +22,16 @@ bounded-snapshot helpers. The store-level snapshot and compaction cases are
 ported in `src/store/stream_tests.rs`; the WebSocket/HTTP framing is skipped
 with the transport.
 
+## Ported outside atrium-engine
+
+These live next to Atrium's own implementation of the same feature, not in a
+parallel engine module:
+
+| Atrium module | T3 source | Item |
+| --- | --- | --- |
+| `crates/atrium-app/src/schedule.rs` (schedule kinds, next-run and DST rules, structural comparison, run status, restart recovery) | `apps/server/src/scheduledTasks/Schedule.ts`, `packages/contracts/src/scheduledTask.ts` | 31 |
+| `crates/atrium-app/src/workspace_schedules.rs` (startup recovery, one-run-at-a-time dispatch) | `apps/server/src/scheduledTasks/ScheduledTaskService.ts` | 31 |
+
 ## What is not ported
 
 T3's web UI, Electron shell, mobile apps, relay, pairing and OAuth stay out;
