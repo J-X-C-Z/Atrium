@@ -1,0 +1,17 @@
+{
+  "name": "09-claude-tool-approval",
+  "agent": "claude",
+  "project": "scratch",
+  "model": "claude-sonnet-4-6",
+  "turns": [
+    {"text": "run the command"}
+  ],
+  "t3": "skip: T3 cannot drive a Claude account headlessly; the engine side stops at the can_use_tool prompt",
+  "expect": {
+    "final_status": "waiting",
+    "stream_contains": [
+      {"kind": "approval.requested", "ordinal": 1}
+    ],
+    "provider_methods": ["initialize"]
+  }
+}

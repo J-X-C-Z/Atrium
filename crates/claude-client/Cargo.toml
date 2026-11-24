@@ -1,0 +1,24 @@
+[package]
+name = "claude-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Implements the Claude Agent SDK's side of the `claude` CLI stream-JSON protocol (spawn, control channel, typed events)."
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+futures.workspace = true
+log.workspace = true
+jiff.workspace = true
+base64.workspace = true
+
+[dev-dependencies]
+futures = { workspace = true, features = ["executor"] }
+
+[[bin]]
+name = "mock-claude"
+path = "src/bin/mock_claude.rs"

@@ -16,5 +16,6 @@ pub mod mcp;
 pub mod orchestration;
 pub mod providers;
 pub mod runtime;
+pub mod runtime_claude;
 pub mod store;
 pub mod usage;

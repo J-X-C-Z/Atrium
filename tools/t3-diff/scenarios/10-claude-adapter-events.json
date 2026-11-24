@@ -1,0 +1,29 @@
+{
+  "name": "10-claude-adapter-events",
+  "kind": "adapter",
+  "agent": "claude",
+  "project": "scratch",
+  "model": "claude-sonnet-4-6",
+  "actions": [
+    {"op": "turn", "text": "plan the work"},
+    {"op": "commands"},
+    {"op": "skills"},
+    {"op": "turn", "text": "think about it"},
+    {"op": "turn", "text": "spawn a subagent"},
+    {"op": "settings", "model": "claude-opus-4-7", "effort": "high"}
+  ],
+  "t3": "skip: T3 cannot drive a Claude account headlessly; the adapter is driven directly for plan, thinking, subagent and settings coverage",
+  "expect": {
+    "final_status": "completed",
+    "stream_contains": [
+      {"kind": "claude.commands"},
+      {"kind": "claude.skills", "groups": 1,
+       "skills": [{"name": "review", "description": ""}, {"name": "deploy", "description": ""}]},
+      {"kind": "claude.plan", "steps": 3},
+      {"kind": "claude.subagent", "status": "inprogress"},
+      {"kind": "claude.subagent", "status": "completed"},
+      {"kind": "claude.settings", "model": "claude-opus-4-7"}
+    ],
+    "provider_methods": ["initialize", "set_model", "set_permission_mode"]
+  }
+}

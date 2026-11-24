@@ -486,6 +486,9 @@ fn message(text: String) -> TurnMessage {
         creation_source: crate::contracts::CreationSource::Server,
         scheduled_task_id: None,
         sender_thread_id: None,
+        // The Codex app-server protocol carries images separately; the
+        // Claude adapter is the consumer of this field today.
+        image_paths: Vec::new(),
     }
 }
 

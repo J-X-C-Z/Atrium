@@ -108,6 +108,39 @@ impl Capabilities {
         }
     }
 
+    /// Conservative defaults for a Claude Code session. The CLI's
+    /// `initialize` reply and `system/init` refine this (models, effort,
+    /// slash commands, skills, subagents, MCP status).
+    pub fn claude() -> Self {
+        Self {
+            images: true,
+            steer: true,
+            queue: true,
+            interrupt: true,
+            plan_mode: true,
+            // Claude's own `--permission-mode` names, in T3's display order.
+            approval_modes: vec![
+                "default".into(),
+                "acceptEdits".into(),
+                "plan".into(),
+                "bypassPermissions".into(),
+            ],
+            model_choice: true,
+            effort_choice: true,
+            service_tiers: false,
+            fork: false,
+            rewind: false,
+            compact: false,
+            review: false,
+            usage_limits: true,
+            context_window: true,
+            slash_commands: true,
+            skills: true,
+            mcp_status: true,
+            subagents: true,
+        }
+    }
+
     /// Conservative defaults for an ACP session. The session's `initialize`
     /// capabilities, `_meta` and config options refine this.
     pub fn acp() -> Self {
@@ -189,6 +222,17 @@ mod tests {
         assert!(!Capabilities::acp().has_approval_choice());
         assert!(Capabilities::codex().steer);
         assert!(!Capabilities::acp().steer);
+    }
+
+    #[test]
+    fn claude_offers_its_own_permission_modes_and_steering() {
+        let caps = Capabilities::claude();
+        assert!(caps.steer && caps.plan_mode && caps.subagents);
+        assert_eq!(
+            caps.approval_modes,
+            ["default", "acceptEdits", "plan", "bypassPermissions"]
+        );
+        assert!(!caps.service_tiers);
     }
 
     #[test]

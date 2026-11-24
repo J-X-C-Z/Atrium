@@ -203,6 +203,13 @@ def provider_methods(log_path: Path) -> list[str]:
         method = message.get("method")
         if isinstance(method, str) and message.get("id") is not None:
             methods.append(method)
+            continue
+        # Claude's control channel: the host writes control_request frames
+        # with a `request.subtype` (initialize, set_model, interrupt, ...).
+        if message.get("type") == "control_request":
+            subtype = (message.get("request") or {}).get("subtype")
+            if isinstance(subtype, str):
+                methods.append(subtype)
     return methods
 
 
@@ -375,7 +382,10 @@ def run_engine(
     engine = find_tool("atrium-engine-driver", args.engine_bin, "ENGINE_BIN")
     scratch = outdir / "scratch-engine"
     env = os.environ.copy()
-    env["MOCK_CODEX_BIN"] = str(wrapper)
+    if scenario.get("agent") == "claude":
+        env["MOCK_CLAUDE_BIN"] = str(wrapper)
+    else:
+        env["MOCK_CODEX_BIN"] = str(wrapper)
     env["MOCK_REAL"] = str(mock)
     env["MOCK_LOG"] = str(mock_log)
     env.setdefault("NO_PROXY", "*")
@@ -814,7 +824,10 @@ def run_scenario(path: Path, args: argparse.Namespace) -> bool:
         json.dumps(scenario, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
 
-    mock = find_tool("mock-codex", args.mock_codex_bin, "MOCK_CODEX_BIN")
+    if scenario.get("agent") == "claude":
+        mock = find_tool("mock-claude", args.mock_claude_bin, "MOCK_CLAUDE_BIN")
+    else:
+        mock = find_tool("mock-codex", args.mock_codex_bin, "MOCK_CODEX_BIN")
     wrapper = make_mock_wrapper(outdir)
     engine_log = outdir / "engine-mock.log"
     t3_log = outdir / "t3-mock.log"
@@ -823,6 +836,14 @@ def run_scenario(path: Path, args: argparse.Namespace) -> bool:
     (outdir / "engine-methods.json").write_text(
         json.dumps(engine_methods, indent=2) + "\n", encoding="utf-8"
     )
+
+    if scenario.get("agent") == "claude" and not (
+        isinstance(scenario.get("t3"), str) and scenario["t3"].startswith("skip:")
+    ):
+        raise SetupError(
+            "T3 cannot drive a Claude account headlessly; mark the scenario "
+            'with "t3": "skip: ..."'
+        )
 
     skip_reason = scenario.get("t3")
     if args.no_t3 or (isinstance(skip_reason, str) and skip_reason.startswith("skip:")):
@@ -886,6 +907,7 @@ def main() -> int:
     parser.add_argument("--no-t3", action="store_true", help="run the engine side only")
     parser.add_argument("--t3-bin", help="T3 0.1.11 binary (env T3_BIN)")
     parser.add_argument("--mock-codex-bin", help="mock-codex binary (env MOCK_CODEX_BIN)")
+    parser.add_argument("--mock-claude-bin", help="mock-claude binary (env MOCK_CLAUDE_BIN)")
     parser.add_argument("--engine-bin", help="atrium-engine-driver (env ENGINE_BIN)")
     parser.add_argument("--keep", action="store_true", help="keep T3/engine scratch dirs")
     parser.add_argument(

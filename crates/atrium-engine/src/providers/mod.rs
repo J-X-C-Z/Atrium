@@ -6,6 +6,8 @@
 //! over Atrium's existing `codex-client` transport. ACP has its own item.
 
 pub mod adapter;
+pub mod claude;
+pub mod claude_translate;
 pub mod codex;
 pub mod codex_elicitation;
 pub mod codex_turn;
@@ -18,6 +20,11 @@ pub use adapter::{
     SkillGroup, SteerInput, ThreadSnapshot, TurnMessage, acp_selection_transition,
     turn_scoped_selection_transition,
 };
+pub use claude::{
+    ClaudeAdapter, ClaudeAdapterConfig, claude_provider_capabilities,
+    core_capabilities as claude_core_capabilities,
+};
+pub use claude_translate::{CLAUDE_DRIVER_KIND, ClaudeTranslator};
 pub use codex::{
     CodexAdapter, CodexAdapterConfig, MIN_CODEX_VERSION, codex_provider_capabilities,
     core_capabilities,

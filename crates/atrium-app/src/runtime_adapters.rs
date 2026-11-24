@@ -25,6 +25,7 @@ use atrium_core::{
     AgentEvent, ApprovalDecision, Capabilities, ConfigOption, RateLimits, RequestId, Transcript,
 };
 use atrium_engine::runtime::CodexEngineRuntime;
+use atrium_engine::runtime_claude::ClaudeEngineRuntime;
 use atrium_runtime::{
     AgentRuntime, Delivery, EventSink, RuntimeError, SessionId, SessionSpec, SessionSummary,
     TurnId, TurnInput, TurnOutcome,
@@ -47,6 +48,9 @@ struct Inner {
     /// Backends the app runs through the ported engine instead of today's
     /// `CodexClient` path. Selected per backend by `ATRIUM_CODEX_ENGINE`.
     engine_codex: Mutex<HashMap<String, Arc<CodexEngineRuntime>>>,
+    /// Claude backends on the ported engine. Selected per backend by
+    /// `ATRIUM_CLAUDE_ENGINE`; the ACP route stays the fallback.
+    engine_claude: Mutex<HashMap<String, Arc<ClaudeEngineRuntime>>>,
     sessions: Mutex<HashMap<SessionId, Session>>,
     /// Paired with `sessions`: `wait` sleeps here until a turn completes.
     turn_ended: Condvar,
@@ -84,8 +88,9 @@ struct Session {
     updated_at_ms: i64,
     /// ACP's per-session settings, for the app to show.
     acp_options: Vec<ConfigOption>,
-    /// Set when the session runs through the ported engine.
-    engine: Option<Arc<CodexEngineRuntime>>,
+    /// Set when the session runs through the ported engine. Either provider's
+    /// engine satisfies the same trait.
+    engine: Option<Arc<dyn AgentRuntime>>,
 }
 
 impl Inner {
@@ -153,6 +158,7 @@ impl RuntimeAdapters {
                 codex: Mutex::new(HashMap::new()),
                 acp: Mutex::new(HashMap::new()),
                 engine_codex: Mutex::new(HashMap::new()),
+                engine_claude: Mutex::new(HashMap::new()),
                 sessions: Mutex::new(HashMap::new()),
                 turn_ended: Condvar::new(),
                 caps: Mutex::new(HashMap::new()),
@@ -195,6 +201,25 @@ impl RuntimeAdapters {
             );
     }
 
+    /// Run this Claude backend's sessions through the ported engine. The ACP
+    /// route is kept as the fallback for profiles that do not opt in.
+    /// `ATRIUM_CLAUDE_ENGINE` selects it; tests and a settings UI can call
+    /// this directly.
+    pub fn register_claude_engine(&self, backend: &str) {
+        let mut config = atrium_engine::providers::ClaudeAdapterConfig::default();
+        if let Some(binary) = std::env::var_os("CLAUDE_BIN") {
+            config.claude.binary = PathBuf::from(binary);
+        }
+        self.inner
+            .engine_claude
+            .lock()
+            .expect("runtime engine claude")
+            .insert(
+                backend.to_string(),
+                Arc::new(ClaudeEngineRuntime::new(config)),
+            );
+    }
+
     /// Whether `backend` runs on the ported engine.
     #[allow(dead_code)]
     pub fn uses_engine(&self, backend: &str) -> bool {
@@ -203,21 +228,38 @@ impl RuntimeAdapters {
             .lock()
             .expect("runtime engine codex")
             .contains_key(backend)
+            || self
+                .inner
+                .engine_claude
+                .lock()
+                .expect("runtime engine claude")
+                .contains_key(backend)
     }
 
-    fn engine_for(&self, backend: &str) -> Option<Arc<CodexEngineRuntime>> {
-        self.inner
+    fn engine_for(&self, backend: &str) -> Option<Arc<dyn AgentRuntime>> {
+        if let Some(engine) = self
+            .inner
             .engine_codex
             .lock()
             .expect("runtime engine codex")
             .get(backend)
             .cloned()
+        {
+            return Some(engine);
+        }
+        self.inner
+            .engine_claude
+            .lock()
+            .expect("runtime engine claude")
+            .get(backend)
+            .cloned()
+            .map(|engine| engine as Arc<dyn AgentRuntime>)
     }
 
     fn session_engine(
         &self,
         session: &SessionId,
-    ) -> Result<Option<Arc<CodexEngineRuntime>>, RuntimeError> {
+    ) -> Result<Option<Arc<dyn AgentRuntime>>, RuntimeError> {
         Ok(self
             .inner
             .sessions
@@ -229,9 +271,9 @@ impl RuntimeAdapters {
             .clone())
     }
 
-    fn start_engine_codex(
+    fn start_engine(
         &self,
-        engine: Arc<CodexEngineRuntime>,
+        engine: Arc<dyn AgentRuntime>,
         spec: SessionSpec,
         sink: EventSink,
     ) -> Result<SessionId, RuntimeError> {
@@ -269,6 +311,14 @@ impl RuntimeAdapters {
             .lock()
             .expect("runtime caps")
             .insert(backend.to_string(), caps);
+        // The engine runs locally; a device's Claude (`claude@nas`) keeps the
+        // ACP route through that device.
+        if agents::is_claude(backend)
+            && agents::split_backend(backend).1.is_none()
+            && claude_engine_requested()
+        {
+            self.register_claude_engine(backend);
+        }
     }
 
     /// Forgets a backend that disconnected; its sessions stay for the app to
@@ -557,9 +607,15 @@ impl AgentRuntime for RuntimeAdapters {
     }
 
     fn start(&self, spec: SessionSpec, sink: EventSink) -> Result<SessionId, RuntimeError> {
-        if agents::is_codex(&spec.agent) {
+        if agents::is_claude(&spec.agent) {
             if let Some(engine) = self.engine_for(&spec.agent) {
-                self.start_engine_codex(engine, spec, sink)
+                self.start_engine(engine, spec, sink)
+            } else {
+                self.start_acp(spec, sink)
+            }
+        } else if agents::is_codex(&spec.agent) {
+            if let Some(engine) = self.engine_for(&spec.agent) {
+                self.start_engine(engine, spec, sink)
             } else {
                 self.start_codex(spec, sink)
             }
@@ -740,11 +796,11 @@ impl AgentRuntime for RuntimeAdapters {
     }
 
     fn limits(&self, agent: &str) -> Result<Option<RateLimits>, RuntimeError> {
-        if !agents::is_codex(agent) {
-            return Ok(None);
-        }
         if let Some(engine) = self.engine_for(agent) {
             return engine.limits(agent);
+        }
+        if !agents::is_codex(agent) {
+            return Ok(None);
         }
         let registered = self.codex_client(agent)?;
         futures::executor::block_on(registered.client.rate_limits())
@@ -787,7 +843,18 @@ fn session_from_spec(
 /// Whether the app should route Codex sessions through the ported engine.
 /// Off by default; `ATRIUM_CODEX_ENGINE=1` selects it.
 fn engine_requested() -> bool {
-    std::env::var("ATRIUM_CODEX_ENGINE")
+    env_flag("ATRIUM_CODEX_ENGINE")
+}
+
+/// Whether the app should route Claude sessions through the ported engine.
+/// Off by default; `ATRIUM_CLAUDE_ENGINE=1` selects it. ACP remains the
+/// fallback per agent profile.
+fn claude_engine_requested() -> bool {
+    env_flag("ATRIUM_CLAUDE_ENGINE")
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
         .map(|value| {
             !matches!(
                 value.trim().to_ascii_lowercase().as_str(),

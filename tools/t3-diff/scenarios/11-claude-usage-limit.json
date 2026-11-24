@@ -1,0 +1,14 @@
+{
+  "name": "11-claude-usage-limit",
+  "agent": "claude",
+  "project": "scratch",
+  "model": "claude-sonnet-4-6",
+  "turns": [
+    {"text": "we hit the usage limit"}
+  ],
+  "t3": "skip: T3 cannot drive a Claude account headlessly; the engine maps the CLI's rate_limit_event and 429 result",
+  "expect": {
+    "final_status": "failed",
+    "provider_methods": ["initialize"]
+  }
+}
