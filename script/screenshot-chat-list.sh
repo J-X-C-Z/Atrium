@@ -101,8 +101,10 @@ wait_for_window() {
         fi
         sleep 1
     done
-    echo "Atrium's window did not appear" >&2
-    return 1
+    # The title may be missing under a bare window manager; capture the root
+    # window rather than losing the run.
+    echo "Atrium's window title did not appear; capturing the X root window" >&2
+    return 0
 }
 
 capture_macos() {
@@ -161,7 +163,7 @@ capture() {
     wait_for_window "$app_pid"
     if [ "$linux" = true ]; then
         # Let the threads arrive and the row animations settle.
-        sleep 6
+        sleep 10
         capture_linux "$file"
     else
         for _ in $(seq 1 40); do
