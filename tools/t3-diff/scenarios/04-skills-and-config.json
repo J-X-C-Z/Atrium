@@ -1,0 +1,19 @@
+{
+  "name": "04-skills-and-config",
+  "kind": "adapter",
+  "provider": "mockcodex",
+  "model": "mock-1",
+  "t3": "skip: T3 calls skills/list and config/read from its provider probe, not from the CLI; the engine side is asserted here",
+  "actions": [
+    {"op": "skills"},
+    {"op": "config"},
+    {"op": "turn", "text": "say hi"}
+  ],
+  "expect": {
+    "final_status": "completed",
+    "stream_contains": [
+      {"kind": "adapter.skills", "groups": 1},
+      {"kind": "adapter.config", "configIsObject": true, "originsIsObject": true}
+    ]
+  }
+}

@@ -2077,12 +2077,8 @@ impl Workspace {
                     .goal_set(&call_id, None, Some(GoalStatus::Active), None)
                     .await;
             }
-            let sent = cx
-                .background_executor()
-                .spawn(async move {
-                    crate::runtime_adapters::send_turn(&*runtime, &call_id, input, delivery)
-                })
-                .await;
+            let sent =
+                crate::runtime_adapters::send_turn_async(runtime, call_id, input, delivery).await;
             let outcome = match &sent {
                 Ok(turn) if !turn.trim().is_empty() => {
                     crate::project::notice_delivery::NoticeOutcome::Accepted
@@ -2141,12 +2137,7 @@ impl Workspace {
         let runtime = self.runtime.clone();
         let call_id = thread_id.clone();
         cx.spawn(async move |this, cx| {
-            let steered = cx
-                .background_executor()
-                .spawn(
-                    async move { crate::runtime_adapters::steer_turn(&*runtime, &call_id, input) },
-                )
-                .await;
+            let steered = crate::runtime_adapters::steer_turn_async(runtime, call_id, input).await;
             let outcome = if steered.is_ok() {
                 crate::project::notice_delivery::NoticeOutcome::Accepted
             } else {
@@ -2191,7 +2182,7 @@ impl Workspace {
             let id = thread_id;
             cx.background_executor()
                 .spawn(async move {
-                    let _ = crate::runtime_adapters::interrupt_turn(&*runtime, &id);
+                    let _ = crate::runtime_adapters::interrupt_turn_async(runtime, id).await;
                 })
                 .detach();
             return;

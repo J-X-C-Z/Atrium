@@ -8,6 +8,8 @@ license.workspace = true
 [dependencies]
 atrium-core.workspace = true
 atrium-runtime.workspace = true
+codex-client.workspace = true
+futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

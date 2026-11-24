@@ -730,6 +730,43 @@ impl Workspace {
             }));
             return;
         }
+        // An engine-owned session reads with the adapter's `thread/read`
+        // path (no writer lock), through the runtime.
+        if self.runtime.uses_engine_for_session(&id) {
+            let runtime = self.runtime.clone();
+            let owner = self.settings.install_id.clone();
+            cx.spawn(async move |this, cx| {
+                let read = crate::runtime_adapters::read_history_async(runtime, id.clone()).await;
+                let result = this.update(cx, |workspace, cx| {
+                    let answer = match read {
+                        Some(Ok(history)) => {
+                            let transcript = Transcript::from_history(history.turns);
+                            let snapshot = ThreadSnapshot {
+                                thread: ThreadAnnouncement::from_meta(history.meta, owner, "idle"),
+                                items: transcript_items(&transcript),
+                                approvals: Vec::new(),
+                                questions: Vec::new(),
+                                cursor: transcript.version(),
+                            };
+                            workspace.transcripts.insert(id, transcript);
+                            Ok(snapshot)
+                        }
+                        Some(Err(error)) => Err(HostError::Unavailable(format!("{error:#}"))),
+                        None => Err(HostError::Unavailable(
+                            "the session is no longer available".into(),
+                        )),
+                    };
+                    cx.notify();
+                    answer
+                });
+                let _ = reply.send(match result {
+                    Ok(answer) => answer,
+                    Err(_) => Err(HostError::Unavailable("the desktop stopped".into())),
+                });
+            })
+            .detach();
+            return;
+        }
         let Some(client) = self.thread_codex(&id) else {
             let _ = reply.send(Err(HostError::Unavailable(
                 "the conversation is not open and its agent cannot read it".into(),

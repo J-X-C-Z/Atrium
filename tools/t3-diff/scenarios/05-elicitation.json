@@ -1,0 +1,17 @@
+{
+  "name": "05-elicitation",
+  "kind": "adapter",
+  "provider": "mockcodex",
+  "model": "mock-1",
+  "t3": "skip: T3 Code 0.1.11 runs new threads at full access, where it auto-accepts elicitation; the CLI cannot lower the mode, so the approval path is engine-only",
+  "actions": [
+    {"op": "turn", "text": "please elicit", "answer": "accept", "runtime_mode": "approval-required"}
+  ],
+  "expect": {
+    "final_status": "completed",
+    "stream_contains": [
+      {"kind": "adapter.runtimeRequest", "requestKind": "mcp-elicitation", "status": "pending"},
+      {"kind": "adapter.responded", "decision": "accept"}
+    ]
+  }
+}

@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 atrium-core.workspace = true
+atrium-engine.workspace = true
 atrium-node.workspace = true
 atrium-sync.workspace = true
 atrium-phone = { path = "../atrium-phone" }

@@ -15,6 +15,52 @@ tools/t3-diff/
   out/<scenario>/            written by a run (gitignored)
 ```
 
+Scenario kinds:
+
+* `"kind": "engine"` (default) runs turns through
+  `atrium_engine::runtime::CodexEngineRuntime`, the `AgentRuntime` seam the
+  app selects. The driver receives the app's `AgentEvent`s, so the stream is
+  the same shape the app sees.
+* `"kind": "adapter"` drives `CodexSessionRuntime` directly for behaviour the
+  T3 0.1.11 CLI cannot reach: mid-thread settings, `skills/list` /
+  `config/read`, MCP elicitation outside full access, and `thread/read`
+  versus `thread/resume`. Its `actions` are objects such as
+  `{"op":"settings","model":"mock-1-pro","effort":"high","service_tier":"priority"}`,
+  `{"op":"skills"}`, `{"op":"config"}`, `{"op":"read_snapshot"}`,
+  `{"op":"hold_writer"}`, `{"op":"read_vs_write"}`, `{"op":"resume"}` and
+  `{"op":"turn","text":"...","answer":"accept","runtime_mode":"approval-required"}`.
+  Adapter scenarios carry `"t3": "skip: <reason>"`; the runner records the
+  reason in `diff.txt` instead of pretending a T3 comparison happened.
+* Engine scenarios may set `"read_snapshot": true`; after the turns the
+  driver reads the thread through the runtime's `thread/read` path and emits
+  an `engine.readSnapshot` trace (used by scenario 08).
+* `--real --codex-bin PATH` drives the real Codex instead of the mock (used
+  by `scripts/codex-adapter-real-machine.py`; that path uses the user's own
+  `CODEX_HOME`).
+
+`expect` may also carry:
+
+* `stream_contains`: objects that must match (as a subset, string values by
+  substring) some engine stream line.
+* `provider_methods`: JSON-RPC methods the mock must have received. Both
+  runs go through a small logging wrapper (`mock-wrap.py`), so T3's provider
+  probe (`initialize`, `skills/list`, `config/read`, `model/list`, ...) and
+  the engine's are checked against the same list. Per-side methods land in
+  `t3-methods.json` and `engine-methods.json`.
+
+Scenarios:
+
+| file | covers |
+| --- | --- |
+| `01-thread-lifecycle` | two turns, messages and final status |
+| `02-approval-waiting` | a command approval leaves the turn waiting |
+| `03-mid-thread-settings` | model, effort, service tier and approval applied to a loaded thread |
+| `04-skills-and-config` | `skills/list` and `config/read` shapes |
+| `05-elicitation` | MCP elicitation becomes a runtime request and is answered |
+| `06-read-vs-write` | `thread/read` works while the writer lock is held; `thread/resume` reports in use |
+| `07-provider-probe` | both sides call `initialize`, `model/list`, `skills/list`, `config/read`, `thread/start`, `turn/start` |
+| `08-runtime-read-vs-write` | the engine runtime reads the thread with `thread/read` after a turn |
+
 ## Build
 
 ```sh
@@ -73,15 +119,12 @@ t3 thread show  --json --messages <n> <threadId>
 run is waiting on a person, which is a scenario outcome, not an error.
 
 **Engine side.** `target/.../atrium-engine-driver` reads the scenario JSON
-from stdin and writes normalized JSON lines to stdout. The parallel ports of
-`orchestration` and `store` are not merged into this worktree yet, so the
-driver runs a clearly marked in-memory equivalent of the orchestration path:
-one thread, sequential turns, one turn at a time. It speaks the real Codex
-app-server protocol to the same `mock-codex` binary, so item text and statuses
-come from the same provider output. When the ported modules land, replace
-`run_scenario`/`run_turn` in
-`crates/atrium-engine/src/bin/driver.rs` with calls into them; the
-normalizer does not change.
+from stdin and writes normalized JSON lines to stdout. Turns run through
+`CodexEngineRuntime` (the `atrium_runtime::AgentRuntime` implementation) and
+the ported Codex adapter over `codex-client`; item text and statuses come from
+the same provider output T3 sees. The driver still owns the one-thread,
+sequential-turns shape of a scenario; the orchestration queue itself is item
+25. Adapter scenarios call the session runtime directly, as described above.
 
 Both sides receive the same turn text. The driver adds T3's sender note
 (`[T3 Code: this message came through T3 Code's tools, ...]`) before sending

@@ -20,6 +20,24 @@ use crate::{
     translate,
 };
 
+/// A mid-thread settings update. T3 Code 0.1.11 only sends `serviceTier`
+/// (`thread/settings/update`); Atrium's adapter also carries the model,
+/// reasoning effort and approval policy so a loaded thread can change all of
+/// them without waiting for the next turn. The wire names stay T3's.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadSettingsUpdate {
+    pub thread_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_policy: Option<Value>,
+}
+
 /// How to start Codex.
 #[derive(Clone, Debug, Default)]
 pub struct CodexConfig {
@@ -123,6 +141,17 @@ impl AccessMode {
         }
     }
 
+    /// The access mode an app name denotes. This is the one mapping the app
+    /// and the ported engine share, so "read-only" sends the same approval
+    /// and sandbox pair on both paths.
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "read-only" | "readOnly" | "untrusted" | "approval-required" => AccessMode::ReadOnly,
+            "full-access" | "fullAccess" | "never" => AccessMode::FullAccess,
+            _ => AccessMode::Auto,
+        }
+    }
+
     pub fn approval_policy(self) -> &'static str {
         match self {
             AccessMode::ReadOnly | AccessMode::Auto => "on-request",
@@ -196,15 +225,40 @@ pub enum Prediction {
     Fork(String),
 }
 
-/// Kills the server when the last client handle goes.
+/// Kills the server when the last client handle goes, or when asked to.
 struct ProcessGuard(Mutex<Option<Child>>);
 
-impl Drop for ProcessGuard {
-    fn drop(&mut self) {
+impl ProcessGuard {
+    fn kill(&self) {
         if let Some(mut child) = self.0.lock().ok().and_then(|mut c| c.take()) {
             let _ = child.kill();
             let _ = child.wait();
         }
+    }
+
+    fn child_id(&self) -> Option<u32> {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|child| child.as_ref().map(Child::id))
+    }
+
+    fn is_running(&self) -> bool {
+        self.0
+            .lock()
+            .map(|mut child| {
+                child
+                    .as_mut()
+                    .map(|child| matches!(child.try_wait(), Ok(None)))
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    }
+}
+
+impl Drop for ProcessGuard {
+    fn drop(&mut self) {
+        self.kill();
     }
 }
 
@@ -216,6 +270,10 @@ pub struct CodexClient {
     pub user_agent: String,
     pub codex_home: String,
     pub binary: PathBuf,
+    /// Extra arguments the server was started with (`-c key=value` overrides).
+    pub extra_args: Vec<String>,
+    /// Extra environment the server process was started with.
+    pub process_env: Vec<(String, String)>,
 }
 
 impl CodexClient {
@@ -259,9 +317,43 @@ impl CodexClient {
             user_agent: String::new(),
             codex_home: String::new(),
             binary,
+            extra_args: config.extra_args.clone(),
+            process_env: config.env.clone(),
         };
         client.initialize().await?;
         Ok((client, events))
+    }
+
+    /// Kills this client's server process. Other clones keep working until the
+    /// same process has to answer again; the shared-server owner uses this to
+    /// stop the app-server when its last session ends.
+    pub fn close(&self) {
+        if let Some(process) = &self._process
+            && let Some(guard) = process.downcast_ref::<ProcessGuard>()
+        {
+            guard.kill();
+        }
+    }
+
+    /// The server's process id, when this client started one.
+    pub fn child_id(&self) -> Option<u32> {
+        self._process
+            .as_ref()
+            .and_then(|process| process.downcast_ref::<ProcessGuard>())
+            .and_then(ProcessGuard::child_id)
+    }
+
+    /// Whether the server process is still running.
+    pub fn is_running(&self) -> bool {
+        self._process
+            .as_ref()
+            .map(|process| {
+                process
+                    .downcast_ref::<ProcessGuard>()
+                    .map(ProcessGuard::is_running)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
     }
 
     /// A server reached through other pipes, such as `codex app-server` run
@@ -278,6 +370,8 @@ impl CodexClient {
             user_agent: String::new(),
             codex_home: String::new(),
             binary: PathBuf::new(),
+            extra_args: Vec::new(),
+            process_env: Vec::new(),
         };
         client.initialize().await?;
         Ok((client, events))
@@ -291,6 +385,8 @@ impl CodexClient {
             user_agent: String::new(),
             codex_home: String::new(),
             binary: PathBuf::new(),
+            extra_args: Vec::new(),
+            process_env: Vec::new(),
         }
     }
 
@@ -404,13 +500,41 @@ impl CodexClient {
         mcp_servers: &[McpServer],
         mode: Option<AccessMode>,
     ) -> Result<(ThreadMeta, Vec<(String, TurnStatus, Vec<Item>)>)> {
+        self.thread_resume_with_config(thread_id, mcp_servers, &[], None, mode)
+            .await
+    }
+
+    /// [`Self::thread_resume_in_mode`], restoring the thread's MCP servers,
+    /// command environment and developer instructions too. The engine uses
+    /// this so a resumed thread behaves like the one it replaced.
+    pub async fn thread_resume_with_config(
+        &self,
+        thread_id: &str,
+        mcp_servers: &[McpServer],
+        env: &[(String, String)],
+        developer_instructions: Option<&str>,
+        mode: Option<AccessMode>,
+    ) -> Result<(ThreadMeta, Vec<(String, TurnStatus, Vec<Item>)>)> {
         let mut params = json!({ "threadId": thread_id });
         if let Some(mode) = mode {
             params["sandbox"] = json!(mode.sandbox_mode());
             params["approvalPolicy"] = json!(mode.approval_policy());
         }
-        if let Some(config) = mcp_config(mcp_servers) {
-            params["config"] = config;
+        if let Some(developer_instructions) = developer_instructions {
+            params["developerInstructions"] = json!(developer_instructions);
+        }
+        let mut config = mcp_config(mcp_servers)
+            .and_then(|config| config.as_object().cloned())
+            .unwrap_or_default();
+        if !env.is_empty() {
+            let vars: serde_json::Map<String, Value> = env
+                .iter()
+                .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                .collect();
+            config.insert("shell_environment_policy.set".into(), Value::Object(vars));
+        }
+        if !config.is_empty() {
+            params["config"] = Value::Object(config);
         }
         let result = self.connection.request("thread/resume", params).await?;
         let thread = &result["thread"];
@@ -443,6 +567,70 @@ impl CodexClient {
             .map(|turns| turns.iter().filter_map(translate::turn).collect())
             .unwrap_or_default();
         Ok((meta, turns))
+    }
+
+    /// Reads a thread's metadata without its turns and without taking the
+    /// writer lock (`thread/read` with `includeTurns: false`).
+    pub async fn thread_read_meta(&self, thread_id: &str) -> Result<ThreadMeta> {
+        let result = self
+            .connection
+            .request(
+                "thread/read",
+                json!({ "threadId": thread_id, "includeTurns": false }),
+            )
+            .await?;
+        translate::thread_meta(&result["thread"])
+            .ok_or_else(|| anyhow!("thread/read returned no thread"))
+    }
+
+    /// Applies new settings to a thread that is loaded in this process.
+    ///
+    /// T3 Code sends only `serviceTier` here. Atrium also sends `model`,
+    /// `effort` and `approvalPolicy`; a server that does not know those keys
+    /// ignores them.
+    pub async fn thread_settings_update(&self, update: ThreadSettingsUpdate) -> Result<()> {
+        self.connection
+            .request("thread/settings/update", update)
+            .await?;
+        Ok(())
+    }
+
+    /// The skills Codex found under each folder.
+    pub async fn skills_list(&self, cwds: &[String]) -> Result<Value> {
+        Ok(self
+            .connection
+            .request("skills/list", json!({ "cwds": cwds }))
+            .await?)
+    }
+
+    /// Codex's layered configuration, optionally for one folder.
+    pub async fn config_read(&self, cwd: Option<&str>) -> Result<Value> {
+        let mut params = json!({ "includeLayers": false });
+        if let Some(cwd) = cwd {
+            params["cwd"] = json!(cwd);
+        }
+        Ok(self.connection.request("config/read", params).await?)
+    }
+
+    /// Sends a request without a typed wrapper. The engine and the
+    /// differential driver use it for protocol probes.
+    pub async fn request_raw(&self, method: &str, params: Value) -> Result<Value> {
+        Ok(self.connection.request(method, params).await?)
+    }
+
+    /// Answers a server request with a raw result. Used for MCP elicitation
+    /// and user-input answers whose shape is provider-defined.
+    pub fn respond_raw(&self, request_id: Value, result: Value) -> Result<()> {
+        self.connection
+            .respond(request_id, result)
+            .map_err(|error| anyhow!("{error}"))
+    }
+
+    /// Declines a server request with a raw error, so its sender stops waiting.
+    pub fn respond_error_raw(&self, request_id: Value, code: i64, message: &str) -> Result<()> {
+        self.connection
+            .respond_error(request_id, code, message)
+            .map_err(|error| anyhow!("{error}"))
     }
 
     /// Stored threads, newest first.
@@ -520,6 +708,20 @@ impl CodexClient {
         }
         let result = self.connection.request("turn/start", params).await?;
         Ok(str_of(&result["turn"], "id"))
+    }
+
+    /// Sends an already-built `turn/start` payload. The engine adapter uses
+    /// this where T3's parameters carry provider-defined JSON (granular
+    /// approval policies) that the typed request cannot express.
+    pub async fn turn_start_with_params(&self, params: Value) -> Result<String> {
+        let result = self.connection.request("turn/start", params).await?;
+        Ok(str_of(&result["turn"], "id"))
+    }
+
+    /// Sends an already-built `turn/steer` payload.
+    pub async fn turn_steer_with_params(&self, params: Value) -> Result<String> {
+        let result = self.connection.request("turn/steer", params).await?;
+        Ok(str_of(&result, "turnId"))
     }
 
     /// Adds the user's message to the running turn, which reads it at its next step.

@@ -980,10 +980,7 @@ impl Workspace {
         };
         let named = codex.then(|| self.codex_for(&backend)).flatten();
         cx.spawn(async move |this, cx| {
-            let started = cx
-                .background_executor()
-                .spawn(async move { crate::runtime_adapters::start_session(&*runtime, spec, sink) })
-                .await;
+            let started = crate::runtime_adapters::start_session_async(runtime, spec, sink).await;
             let thread = match started {
                 Ok(thread) => thread,
                 Err(error) => {
@@ -1265,10 +1262,7 @@ impl Workspace {
         let named = codex.then(|| self.codex_for(&backend)).flatten();
         let session_runtime = runtime.clone();
         cx.spawn(async move |this, cx| {
-            let started = cx
-                .background_executor()
-                .spawn(async move { crate::runtime_adapters::start_session(&*runtime, spec, sink) })
-                .await;
+            let started = crate::runtime_adapters::start_session_async(runtime, spec, sink).await;
             let thread = match started {
                 Ok(thread) => thread,
                 Err(error) => {

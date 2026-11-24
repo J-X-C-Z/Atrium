@@ -24,6 +24,7 @@ use acp_client::{AcpClient, PromptDelivery};
 use atrium_core::{
     AgentEvent, ApprovalDecision, Capabilities, ConfigOption, RateLimits, RequestId, Transcript,
 };
+use atrium_engine::runtime::CodexEngineRuntime;
 use atrium_runtime::{
     AgentRuntime, Delivery, EventSink, RuntimeError, SessionId, SessionSpec, SessionSummary,
     TurnId, TurnInput, TurnOutcome,
@@ -43,6 +44,9 @@ pub struct RuntimeAdapters {
 struct Inner {
     codex: Mutex<HashMap<String, RegisteredCodex>>,
     acp: Mutex<HashMap<String, RegisteredAcp>>,
+    /// Backends the app runs through the ported engine instead of today's
+    /// `CodexClient` path. Selected per backend by `ATRIUM_CODEX_ENGINE`.
+    engine_codex: Mutex<HashMap<String, Arc<CodexEngineRuntime>>>,
     sessions: Mutex<HashMap<SessionId, Session>>,
     /// Paired with `sessions`: `wait` sleeps here until a turn completes.
     turn_ended: Condvar,
@@ -80,6 +84,8 @@ struct Session {
     updated_at_ms: i64,
     /// ACP's per-session settings, for the app to show.
     acp_options: Vec<ConfigOption>,
+    /// Set when the session runs through the ported engine.
+    engine: Option<Arc<CodexEngineRuntime>>,
 }
 
 impl Inner {
@@ -146,6 +152,7 @@ impl RuntimeAdapters {
             inner: Arc::new(Inner {
                 codex: Mutex::new(HashMap::new()),
                 acp: Mutex::new(HashMap::new()),
+                engine_codex: Mutex::new(HashMap::new()),
                 sessions: Mutex::new(HashMap::new()),
                 turn_ended: Condvar::new(),
                 caps: Mutex::new(HashMap::new()),
@@ -165,6 +172,105 @@ impl RuntimeAdapters {
             .lock()
             .expect("runtime caps")
             .insert(backend.to_string(), Capabilities::codex());
+        // Remote backends (`codex@device`) stay on the legacy path: the
+        // engine only runs Codex on this machine until item 29.
+        if engine_requested() && !backend.contains('@') {
+            self.register_codex_engine(backend);
+        }
+    }
+
+    /// Run this backend's sessions through the ported engine. `register_codex`
+    /// calls this when `ATRIUM_CODEX_ENGINE` is set; tests and a settings UI
+    /// can call it directly.
+    ///
+    /// The engine starts its own app-server, so it is given the same binary,
+    /// extra arguments and process environment the registered client used,
+    /// plus that backend's thread environment. `CODEX_BIN` is only the
+    /// fallback for a backend that was not registered yet.
+    pub fn register_codex_engine(&self, backend: &str) {
+        let mut config = atrium_engine::providers::CodexAdapterConfig::default();
+        let registered = self
+            .inner
+            .codex
+            .lock()
+            .expect("runtime codex")
+            .get(backend)
+            .cloned();
+        if let Some(registered) = registered {
+            if !registered.client.binary.as_os_str().is_empty() {
+                config.codex.binary = Some(registered.client.binary.clone());
+            }
+            config.codex.extra_args = registered.client.extra_args.clone();
+            config.codex.env = registered.client.process_env.clone();
+            config.thread_env = registered.env;
+        } else if let Some(binary) = std::env::var_os("CODEX_BIN") {
+            config.codex.binary = Some(PathBuf::from(binary));
+        }
+        self.inner
+            .engine_codex
+            .lock()
+            .expect("runtime engine codex")
+            .insert(
+                backend.to_string(),
+                Arc::new(CodexEngineRuntime::new(config)),
+            );
+    }
+
+    /// Whether `backend` runs on the ported engine.
+    #[allow(dead_code)]
+    pub fn uses_engine(&self, backend: &str) -> bool {
+        self.inner
+            .engine_codex
+            .lock()
+            .expect("runtime engine codex")
+            .contains_key(backend)
+    }
+
+    fn engine_for(&self, backend: &str) -> Option<Arc<CodexEngineRuntime>> {
+        self.inner
+            .engine_codex
+            .lock()
+            .expect("runtime engine codex")
+            .get(backend)
+            .cloned()
+    }
+
+    fn session_engine(
+        &self,
+        session: &SessionId,
+    ) -> Result<Option<Arc<CodexEngineRuntime>>, RuntimeError> {
+        Ok(self
+            .inner
+            .sessions
+            .lock()
+            .expect("runtime sessions")
+            .get(session)
+            .ok_or_else(|| RuntimeError::UnknownSession(session.clone()))?
+            .engine
+            .clone())
+    }
+
+    fn start_engine_codex(
+        &self,
+        engine: Arc<CodexEngineRuntime>,
+        spec: SessionSpec,
+        sink: EventSink,
+    ) -> Result<SessionId, RuntimeError> {
+        let inner = self.inner.clone();
+        let observe = sink.clone();
+        let wrapped: EventSink = Arc::new(move |event| {
+            inner.observe(&event);
+            observe(event);
+        });
+        let id = engine.start(spec.clone(), wrapped)?;
+        let mut session = session_from_spec(&spec, sink, None, Vec::new());
+        session.title = spec
+            .first_message
+            .as_ref()
+            .map(|input| input.text.chars().take(60).collect());
+        session.engine = Some(engine);
+        self.insert_session(id.clone(), session);
+        Ok(id)
     }
 
     /// Registers an ACP agent, local or reached through a node.
@@ -220,6 +326,23 @@ impl RuntimeAdapters {
             .expect("runtime sessions")
             .get(session)
             .map(|session| session.acp_options.clone())
+    }
+
+    /// Whether this session runs on the ported engine.
+    pub fn uses_engine_for_session(&self, session: &SessionId) -> bool {
+        matches!(self.session_engine(session), Ok(Some(_)))
+    }
+
+    /// Read an engine session's history with the provider's `thread/read`
+    /// path (no writer lock). `None` when the session is not engine-owned.
+    pub fn read_history(
+        &self,
+        session: &SessionId,
+    ) -> Option<Result<atrium_engine::providers::adapter::ThreadHistory, RuntimeError>> {
+        match self.session_engine(session) {
+            Ok(Some(engine)) => Some(engine.read_history(session)),
+            _ => None,
+        }
     }
 
     /// Records what an app pump translated. Keeps `wait` and `transcript`
@@ -474,6 +597,9 @@ impl Default for RuntimeAdapters {
 
 impl AgentRuntime for RuntimeAdapters {
     fn capabilities(&self, agent: &str) -> Capabilities {
+        if let Some(engine) = self.engine_for(agent) {
+            return engine.capabilities(agent);
+        }
         if let Some(caps) = self
             .inner
             .caps
@@ -489,7 +615,14 @@ impl AgentRuntime for RuntimeAdapters {
 
     fn start(&self, spec: SessionSpec, sink: EventSink) -> Result<SessionId, RuntimeError> {
         if agents::is_codex(&spec.agent) {
-            self.start_codex(spec, sink)
+            // Remote sessions stay on the legacy path even if an engine was
+            // registered for the backend (the engine rejects them anyway).
+            let remote = spec.device.is_some() || spec.agent.contains('@');
+            if !remote && let Some(engine) = self.engine_for(&spec.agent) {
+                self.start_engine_codex(engine, spec, sink)
+            } else {
+                self.start_codex(spec, sink)
+            }
         } else {
             self.start_acp(spec, sink)
         }
@@ -506,7 +639,13 @@ impl AgentRuntime for RuntimeAdapters {
         }
         let (agent, _, _) = self.session_snapshot(session)?;
         if agents::is_codex(&agent) {
-            self.send_codex(session, input, delivery)
+            if let Some(engine) = self.session_engine(session)? {
+                let turn = engine.send(session, input, delivery)?;
+                self.record_started_turn(session, &turn);
+                Ok(turn)
+            } else {
+                self.send_codex(session, input, delivery)
+            }
         } else {
             self.send_acp(session, input, delivery)
         }
@@ -518,6 +657,9 @@ impl AgentRuntime for RuntimeAdapters {
         }
         let (agent, active, _) = self.session_snapshot(session)?;
         if agents::is_codex(&agent) {
+            if let Some(engine) = self.session_engine(session)? {
+                return engine.steer(session, input);
+            }
             let registered = self.codex_client(&agent)?;
             let turn = active.ok_or_else(|| {
                 RuntimeError::Unsupported("nothing is running to steer into".into())
@@ -552,6 +694,9 @@ impl AgentRuntime for RuntimeAdapters {
     fn interrupt(&self, session: &SessionId) -> Result<(), RuntimeError> {
         let (agent, active, _) = self.session_snapshot(session)?;
         if agents::is_codex(&agent) {
+            if let Some(engine) = self.session_engine(session)? {
+                return engine.interrupt(session);
+            }
             let Some(turn) = active else {
                 return Ok(());
             };
@@ -572,6 +717,9 @@ impl AgentRuntime for RuntimeAdapters {
     ) -> Result<(), RuntimeError> {
         let (agent, _, _) = self.session_snapshot(session)?;
         if agents::is_codex(&agent) {
+            if let Some(engine) = self.session_engine(session)? {
+                return engine.answer_approval(session, request, decision);
+            }
             let registered = self.codex_client(&agent)?;
             registered
                 .client
@@ -591,6 +739,9 @@ impl AgentRuntime for RuntimeAdapters {
         turn: Option<&TurnId>,
         timeout_ms: u64,
     ) -> Result<TurnOutcome, RuntimeError> {
+        if let Some(engine) = self.session_engine(session)? {
+            return engine.wait(session, turn, timeout_ms);
+        }
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         let mut sessions = self.inner.sessions.lock().expect("runtime sessions");
         loop {
@@ -620,6 +771,9 @@ impl AgentRuntime for RuntimeAdapters {
     }
 
     fn transcript(&self, session: &SessionId) -> Result<Transcript, RuntimeError> {
+        if let Some(engine) = self.session_engine(session)? {
+            return engine.transcript(session);
+        }
         self.inner
             .sessions
             .lock()
@@ -648,6 +802,9 @@ impl AgentRuntime for RuntimeAdapters {
     fn limits(&self, agent: &str) -> Result<Option<RateLimits>, RuntimeError> {
         if !agents::is_codex(agent) {
             return Ok(None);
+        }
+        if let Some(engine) = self.engine_for(agent) {
+            return engine.limits(agent);
         }
         let registered = self.codex_client(agent)?;
         futures::executor::block_on(registered.client.rate_limits())
@@ -683,7 +840,21 @@ fn session_from_spec(
         running: false,
         updated_at_ms: now_ms(),
         acp_options,
+        engine: None,
     }
+}
+
+/// Whether the app should route Codex sessions through the ported engine.
+/// Off by default; `ATRIUM_CODEX_ENGINE=1` selects it.
+fn engine_requested() -> bool {
+    std::env::var("ATRIUM_CODEX_ENGINE")
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "" | "0" | "false"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn turn_request(state: &Session, input: &TurnInput) -> TurnRequest {
@@ -700,11 +871,8 @@ fn turn_request(state: &Session, input: &TurnInput) -> TurnRequest {
 }
 
 fn access_mode(name: Option<&str>) -> AccessMode {
-    match name.unwrap_or_default() {
-        "read-only" | "readOnly" | "untrusted" => AccessMode::ReadOnly,
-        "full-access" | "fullAccess" | "never" => AccessMode::FullAccess,
-        _ => AccessMode::Auto,
-    }
+    // One mapping, shared with the ported engine (see `AccessMode::from_name`).
+    AccessMode::from_name(name.unwrap_or_default())
 }
 
 /// The name [`SessionSpec::access_mode`] takes for an app access mode.
@@ -723,9 +891,10 @@ fn now_ms() -> i64 {
         .unwrap_or_default()
 }
 
-// The scheduler and send paths go through these small functions, so their
-// tests can drive them with `atrium_runtime::MockRuntime` alone.
+// The tests drive the trait with `atrium_runtime::MockRuntime` through these
+// small sync wrappers.
 
+#[cfg(test)]
 pub(crate) fn start_session(
     runtime: &dyn AgentRuntime,
     spec: SessionSpec,
@@ -734,6 +903,7 @@ pub(crate) fn start_session(
     runtime.start(spec, sink)
 }
 
+#[cfg(test)]
 pub(crate) fn send_turn(
     runtime: &dyn AgentRuntime,
     session: &SessionId,
@@ -743,6 +913,74 @@ pub(crate) fn send_turn(
     runtime.send(session, input, delivery)
 }
 
+/// The runtime trait is synchronous because its provider clients are. The
+/// engine's `start` and `send` spawn a process and wait on app-server
+/// requests, so the app must not run them on GPUI's background executor.
+/// These helpers move one call onto its own thread and await the result; the
+/// executor stays free while the engine works. The app uses them for every
+/// project and workflow call; the sync helpers remain for tests.
+async fn off_executor<T, F>(job: F) -> Result<T, RuntimeError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, RuntimeError> + Send + 'static,
+{
+    let (tx, rx) = futures::channel::oneshot::channel();
+    std::thread::Builder::new()
+        .name("atrium-runtime-call".into())
+        .spawn(move || {
+            let _ = tx.send(job());
+        })
+        .map_err(RuntimeError::failed)?;
+    rx.await.map_err(|_| {
+        RuntimeError::Failed("the runtime call thread ended without a result".into())
+    })?
+}
+
+pub(crate) async fn start_session_async(
+    runtime: Arc<RuntimeAdapters>,
+    spec: SessionSpec,
+    sink: EventSink,
+) -> Result<SessionId, RuntimeError> {
+    off_executor(move || runtime.start(spec, sink)).await
+}
+
+pub(crate) async fn send_turn_async(
+    runtime: Arc<RuntimeAdapters>,
+    session: SessionId,
+    input: TurnInput,
+    delivery: Delivery,
+) -> Result<TurnId, RuntimeError> {
+    off_executor(move || runtime.send(&session, input, delivery)).await
+}
+
+pub(crate) async fn steer_turn_async(
+    runtime: Arc<RuntimeAdapters>,
+    session: SessionId,
+    input: TurnInput,
+) -> Result<(), RuntimeError> {
+    off_executor(move || runtime.steer(&session, input)).await
+}
+
+pub(crate) async fn interrupt_turn_async(
+    runtime: Arc<RuntimeAdapters>,
+    session: SessionId,
+) -> Result<(), RuntimeError> {
+    off_executor(move || runtime.interrupt(&session)).await
+}
+
+/// Read an engine session's history off the executor. `None` when the
+/// session is not engine-owned; the caller falls back to the Codex client.
+pub(crate) async fn read_history_async(
+    runtime: Arc<RuntimeAdapters>,
+    session: SessionId,
+) -> Option<Result<atrium_engine::providers::adapter::ThreadHistory, RuntimeError>> {
+    off_executor(move || Ok(runtime.read_history(&session)))
+        .await
+        .ok()
+        .flatten()
+}
+
+#[cfg(test)]
 pub(crate) fn steer_turn(
     runtime: &dyn AgentRuntime,
     session: &SessionId,
@@ -751,6 +989,7 @@ pub(crate) fn steer_turn(
     runtime.steer(session, input)
 }
 
+#[cfg(test)]
 pub(crate) fn interrupt_turn(
     runtime: &dyn AgentRuntime,
     session: &SessionId,

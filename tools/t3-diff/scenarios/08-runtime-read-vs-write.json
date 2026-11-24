@@ -1,0 +1,15 @@
+{
+  "name": "08-runtime-read-vs-write",
+  "provider": "mockcodex",
+  "model": "mock-1",
+  "t3": "skip: T3's CLI reads its own server projection; the engine runtime's thread/read path is asserted here",
+  "turns": [{"text": "say hi"}],
+  "read_snapshot": true,
+  "expect": {
+    "final_status": "completed",
+    "stream_contains": [
+      {"kind": "engine.readSnapshot", "read": "ok"}
+    ],
+    "provider_methods": ["thread/start", "turn/start", "thread/read"]
+  }
+}

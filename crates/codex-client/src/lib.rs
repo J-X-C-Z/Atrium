@@ -20,6 +20,6 @@ mod client;
 
 pub use client::{
     AccessMode, Answers, CodexClient, CodexConfig, ModelInfo, PREDICTION_PROMPT, Prediction,
-    ReviewTarget, StartThread, TurnRequest,
+    ReviewTarget, StartThread, ThreadSettingsUpdate, TurnRequest,
 };
 pub use rpc::{Incoming, RpcError};
