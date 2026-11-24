@@ -741,6 +741,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "atrium-office-diff"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "atrium-layout",
+ "atrium-office",
+ "fontdb",
+ "resvg 0.47.0",
+ "rustybuzz",
+ "serde_json",
+ "ttf-parser",
+ "usvg 0.47.0",
+]
+
+[[package]]
 name = "atrium-phone"
 version = "0.1.0"
 dependencies = [

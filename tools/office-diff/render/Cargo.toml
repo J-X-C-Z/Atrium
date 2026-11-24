@@ -1,0 +1,19 @@
+[package]
+name = "atrium-office-diff"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Renders Atrium's own page layout as SVG/PNG, and sheets as their shown text, for tools/office-diff."
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+atrium-office = { path = "../../../crates/atrium-office" }
+atrium-layout = { path = "../../../crates/atrium-layout" }
+fontdb = "0.23"
+rustybuzz = "0.20"
+ttf-parser = "0.25"
+resvg = "0.47"
+usvg = "0.47"

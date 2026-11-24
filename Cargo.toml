@@ -20,6 +20,7 @@ members = [
     "crates/atrium-memory",
     "crates/atrium-team",
     "crates/atrium-app",
+    "tools/office-diff/render",
 ]
 
 [workspace.package]
