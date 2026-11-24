@@ -27,6 +27,30 @@ pub(super) struct TaskPoolSchedule {
     last_cleanup: HashMap<(PathBuf, String), Instant>,
 }
 
+impl TaskPoolSchedule {
+    /// Drops the scheduling state of a project that is no longer open.
+    pub(super) fn forget_root(&mut self, root: &Path) {
+        self.starting.retain(|(project, _)| project != root);
+        self.workers.retain(|(project, _), _| project != root);
+        self.last_start_failure
+            .retain(|(project, _), _| project != root);
+        self.goal_cleaned.retain(|(project, _)| project != root);
+        self.last_cleanup.retain(|(project, _), _| project != root);
+    }
+
+    /// Drops per-worker state once a pool worker is retired; its activity and
+    /// retry clocks are only meaningful while it can claim tasks. The
+    /// goal-cleanup marker stays so a completed goal is not asked again.
+    pub(super) fn prune_retired(&mut self, root: &Path, live: &HashSet<String>) {
+        let stale =
+            |(project, stream): &(PathBuf, String)| project == root && !live.contains(stream);
+        self.starting.retain(|key| !stale(key));
+        self.workers.retain(|key, _| !stale(key));
+        self.last_start_failure.retain(|key, _| !stale(key));
+        self.last_cleanup.retain(|key, _| !stale(key));
+    }
+}
+
 struct WorkerActivity {
     idle_since: Instant,
     empty_since: Option<Instant>,

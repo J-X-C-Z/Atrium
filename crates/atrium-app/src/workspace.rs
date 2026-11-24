@@ -2250,12 +2250,56 @@ impl Workspace {
         }
     }
 
+    /// Drops every per-conversation entry that is only about `thread`: its
+    /// transcript, goals, unread count, timing rows, pending sync turns and
+    /// choices. A thread closed for good (archived, moved away, or dropped
+    /// with its project) must not leave these behind for the life of the app.
+    /// The thread's metadata in `threads` stays; callers decide whether to
+    /// keep showing it.
+    pub(super) fn forget_thread_state(&mut self, thread: &str) {
+        if let Some(transcript) = self.transcripts.remove(thread) {
+            // Timing rows are keyed by reasoning item, not by thread; free the
+            // rows this transcript owned along with it.
+            for entry in transcript.entries() {
+                if let atrium_core::EntryKind::Item(Item::Reasoning { id, .. }) = &entry.kind {
+                    self.timings.remove(id);
+                }
+            }
+        }
+        self.loaded_threads.remove(thread);
+        self.loading.remove(thread);
+        self.born.remove(thread);
+        self.turn_started.remove(thread);
+        self.predictions.remove(thread);
+        self.prediction_forks
+            .retain(|_, (source, _)| source != thread);
+        self.checkpoints.remove(thread);
+        self.restores.remove(thread);
+        self.doc_reports.remove(thread);
+        self.step_folds.remove(thread);
+        self.unread.remove(thread);
+        self.dismissed_next.remove(thread);
+        self.goals.remove(thread);
+        self.memory_off.remove(thread);
+        self.session_options.remove(thread);
+        self.commands.remove(thread);
+        self.warm.retain(|_, (session, _)| session != thread);
+        self.sync_pending_turns.remove(thread);
+        self.answered_by.retain(|(id, _), _| id != thread);
+        if let Some(sync) = &mut self.sync {
+            sync.owners.remove(thread);
+            sync.cursors.remove(thread);
+        }
+        if self.editing.as_ref().is_some_and(|(id, _)| id == thread) {
+            self.editing = None;
+        }
+    }
+
     pub fn archive(&mut self, thread_id: String, cx: &mut Context<Self>) {
         if !crate::agents::is_codex(self.backend_of(&thread_id)) {
             self.acp_archive(thread_id.clone(), cx);
             self.threads.retain(|t| t.id != thread_id);
-            self.transcripts.remove(&thread_id);
-            self.loaded_threads.remove(&thread_id);
+            self.forget_thread_state(&thread_id);
             self.settings.pinned.retain(|id| *id != thread_id);
             if self.view == View::Thread(thread_id) {
                 self.view = View::Draft;
@@ -2269,8 +2313,7 @@ impl Workspace {
             return;
         };
         self.threads.retain(|t| t.id != thread_id);
-        self.transcripts.remove(&thread_id);
-        self.loaded_threads.remove(&thread_id);
+        self.forget_thread_state(&thread_id);
         self.settings.pinned.retain(|id| *id != thread_id);
         if self.view == View::Thread(thread_id.clone()) {
             self.view = View::Draft;
@@ -2719,6 +2762,90 @@ mod tests {
         );
         assert_eq!(composed.images, vec![PathBuf::from("/a/shot.PNG")]);
         assert_eq!(composed.mentions, vec![PathBuf::from("/a/src/main.rs")]);
+    }
+
+    #[test]
+    fn forgetting_a_thread_drops_every_per_thread_entry() {
+        let mut ws = Workspace::with_settings(Settings::default());
+        let thread = "closed-thread";
+        let mut transcript = Transcript::new();
+        transcript.apply(&AgentEvent::ItemCompleted {
+            thread_id: thread.into(),
+            turn_id: "turn".into(),
+            item: Item::Reasoning {
+                id: "reasoning-item".into(),
+                text: "thinking".into(),
+            },
+        });
+        ws.transcripts.insert(thread.into(), transcript);
+        ws.loaded_threads.insert(thread.into());
+        ws.loading.insert(thread.into());
+        ws.timings
+            .insert("reasoning-item".into(), (Instant::now(), None));
+        ws.timings
+            .insert("other-item".into(), (Instant::now(), None));
+        ws.born.insert(thread.into(), Vec::new());
+        ws.turn_started.insert(thread.into(), Instant::now());
+        ws.predictions.insert(thread.into(), "next".into());
+        ws.prediction_forks
+            .insert("fork".into(), (thread.into(), "half".into()));
+        ws.checkpoints.insert(thread.into(), vec![1]);
+        ws.restores.insert(thread.into(), 1);
+        ws.doc_reports.insert(thread.into(), Vec::new());
+        ws.step_folds.insert(thread.into(), true);
+        ws.unread.insert(thread.into(), 2);
+        ws.dismissed_next.insert(thread.into());
+        ws.goals.insert(
+            thread.into(),
+            Goal {
+                objective: "soak".into(),
+                status: GoalStatus::Active,
+                token_budget: None,
+                tokens_used: 0,
+                time_used_secs: 0,
+            },
+        );
+        ws.memory_off.insert(thread.into());
+        ws.session_options.insert(thread.into(), Vec::new());
+        ws.commands.insert(thread.into(), Vec::new());
+        ws.warm
+            .insert("claude".into(), (thread.into(), PathBuf::from("/tmp")));
+        ws.sync_pending_turns.insert(thread.into(), Vec::new());
+        ws.answered_by
+            .insert((thread.into(), "7".into()), "phone".into());
+        ws.editing = Some((thread.into(), "turn".into()));
+
+        ws.forget_thread_state(thread);
+
+        assert!(ws.transcripts.is_empty());
+        assert!(ws.loaded_threads.is_empty());
+        assert!(ws.loading.is_empty());
+        assert!(
+            !ws.timings.contains_key("reasoning-item"),
+            "the forgotten transcript's timing row is freed"
+        );
+        assert!(
+            ws.timings.contains_key("other-item"),
+            "timings of other live transcripts stay"
+        );
+        assert!(ws.born.is_empty());
+        assert!(ws.turn_started.is_empty());
+        assert!(ws.predictions.is_empty());
+        assert!(ws.prediction_forks.is_empty());
+        assert!(ws.checkpoints.is_empty());
+        assert!(ws.restores.is_empty());
+        assert!(ws.doc_reports.is_empty());
+        assert!(ws.step_folds.is_empty());
+        assert!(ws.unread.is_empty());
+        assert!(ws.dismissed_next.is_empty());
+        assert!(ws.goals.is_empty());
+        assert!(ws.memory_off.is_empty());
+        assert!(ws.session_options.is_empty());
+        assert!(ws.commands.is_empty());
+        assert!(ws.warm.is_empty());
+        assert!(ws.sync_pending_turns.is_empty());
+        assert!(ws.answered_by.is_empty());
+        assert!(ws.editing.is_none());
     }
 }
 

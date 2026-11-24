@@ -5,7 +5,7 @@
 //! keeping the old `agent@device` behaviour.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     fs::{self, File},
     future::Future,
     io::Write,
@@ -111,7 +111,10 @@ pub struct SyncState {
 struct Pairing {
     code: Option<PairCode>,
     tokens: HashSet<String>,
-    attempts: HashMap<String, u8>,
+    /// Failed redemptions of the current code. A single counter, not a map
+    /// keyed by the submitted text: only the live code can be redeemed, and
+    /// arbitrary guesses must not accumulate.
+    attempts: u8,
     path: PathBuf,
 }
 
@@ -195,10 +198,12 @@ impl SyncState {
     /// Shows a 6-digit code valid for five minutes.
     pub fn start_pairing(&self, now_ms: i64) -> String {
         let code = format!("{:06}", uuid::Uuid::new_v4().as_u128() % 1_000_000);
-        self.pairing.lock().expect("pairing").code = Some(PairCode {
+        let mut pairing = self.pairing.lock().expect("pairing");
+        pairing.code = Some(PairCode {
             code: code.clone(),
             expires_ms: now_ms + PAIR_CODE_TTL_MS,
         });
+        pairing.attempts = 0;
         code
     }
 
@@ -210,13 +215,13 @@ impl SyncState {
         };
         if active.expires_ms < now_ms {
             pairing.code = None;
+            pairing.attempts = 0;
             return Err(PairError::Expired);
         }
-        let attempts = pairing.attempts.entry(code.to_string()).or_default();
-        if *attempts >= PAIR_ATTEMPTS {
+        if pairing.attempts >= PAIR_ATTEMPTS {
             return Err(PairError::TooManyAttempts);
         }
-        *attempts += 1;
+        pairing.attempts = pairing.attempts.saturating_add(1);
         if active.code != code {
             return Err(PairError::WrongCode);
         }
@@ -227,6 +232,7 @@ impl SyncState {
         );
         pairing.tokens.insert(token.clone());
         pairing.code = None;
+        pairing.attempts = 0;
         pairing.persist().map_err(PairError::Io)?;
         Ok(token)
     }
@@ -290,7 +296,7 @@ impl Pairing {
         Self {
             code: None,
             tokens,
-            attempts: HashMap::new(),
+            attempts: 0,
             path,
         }
     }
@@ -360,6 +366,27 @@ mod tests {
         drop(sync);
         let reopened = state(dir.path());
         assert!(reopened.accepts_token(&token));
+    }
+
+    #[test]
+    fn pairing_attempts_are_bounded_and_a_new_code_resets_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync = state(dir.path());
+        let _code = sync.start_pairing(1_000);
+        // Guesses are counted, not remembered by text: an arbitrary number of
+        // distinct wrong guesses must not grow any per-guess state.
+        for _ in 0..PAIR_ATTEMPTS {
+            assert!(matches!(
+                sync.join_pairing("******", 1_001),
+                Err(PairError::WrongCode)
+            ));
+        }
+        assert!(matches!(
+            sync.join_pairing("******", 1_002),
+            Err(PairError::TooManyAttempts)
+        ));
+        let next = sync.start_pairing(2_000);
+        assert!(sync.join_pairing(&next, 2_001).is_ok());
     }
 
     #[test]

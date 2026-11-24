@@ -1958,14 +1958,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Result<(), HostError> {
         self.threads.retain(|thread| thread.id != id);
-        self.transcripts.remove(id);
-        self.loaded_threads.remove(id);
-        self.turn_started.remove(id);
-        self.loading.remove(id);
-        if let Some(sync) = &mut self.sync {
-            sync.owners.remove(id);
-            sync.cursors.remove(id);
-        }
+        self.forget_thread_state(id);
         if self.view == View::Thread(id.to_string()) {
             self.view = View::Draft;
         }
