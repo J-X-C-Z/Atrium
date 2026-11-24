@@ -347,7 +347,17 @@ fn line_parts(item: &Item) -> Vec<Line> {
                 (icon, verb.into(), c.path.clone(), Some(diff_counts(c)))
             })
             .collect(),
-        Item::Tool { name, .. } => vec![(IconName::Wrench, t("Used").into(), name.clone(), None)],
+        Item::Tool {
+            name, arguments, ..
+        } => {
+            let summary = crate::engine_view::tool_summary(arguments, 80);
+            let what = if summary.is_empty() {
+                name.clone()
+            } else {
+                format!("{name}: {summary}")
+            };
+            vec![(IconName::Wrench, t("Used").into(), what, None)]
+        }
         Item::WebSearch { query, .. } => {
             vec![(
                 IconName::Globe,
@@ -428,6 +438,21 @@ pub fn line(
                 }))
                 .id(SharedString::from(format!("step-{id}-{ix}")))
         });
+    let live = working(item).then(|| {
+        let took = workspace.read(cx).item_took(&id).unwrap_or_default();
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .text_size(cx.theme().text_size(TextSize::Xs))
+            .text_color(colors.fg_subtle)
+            .child(
+                Spinner::new(SharedString::from(format!("step-busy-{id}")))
+                    .style(SpinnerStyle::Ring)
+                    .size(IconSize::Xs),
+            )
+            .child(super::rows::format_duration(took))
+    });
     let id_click = id.clone();
     div()
         .pl_6()
@@ -443,7 +468,9 @@ pub fn line(
                 .py_0p5()
                 .cursor_pointer()
                 .text_size(cx.theme().text_size(TextSize::Sm))
+                .tooltip(ely_gpui_component::primitives::Tooltip::text(t("Inspect")))
                 .children(rows)
+                .children(live)
                 .on_click(move |_, _, cx| {
                     let id = id_click.clone();
                     toggle.update(cx, |ws, cx| {

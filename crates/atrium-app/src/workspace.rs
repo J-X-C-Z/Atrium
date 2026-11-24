@@ -23,7 +23,7 @@ use gpui::{AppContext, Context, EventEmitter, Task};
 use crate::runtime_adapters::RuntimeAdapters;
 
 use crate::i18n::{t, t_any, tf};
-use crate::settings::{Settings, ThemePref};
+use crate::settings::{SavedArchivedChat, Settings, ThemePref};
 
 #[path = "notice_dispatch.rs"]
 mod notice_dispatch;
@@ -268,6 +268,18 @@ pub struct Workspace {
     pub login: Option<String>,
     /// The user message being edited: `(thread, turn it started)`.
     pub editing: Option<(String, String)>,
+    /// Messages held until the running turn ends, by chat.
+    queued: HashMap<String, Vec<QueuedMessage>>,
+    next_queued: u64,
+    /// Prompts already sent, newest first, by chat, for Up-arrow recall.
+    pub prompt_history: HashMap<String, Vec<String>>,
+    /// The last list change (archive, delete, pin) with its undo.
+    pub undo: Option<Undo>,
+    /// Chats taken out of the list.
+    archived: Vec<ArchivedChat>,
+    /// Item 26's usage report, once the engine fills it. Until then the
+    /// banner reads the live limit reading; it never invents numbers.
+    pub engine_usage: Option<crate::engine_view::UsageReport>,
     /// Full-text search: the query and what it found.
     pub search: Option<(String, Vec<(ThreadMeta, String)>)>,
     _search: Option<Task<()>>,
@@ -323,6 +335,56 @@ pub struct Fill(pub Composed);
 
 impl EventEmitter<Fill> for Workspace {}
 
+pub use crate::queue::QueuedMessage;
+
+/// A chat taken out of the list, kept so the list can show it under
+/// Archived and so Undo can put it back.
+#[derive(Clone, Debug)]
+pub struct ArchivedChat {
+    pub meta: ThreadMeta,
+    pub transcript: Option<Transcript>,
+}
+
+/// Rebuilds an archived row from settings after a restart.
+fn archived_from_saved(saved: &SavedArchivedChat) -> ArchivedChat {
+    ArchivedChat {
+        meta: ThreadMeta {
+            id: saved.id.clone(),
+            backend: saved.backend.clone(),
+            name: saved.name.clone(),
+            preview: saved.preview.clone(),
+            cwd: saved.cwd.clone(),
+            model: saved.model.clone(),
+            created_at: saved.created_at,
+            updated_at: saved.updated_at,
+        },
+        // The transcript is not persisted: opening the chat loads it again.
+        transcript: None,
+    }
+}
+
+/// The settings record for an archived row; transcripts stay out of settings.
+fn saved_archived(chat: &ArchivedChat) -> SavedArchivedChat {
+    SavedArchivedChat {
+        id: chat.meta.id.clone(),
+        backend: chat.meta.backend.clone(),
+        name: chat.meta.name.clone(),
+        preview: chat.meta.preview.clone(),
+        cwd: chat.meta.cwd.clone(),
+        model: chat.meta.model.clone(),
+        created_at: chat.meta.created_at,
+        updated_at: chat.meta.updated_at,
+    }
+}
+
+/// The last list change that can be undone, with what it needs.
+#[derive(Clone, Debug)]
+pub enum Undo {
+    Archive { id: String, archived: ArchivedChat },
+    Delete { id: String, archived: ArchivedChat },
+    Pin { id: String, pinned: bool },
+}
+
 impl Workspace {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let mut workspace = Self::with_settings(Settings::load());
@@ -350,6 +412,14 @@ impl Workspace {
 
     fn with_settings(settings: Settings) -> Self {
         let (runtime_events_tx, runtime_events) = futures::channel::mpsc::unbounded();
+        // Queues and archived chats survive a restart through settings, not
+        // through the workspace folder.
+        let (queued, next_queued) = crate::queue::restore(&settings.queues, settings.next_queue_id);
+        let archived: Vec<ArchivedChat> = settings
+            .archived_chats
+            .iter()
+            .map(archived_from_saved)
+            .collect();
         Self {
             status: Status::Connecting,
             client: None,
@@ -405,6 +475,12 @@ impl Workspace {
             memory: None,
             login: None,
             editing: None,
+            queued,
+            next_queued,
+            prompt_history: HashMap::new(),
+            undo: None,
+            archived,
+            engine_usage: None,
             search: None,
             _search: None,
             agents: Vec::new(),
@@ -802,12 +878,17 @@ impl Workspace {
             }
             _ => {}
         }
-        if let Some(thread_id) = event.thread_id().map(str::to_owned)
-            && let Some(transcript) = self.transcripts.get_mut(&thread_id)
+        let turn_ended = matches!(&event, AgentEvent::TurnCompleted { .. });
+        let ended_thread = event.thread_id().map(str::to_owned);
+        if let Some(thread_id) = ended_thread.as_deref()
+            && let Some(transcript) = self.transcripts.get_mut(thread_id)
         {
             let before = transcript.len();
             transcript.apply(&event);
-            self.note_births(&thread_id, before);
+            self.note_births(thread_id, before);
+        }
+        if turn_ended && let Some(thread_id) = ended_thread {
+            self.drain_queue(&thread_id, cx);
         }
     }
 
@@ -905,12 +986,9 @@ impl Workspace {
 
     fn time(&mut self, event: &AgentEvent) {
         match event {
-            AgentEvent::ItemStarted {
-                item: Item::Reasoning { id, .. },
-                ..
-            } => {
+            AgentEvent::ItemStarted { item, .. } => {
                 self.timings
-                    .entry(id.clone())
+                    .entry(item.id().to_string())
                     .or_insert((Instant::now(), None));
             }
             AgentEvent::ReasoningDelta { item_id, .. } => {
@@ -918,11 +996,8 @@ impl Workspace {
                     .entry(item_id.clone())
                     .or_insert((Instant::now(), None));
             }
-            AgentEvent::ItemCompleted {
-                item: Item::Reasoning { id, .. },
-                ..
-            } => {
-                if let Some((start, took)) = self.timings.get_mut(id) {
+            AgentEvent::ItemCompleted { item, .. } => {
+                if let Some((start, took)) = self.timings.get_mut(item.id()) {
                     took.get_or_insert(start.elapsed());
                 }
             }
@@ -968,6 +1043,16 @@ impl Workspace {
             Some((start, None)) => start.elapsed(),
             None => Duration::ZERO,
         }
+    }
+
+    /// How long an item (a tool call, command or edit) has been running, or
+    /// took once done.
+    pub fn item_took(&self, item_id: &str) -> Option<Duration> {
+        self.timings.get(item_id).map(|(start, took)| {
+            took.unwrap_or_else(|| {
+                Duration::from_secs(crate::engine_view::live_seconds(*start, Instant::now()))
+            })
+        })
     }
 
     /// How long the shown chat's turn has been running.
@@ -1017,6 +1102,19 @@ impl Workspace {
     /// What a chat in the list shows it is doing.
     pub fn chat_status(&self, thread_id: &str) -> ely_gpui_component::chat::ConversationStatus {
         use ely_gpui_component::chat::ConversationStatus;
+        // Engine-backed sessions read the event store's projections. Legacy
+        // sessions keep the transcript path below.
+        if (self.runtime.is_engine_session(thread_id)
+            || self.runtime.uses_engine(self.backend_of(thread_id)))
+            && let Some(projected) = self.runtime.projected_chat(thread_id)
+        {
+            match projected.activity {
+                crate::engine_view::ChatActivity::Waiting => return ConversationStatus::Waiting,
+                crate::engine_view::ChatActivity::Working => return ConversationStatus::Working,
+                crate::engine_view::ChatActivity::Idle
+                | crate::engine_view::ChatActivity::Unread(_) => {}
+            }
+        }
         let transcript = self.transcripts.get(thread_id);
         if transcript.is_some_and(|t| t.pending_approvals().next().is_some()) {
             return ConversationStatus::Waiting;
@@ -1031,6 +1129,360 @@ impl Workspace {
                 ConversationStatus::Unread(*n)
             }
             _ => ConversationStatus::Idle,
+        }
+    }
+
+    /// The key of what the main column shows (`draft` or a thread id), for
+    /// per-thread drafts, prompt history and queued messages.
+    pub fn view_key(&self) -> &str {
+        self.view.key()
+    }
+
+    /// Which controls the shown session can honestly show. Engine-backed
+    /// sessions read T3's declared capabilities; the rest read the app's
+    /// record from the same handshake.
+    pub fn control_set(&self) -> crate::engine_view::Controls {
+        let backend = self.view_backend();
+        if let Some(caps) = self.runtime.engine_provider_capabilities(backend) {
+            return crate::engine_view::controls_from_engine(&caps);
+        }
+        crate::engine_view::controls_from(&self.runtime.capabilities(backend))
+    }
+
+    /// The usage report the banner shows: item 26's seam when filled, else
+    /// the live limit reading. No numbers are guessed.
+    ///
+    /// Item 26's typed `usage_overview` / `context_window` read API is not on
+    /// this branch, so the report stays this seam. The context share is
+    /// filled only from a real `TokenUsage` the agent reported.
+    pub fn usage_report(&self) -> Option<crate::engine_view::UsageReport> {
+        let report = self.engine_usage.clone().or_else(|| {
+            self.limits_for(self.view_backend()).map(|limits| {
+                crate::engine_view::usage_report_from_limits(
+                    self.view_backend().to_string(),
+                    limits,
+                )
+            })
+        })?;
+        Some(crate::engine_view::usage_report_with_context(
+            report,
+            self.transcript().and_then(|transcript| transcript.usage()),
+        ))
+    }
+
+    /// Messages still held for the shown chat.
+    pub fn queued_messages(&self) -> &[QueuedMessage] {
+        self.queued
+            .get(self.view.key())
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// Keeps the queue in settings, so a restart still has it.
+    fn save_queues(&mut self) {
+        let (queues, next) = crate::queue::saved(&self.queued, self.next_queued);
+        self.settings.queues = queues;
+        self.settings.next_queue_id = next;
+        self.settings.save();
+    }
+
+    fn drop_empty_queue(&mut self, key: &str) {
+        if self.queued.get(key).is_some_and(Vec::is_empty) {
+            self.queued.remove(key);
+        }
+    }
+
+    /// Holds `composed` until the running turn ends.
+    fn queue_message(&mut self, composed: Composed, cx: &mut Context<Self>) {
+        let id = crate::queue::next_id(&mut self.next_queued);
+        crate::queue::insert(
+            self.queued.entry(self.view.key().to_string()).or_default(),
+            QueuedMessage { id, composed },
+        );
+        self.save_queues();
+        cx.notify();
+    }
+
+    /// Takes a queued message into the composer for editing.
+    pub fn edit_queued(&mut self, id: u64, cx: &mut Context<Self>) {
+        let key = self.view.key().to_string();
+        let removed = self
+            .queued
+            .get_mut(&key)
+            .and_then(|list| crate::queue::take(list, id));
+        self.drop_empty_queue(&key);
+        if let Some(message) = removed {
+            self.save_queues();
+            cx.emit(Fill(message.composed));
+            cx.notify();
+        }
+    }
+
+    pub fn remove_queued(&mut self, id: u64, cx: &mut Context<Self>) {
+        let key = self.view.key().to_string();
+        if let Some(list) = self.queued.get_mut(&key) {
+            crate::queue::take(list, id);
+        }
+        self.drop_empty_queue(&key);
+        self.save_queues();
+        cx.notify();
+    }
+
+    /// Moves a held message earlier (`up`) or later in its chat's queue.
+    pub fn move_queued(&mut self, id: u64, up: bool, cx: &mut Context<Self>) {
+        let key = self.view.key().to_string();
+        let moved = self
+            .queued
+            .get_mut(&key)
+            .is_some_and(|list| crate::queue::move_item(list, id, up));
+        if moved {
+            self.save_queues();
+            cx.notify();
+        }
+    }
+
+    /// Whether a send that returned `NoDispatch` really did nothing. A
+    /// remote owner or an in-progress edit can answer `NoDispatch` after
+    /// taking the message, so those must not be queued again.
+    fn queue_send_bounced(&self, thread_id: &str) -> bool {
+        !self.sync_is_remote(thread_id)
+            && !self
+                .editing
+                .as_ref()
+                .is_some_and(|(thread, _)| thread == thread_id)
+    }
+
+    /// Sends a held message now instead of waiting for the turn to end.
+    pub fn send_queued_now(&mut self, id: u64, cx: &mut Context<Self>) {
+        let key = self.view.key().to_string();
+        let Some(message) = self
+            .queued
+            .get_mut(&key)
+            .and_then(|list| crate::queue::take(list, id))
+        else {
+            return;
+        };
+        self.drop_empty_queue(&key);
+        let composed = message.composed.clone();
+        let result = self.send_queued_in(&key, composed, cx);
+        if result == NoticeSendResult::NoDispatch && self.queue_send_bounced(&key) {
+            // Nothing took it: put it back first and say why.
+            crate::queue::insert_front(self.queued.entry(key).or_default(), message);
+            cx.emit(Notice::Info(
+                t("This agent cannot take a message mid-turn.").into(),
+            ));
+        }
+        self.save_queues();
+        cx.notify();
+    }
+
+    /// Whether one chat (not necessarily the shown one) has a live turn.
+    fn thread_is_running(&self, thread_id: &str) -> bool {
+        self.transcripts
+            .get(thread_id)
+            .is_some_and(Transcript::is_running)
+            || self.turn_started.contains_key(thread_id)
+    }
+
+    /// Whether a running turn for `thread_id` can take another message,
+    /// using the same rule `send_turn` uses to pick steer over queue.
+    fn can_steer_running(&self, thread_id: &str) -> bool {
+        if self.runtime.has_session(thread_id) {
+            self.runtime.capabilities(self.backend_of(thread_id)).steer
+        } else {
+            self.control_set().steer
+        }
+    }
+
+    /// Sends `composed` to `thread_id`, switching only the view key the send
+    /// path reads and restoring it before the next render.
+    fn send_queued_in(
+        &mut self,
+        thread_id: &str,
+        composed: Composed,
+        cx: &mut Context<Self>,
+    ) -> NoticeSendResult {
+        let previous = self.view.clone();
+        // A queued draft only makes sense while the draft is shown; a real
+        // thread's message must switch away from the draft before sending.
+        if thread_id == DRAFT {
+            if !matches!(previous, View::Draft) {
+                return NoticeSendResult::NoDispatch;
+            }
+        } else if previous != View::Thread(thread_id.to_string()) {
+            self.view = View::Thread(thread_id.to_string());
+        }
+        let running = self.is_running();
+        // A running chat that cannot steer would just queue the message
+        // again; report that instead of silently looping it.
+        let result = if running && !self.can_steer_running(thread_id) {
+            NoticeSendResult::NoDispatch
+        } else {
+            self.send_turn(composed, None, false, cx)
+        };
+        if self.view != previous {
+            self.view = previous;
+        }
+        result
+    }
+
+    /// Sends the next held message when `thread_id`'s turn ends, whichever
+    /// chat the window is showing.
+    fn drain_queue(&mut self, thread_id: &str, cx: &mut Context<Self>) {
+        if self.thread_is_running(thread_id) {
+            return;
+        }
+        let Some(message) = self
+            .queued
+            .get_mut(thread_id)
+            .and_then(crate::queue::take_first)
+        else {
+            return;
+        };
+        self.drop_empty_queue(thread_id);
+        let composed = message.composed.clone();
+        let result = self.send_queued_in(thread_id, composed, cx);
+        if result == NoticeSendResult::NoDispatch && self.queue_send_bounced(thread_id) {
+            crate::queue::insert_front(
+                self.queued.entry(thread_id.to_string()).or_default(),
+                message,
+            );
+        }
+        self.save_queues();
+    }
+
+    /// The prompts sent in the shown chat, newest first.
+    pub fn prompts_for_view(&self) -> &[String] {
+        self.prompt_history
+            .get(self.view.key())
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    fn record_prompt(&mut self, text: &str) {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        let list = self
+            .prompt_history
+            .entry(self.view.key().to_string())
+            .or_default();
+        list.retain(|prompt| prompt != text);
+        list.insert(0, text.to_string());
+        list.truncate(100);
+    }
+
+    /// Chats shown under Archived.
+    pub fn archived_chats(&self) -> &[ArchivedChat] {
+        &self.archived
+    }
+
+    pub fn is_archived(&self, thread_id: &str) -> bool {
+        self.archived.iter().any(|chat| chat.meta.id == thread_id)
+    }
+
+    /// Puts an archived chat back in the list and shows it.
+    pub fn unarchive(&mut self, thread_id: &str, cx: &mut Context<Self>) {
+        let Some(ix) = self
+            .archived
+            .iter()
+            .position(|chat| chat.meta.id == thread_id)
+        else {
+            return;
+        };
+        let chat = self.archived.remove(ix);
+        self.upsert_thread(chat.meta);
+        if let Some(transcript) = chat.transcript {
+            self.transcripts.insert(thread_id.to_string(), transcript);
+        }
+        self.settings.hidden_sessions.retain(|id| id != thread_id);
+        self.settings
+            .archived_chats
+            .retain(|chat| chat.id != thread_id);
+        self.settings.save();
+        self.undo = None;
+        cx.notify();
+    }
+
+    /// Drops the undo offer without changing anything.
+    pub fn dismiss_undo(&mut self, cx: &mut Context<Self>) {
+        self.undo = None;
+        cx.notify();
+    }
+
+    /// Undoes the last archive, delete or pin.
+    pub fn undo_last(&mut self, cx: &mut Context<Self>) {
+        match self.undo.take() {
+            Some(Undo::Archive { id, archived } | Undo::Delete { id, archived }) => {
+                self.upsert_thread(archived.meta);
+                if let Some(transcript) = archived.transcript {
+                    self.transcripts.insert(id.clone(), transcript);
+                }
+                self.archived.retain(|chat| chat.meta.id != id);
+                self.settings.hidden_sessions.retain(|hidden| *hidden != id);
+                self.settings.archived_chats.retain(|chat| chat.id != id);
+                self.settings.save();
+                cx.notify();
+            }
+            Some(Undo::Pin { id, pinned }) => {
+                self.settings.pinned.retain(|pinned_id| *pinned_id != id);
+                if pinned {
+                    self.settings.pinned.insert(0, id.clone());
+                }
+                self.settings.save();
+                self.sync_set_thread_field(&id, "pinned", serde_json::json!(pinned));
+                cx.notify();
+            }
+            None => {}
+        }
+    }
+
+    /// Moves to the next model, then the agent's default, and round again.
+    pub fn cycle_model(&mut self, cx: &mut Context<Self>) {
+        if !self.control_set().model {
+            return;
+        }
+        let models: Vec<String> = self.view_models().iter().map(|m| m.id.clone()).collect();
+        let current = self
+            .model_choice()
+            .model
+            .and_then(|model| models.iter().position(|id| *id == model));
+        let next = crate::engine_view::cycle_choice(models.len(), current);
+        self.set_model(next.map(|ix| models[ix].clone()), cx);
+    }
+
+    /// Moves through the current model's effort levels.
+    pub fn cycle_effort(&mut self, cx: &mut Context<Self>) {
+        if !self.control_set().effort {
+            return;
+        }
+        let (efforts, current) = self.efforts();
+        let current = current.and_then(|effort| efforts.iter().position(|level| *level == effort));
+        let next = crate::engine_view::cycle_choice(efforts.len(), current);
+        self.set_effort(next.map(|ix| efforts[ix].clone()), cx);
+    }
+
+    /// Flips Fast when the model offers a speed tier.
+    pub fn toggle_speed(&mut self, cx: &mut Context<Self>) {
+        if !self.control_set().speed || self.fast_tier().is_none() {
+            return;
+        }
+        self.settings.fast = !self.settings.fast;
+        self.settings.save();
+        cx.notify();
+    }
+
+    /// Moves through the access modes.
+    pub fn cycle_approval(&mut self, cx: &mut Context<Self>) {
+        if !self.control_set().approval {
+            return;
+        }
+        let modes = AccessMode::ALL;
+        let current = modes.iter().position(|mode| *mode == self.settings.mode);
+        let next = crate::engine_view::cycle_choice(modes.len(), current);
+        if let Some(mode) = next.map(|ix| modes[ix]) {
+            self.set_mode(mode, cx);
         }
     }
 
@@ -1760,6 +2212,17 @@ impl Workspace {
         {
             return NoticeSendResult::NoDispatch;
         }
+        // A running session that cannot steer holds the message instead.
+        if target.is_none()
+            && crate::engine_view::send_mode(&self.control_set(), self.is_running())
+                == crate::engine_view::SendMode::Queue
+        {
+            self.queue_message(composed, cx);
+            return NoticeSendResult::Submitted;
+        }
+        if target.is_none() {
+            self.record_prompt(&composed.text);
+        }
         // Project sessions talk to the agent through the runtime seam.
         if let View::Thread(thread_id) = self.view.clone() {
             self.ensure_runtime_clients();
@@ -2214,46 +2677,89 @@ impl Workspace {
     }
 
     pub fn archive(&mut self, thread_id: String, cx: &mut Context<Self>) {
-        if !crate::agents::is_codex(self.backend_of(&thread_id)) {
-            self.acp_archive(thread_id.clone(), cx);
-            self.threads.retain(|t| t.id != thread_id);
-            self.transcripts.remove(&thread_id);
-            self.loaded_threads.remove(&thread_id);
-            self.settings.pinned.retain(|id| *id != thread_id);
-            if self.view == View::Thread(thread_id) {
-                self.view = View::Draft;
-                self.draft = Transcript::new();
-            }
-            cx.emit(Notice::Info(t("Chat archived").into()));
-            cx.notify();
+        self.archive_or_delete(thread_id, false, cx);
+    }
+
+    /// Takes a chat out of the list as archived; Delete does the same but
+    /// names it in the undo strip.
+    pub fn delete_chat(&mut self, thread_id: String, cx: &mut Context<Self>) {
+        self.archive_or_delete(thread_id, true, cx);
+    }
+
+    fn archive_or_delete(&mut self, thread_id: String, delete: bool, cx: &mut Context<Self>) {
+        let codex = crate::agents::is_codex(self.backend_of(&thread_id));
+        let client = codex.then(|| self.thread_codex(&thread_id)).flatten();
+        if codex && client.is_none() {
             return;
         }
-        let Some(client) = self.thread_codex(&thread_id) else {
-            return;
-        };
+        if !codex {
+            self.acp_archive(thread_id.clone(), cx);
+        }
+        if let Some(meta) = self.threads.iter().find(|t| t.id == thread_id).cloned() {
+            let archived = ArchivedChat {
+                meta,
+                transcript: self.transcripts.remove(&thread_id),
+            };
+            self.archived.retain(|chat| chat.meta.id != thread_id);
+            self.archived.insert(0, archived.clone());
+            // Settings rebuild this row after a restart, independent of the
+            // agent's own archive state.
+            self.settings
+                .archived_chats
+                .retain(|chat| chat.id != thread_id);
+            self.settings
+                .archived_chats
+                .insert(0, saved_archived(&archived));
+            if !self.settings.hidden_sessions.contains(&thread_id) {
+                self.settings.hidden_sessions.push(thread_id.clone());
+            }
+            self.settings.save();
+            self.undo = Some(if delete {
+                Undo::Delete {
+                    id: thread_id.clone(),
+                    archived,
+                }
+            } else {
+                Undo::Archive {
+                    id: thread_id.clone(),
+                    archived,
+                }
+            });
+        }
         self.threads.retain(|t| t.id != thread_id);
-        self.transcripts.remove(&thread_id);
         self.loaded_threads.remove(&thread_id);
         self.settings.pinned.retain(|id| *id != thread_id);
+        self.turn_started.remove(&thread_id);
+        self.queued.remove(&thread_id);
+        self.save_queues();
         if self.view == View::Thread(thread_id.clone()) {
             self.view = View::Draft;
             self.draft = Transcript::new();
         }
-        cx.emit(Notice::Info(t("Chat archived").into()));
+        cx.emit(Notice::Info(
+            t(if delete {
+                "Chat deleted"
+            } else {
+                "Chat archived"
+            })
+            .into(),
+        ));
         cx.notify();
-        cx.spawn(async move |this, cx| {
-            if let Err(error) = client.thread_archive(&thread_id).await {
-                log::warn!("thread/archive failed: {error:#}");
-                let _ = this.update(cx, |ws, cx| {
-                    cx.emit(Notice::Error(tf(
-                        "Could not archive: {error}",
-                        &[("error", &format!("{error:#}"))],
-                    )));
-                    ws.refresh(cx);
-                });
-            }
-        })
-        .detach();
+        if let Some(client) = client {
+            cx.spawn(async move |this, cx| {
+                if let Err(error) = client.thread_archive(&thread_id).await {
+                    log::warn!("thread/archive failed: {error:#}");
+                    let _ = this.update(cx, |ws, cx| {
+                        cx.emit(Notice::Error(tf(
+                            "Could not archive: {error}",
+                            &[("error", &format!("{error:#}"))],
+                        )));
+                        ws.refresh(cx);
+                    });
+                }
+            })
+            .detach();
+        }
     }
 
     pub fn rename(&mut self, thread_id: String, name: String, cx: &mut Context<Self>) {
@@ -2292,10 +2798,15 @@ impl Workspace {
     }
 
     pub fn toggle_pin(&mut self, thread_id: &str, cx: &mut Context<Self>) {
+        let was = self.settings.is_pinned(thread_id);
         self.settings.toggle_pin(thread_id);
         self.settings.save();
         let pinned = self.settings.is_pinned(thread_id);
         self.sync_set_thread_field(thread_id, "pinned", serde_json::json!(pinned));
+        self.undo = Some(Undo::Pin {
+            id: thread_id.to_string(),
+            pinned: was,
+        });
         cx.notify();
     }
 
@@ -2665,6 +3176,28 @@ mod tests {
             "Codex 0.169.0"
         );
         assert_eq!(backend_label(""), "Codex");
+    }
+
+    #[test]
+    fn an_archived_chat_rebuilds_its_row_from_settings() {
+        let chat = ArchivedChat {
+            meta: ThreadMeta {
+                id: "t1".into(),
+                backend: "codex@studio".into(),
+                name: Some("Build".into()),
+                preview: "fix it".into(),
+                cwd: "/work".into(),
+                model: Some("gpt-5".into()),
+                created_at: 10,
+                updated_at: 20,
+            },
+            transcript: None,
+        };
+        let saved = saved_archived(&chat);
+        let rebuilt = archived_from_saved(&saved);
+        assert_eq!(rebuilt.meta, chat.meta);
+        // Transcripts stay out of settings; opening the chat loads it again.
+        assert!(rebuilt.transcript.is_none());
     }
 
     #[test]

@@ -468,6 +468,10 @@ fn body(
     let theme = cx.theme();
     let colors = theme.colors.clone();
     let ws = workspace.read(cx);
+    // Live timers on tool rows and the working badge need a frame each tick.
+    if ws.is_running() {
+        window.request_animation_frame();
+    }
 
     if let Status::Failed(reason) = &ws.status
         && ws.transcript().is_none()
@@ -566,6 +570,7 @@ fn body(
     let next = next_steps_strip(workspace, cx);
     let reports = doc_reports_strip(workspace, cx);
     let offline = offline_strip(workspace, cx);
+    let usage = usage_strip(workspace, cx);
     ChatContainer::new(messages)
         .composer(
             div()
@@ -574,11 +579,102 @@ fn body(
                 .flex_col()
                 .gap_2()
                 .children(offline)
+                .children(usage)
                 .children(next)
                 .children(reports)
                 .child(composer_column(composer)),
         )
         .into_any_element()
+}
+
+/// Plan usage above the composer: only when a real reading is near a limit.
+fn usage_strip(workspace: &Entity<Workspace>, cx: &App) -> Option<AnyElement> {
+    use crate::engine_view::UsageBanner;
+    let report = workspace.read(cx).usage_report();
+    let banner = crate::engine_view::usage_banner(report.as_ref(), Timestamp::now())?;
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let (text, color) = match banner {
+        UsageBanner::Reached {
+            window,
+            resets_in: Some(left),
+        } => (
+            tf(
+                "Usage limit reached ({window}). Resets in {time}.",
+                &[
+                    ("window", &crate::i18n::t_any(&window)),
+                    ("time", &rows::format_duration(left)),
+                ],
+            ),
+            colors.danger,
+        ),
+        UsageBanner::Reached {
+            window,
+            resets_in: None,
+        } => (
+            tf(
+                "Usage limit reached ({window}).",
+                &[("window", &crate::i18n::t_any(&window))],
+            ),
+            colors.danger,
+        ),
+        UsageBanner::Near {
+            window,
+            used_percent,
+            resets_in: Some(left),
+        } => (
+            tf(
+                "Usage: {used}% of the {window}. Resets in {time}.",
+                &[
+                    ("used", &format!("{used_percent:.0}")),
+                    ("window", &crate::i18n::t_any(&window)),
+                    ("time", &rows::format_duration(left)),
+                ],
+            ),
+            colors.warning,
+        ),
+        UsageBanner::Near {
+            window,
+            used_percent,
+            resets_in: None,
+        } => (
+            tf(
+                "Usage: {used}% of the {window}.",
+                &[
+                    ("used", &format!("{used_percent:.0}")),
+                    ("window", &crate::i18n::t_any(&window)),
+                ],
+            ),
+            colors.warning,
+        ),
+    };
+    Some(
+        div()
+            .w_full()
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(COLUMN))
+                    .mb_1()
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .rounded(theme.radius(Radius::Md))
+                    .border_1()
+                    .border_color(colors.border)
+                    .bg(colors.sunken)
+                    .text_size(theme.text_size(TextSize::Xs))
+                    .text_color(color)
+                    .child(Icon::new(IconName::Gauge).size(IconSize::Xs).color(color))
+                    .child(text)
+                    .into_any_element(),
+            )
+            .into_any_element(),
+    )
 }
 
 /// The shown chat lives on a device that is offline: what shows is the last

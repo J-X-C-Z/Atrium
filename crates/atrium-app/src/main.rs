@@ -6,6 +6,8 @@
 mod agents;
 mod alerts;
 mod capabilities;
+mod engine_store;
+mod engine_view;
 mod i18n;
 use atrium_project as project;
 mod docmap;
@@ -13,6 +15,7 @@ mod export;
 mod links;
 mod opener;
 mod pageedit;
+mod queue;
 mod runtime_adapters;
 mod schedule;
 mod settings;
@@ -29,8 +32,9 @@ use gpui::{
 };
 
 use ui::{
-    AttachFiles, CompactChat, CycleTranscript, FocusComposer, NewChat, OpenPalette, OpenSettings,
-    Quit, Reconnect, ReviewChanges, RootView, ShowContext, StopTurn, ToggleChanges, ToggleSidebar,
+    AttachFiles, CompactChat, CycleApproval, CycleEffort, CycleModel, CycleTranscript,
+    FocusComposer, NewChat, OpenPalette, OpenSettings, Quit, RecallNext, RecallPrevious, Reconnect,
+    ReviewChanges, RootView, ShowContext, StopTurn, ToggleChanges, ToggleSidebar, ToggleSpeed,
 };
 
 fn main() {
@@ -129,6 +133,16 @@ fn main() {
             KeyBinding::new("ctrl-.", StopTurn, None),
             KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("tab", ui::AcceptPrediction, Some("Predicting")),
+            KeyBinding::new("cmd-shift-m", CycleModel, None),
+            KeyBinding::new("ctrl-shift-m", CycleModel, None),
+            KeyBinding::new("cmd-shift-e", CycleEffort, None),
+            KeyBinding::new("ctrl-shift-e", CycleEffort, None),
+            KeyBinding::new("cmd-shift-f", ToggleSpeed, None),
+            KeyBinding::new("ctrl-shift-f", ToggleSpeed, None),
+            KeyBinding::new("cmd-shift-y", CycleApproval, None),
+            KeyBinding::new("ctrl-shift-y", CycleApproval, None),
+            KeyBinding::new("alt-up", RecallPrevious, Some("Composer")),
+            KeyBinding::new("alt-down", RecallNext, Some("Composer")),
         ]);
         // After the app-wide keys, so the page editor's own win while it has focus.
         ui::bind_page_keys(cx);
@@ -213,6 +227,11 @@ pub fn set_menus(cx: &mut App) {
                 MenuItem::action(t("Context & Speed"), ShowContext),
                 MenuItem::action(t("Changes"), ToggleChanges),
                 MenuItem::action(t("Cycle Normal / Thinking / Verbose"), CycleTranscript),
+                MenuItem::separator(),
+                MenuItem::action(t("Cycle Model"), CycleModel),
+                MenuItem::action(t("Cycle Effort"), CycleEffort),
+                MenuItem::action(t("Toggle Fast"), ToggleSpeed),
+                MenuItem::action(t("Cycle Approval"), CycleApproval),
                 MenuItem::separator(),
                 MenuItem::action(t("Review Uncommitted Changes"), ReviewChanges),
                 MenuItem::action(t("Compact Conversation"), CompactChat),

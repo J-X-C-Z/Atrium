@@ -20,21 +20,8 @@ use crate::workspace::Composed;
 /// Lines of one file drawn before the rest is folded away.
 const MAX_LINES: usize = 600;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LineKind {
-    Hunk,
-    Context,
-    Added,
-    Removed,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct DiffLine {
-    pub kind: LineKind,
-    pub old: Option<u32>,
-    pub new: Option<u32>,
-    pub text: String,
-}
+pub use crate::engine_view::DiffKind as LineKind;
+pub use crate::engine_view::DiffLine;
 
 /// One changed file, with every diff the agent made to it, in order.
 #[derive(Clone, Debug, PartialEq)]
@@ -69,6 +56,8 @@ pub struct Review {
     pub comments: Vec<LineComment>,
     /// The line being commented on: `(path, row)`.
     pub target: Option<(String, usize)>,
+    /// Two columns of removed and added lines instead of one unified column.
+    pub diff_side_by_side: bool,
 }
 
 /// The side panel's views.
@@ -329,6 +318,31 @@ impl RootView {
                     )
                     .child(div().text_color(colors.success).child(format!("+{added}")))
                     .child(div().text_color(colors.danger).child(format!("−{removed}")))
+                    .child({
+                        let root = root.clone();
+                        let side = self.review.diff_side_by_side;
+                        IconButton::new(
+                            "diff-layout",
+                            if side {
+                                IconName::List
+                            } else {
+                                IconName::Columns2
+                            },
+                        )
+                        .variant(ButtonVariant::Ghost)
+                        .size(ControlSize::Sm)
+                        .tooltip(if side {
+                            t("Unified")
+                        } else {
+                            t("Side by side")
+                        })
+                        .on_click(move |_, _, cx| {
+                            root.update(cx, |root, cx| {
+                                root.review.diff_side_by_side = !root.review.diff_side_by_side;
+                                cx.notify();
+                            })
+                        })
+                    })
                     .into_any_element(),
             ),
             cx,
@@ -445,186 +459,270 @@ impl RootView {
                                 .child(format!("−{}", file.removed)),
                         )
                         .children(self.preview_button(file_ix, &file.path, &cwd, cx))
+                        .children(self.open_file_button(file_ix, &file.path, &cwd, cx))
                         .children(self.file_buttons(file_ix, file, cx)),
                 );
-            let mut hunk = 0usize;
-            for (row, line) in file.lines.iter().enumerate().take(MAX_LINES) {
-                let hunk_undo = if line.kind == LineKind::Hunk {
-                    hunk += 1;
-                    self.hunk_button(
-                        file,
-                        hunk - 1,
-                        SharedString::from(format!("hunk-undo-{file_ix}-{row}")),
-                        cx,
-                    )
-                } else {
-                    None
-                };
-                let (bg, sign) = match line.kind {
-                    LineKind::Added => (Some(colors.success.opacity(0.10)), "+"),
-                    LineKind::Removed => (Some(colors.danger.opacity(0.10)), "−"),
-                    LineKind::Hunk => (Some(colors.selection.opacity(0.5)), ""),
-                    LineKind::Context => (None, " "),
-                };
-                let number = |n: Option<u32>| {
-                    div()
-                        .flex_none()
-                        .w(px(34.))
-                        .text_right()
-                        .pr_1()
-                        .text_color(colors.fg_subtle)
-                        .child(n.map(|n| n.to_string()).unwrap_or_default())
-                };
-                let targeted = self.review.target.as_ref() == Some(&(file.path.clone(), row));
-                let pick = (root.clone(), file.path.clone());
-                let commentable = line.kind != LineKind::Hunk;
-                card = card.child(
-                    div()
-                        .id(SharedString::from(format!("diff-{file_ix}-{row}")))
-                        .flex()
-                        .items_start()
-                        .font_family(mono.clone())
-                        .text_size(tiny)
-                        .when_some(bg, |el, bg| el.bg(bg))
-                        .when(targeted, |el| el.bg(colors.accent.opacity(0.15)))
-                        .when(commentable, |el| {
-                            el.cursor_pointer()
-                                .hover(|el| el.bg(colors.hover))
-                                .on_click(move |_, window, cx| {
-                                    let (root, path) = pick.clone();
-                                    root.update(cx, |r, cx| {
-                                        r.review.target = Some((path, row));
-                                        let focus = r.comment_input.read(cx).focus_handle(cx);
-                                        focus.focus(window, cx);
-                                        cx.notify();
-                                    })
-                                })
-                        })
-                        .child(number(line.old))
-                        .child(number(line.new))
-                        .child(
-                            div()
-                                .flex_none()
-                                .w(px(12.))
-                                .text_color(colors.fg_subtle)
-                                .child(sign),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .whitespace_normal()
-                                .text_color(if line.kind == LineKind::Hunk {
-                                    colors.fg_subtle
-                                } else {
-                                    colors.fg
-                                })
-                                .child(if line.text.is_empty() {
-                                    " ".to_string()
-                                } else {
-                                    line.text.clone()
-                                }),
-                        )
-                        .children(hunk_undo),
-                );
-                for (ix, comment) in self
-                    .review
-                    .comments
-                    .iter()
+            if self.review.diff_side_by_side {
+                for (side_ix, side) in crate::engine_view::side_by_side(&file.lines)
+                    .into_iter()
                     .enumerate()
-                    .filter(|(_, c)| c.path == file.path && c.row == row)
                 {
-                    let remove = root.clone();
-                    card = card.child(
+                    if let Some(hunk) = side.hunk {
+                        card = card.child(
+                            div()
+                                .flex()
+                                .items_start()
+                                .font_family(mono.clone())
+                                .text_size(tiny)
+                                .bg(colors.selection.opacity(0.5))
+                                .child(div().flex_1().px_2().child(hunk)),
+                        );
+                        continue;
+                    }
+                    let cell = |cell: Option<crate::engine_view::SideCell>| {
+                        let Some(cell) = cell else {
+                            return div().flex_1().min_w_0().into_any_element();
+                        };
+                        let (bg, sign) = match cell.kind {
+                            crate::engine_view::DiffKind::Added => {
+                                (Some(colors.success.opacity(0.10)), "+")
+                            }
+                            crate::engine_view::DiffKind::Removed => {
+                                (Some(colors.danger.opacity(0.10)), "−")
+                            }
+                            _ => (None, " "),
+                        };
                         div()
+                            .flex_1()
+                            .min_w_0()
                             .flex()
                             .items_start()
-                            .gap_2()
-                            .mx_2()
-                            .my_1()
-                            .px_2()
-                            .py_1()
-                            .rounded(theme.radius(Radius::Md))
-                            .bg(colors.surface)
-                            .border_1()
-                            .border_color(colors.accent.opacity(0.5))
-                            .text_size(small)
-                            .child(
-                                Icon::new(IconName::MessageSquare)
-                                    .size(IconSize::Xs)
-                                    .color(colors.accent),
-                            )
-                            .child(div().flex_1().min_w_0().child(comment.text.clone()))
-                            .child(
-                                IconButton::new(
-                                    SharedString::from(format!("uncomment-{ix}")),
-                                    IconName::X,
-                                )
-                                .variant(ButtonVariant::Ghost)
-                                .size(ControlSize::Sm)
-                                .on_click(move |_, _, cx| {
-                                    remove.update(cx, |r, cx| {
-                                        if ix < r.review.comments.len() {
-                                            r.review.comments.remove(ix);
-                                        }
-                                        cx.notify();
-                                    })
-                                }),
-                            ),
-                    );
-                }
-                if targeted {
-                    let add = (root.clone(), file.clone());
-                    let cancel = root.clone();
-                    card = card.child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .m_2()
-                            .child(Input::new(&self.comment_input))
+                            .when_some(bg, |el, bg| el.bg(bg))
                             .child(
                                 div()
-                                    .flex()
-                                    .justify_end()
-                                    .gap_1()
-                                    .child(
-                                        Button::new("comment-cancel", t("Cancel"))
-                                            .variant(ButtonVariant::Ghost)
-                                            .size(ControlSize::Sm)
-                                            .on_click(move |_, _, cx| {
-                                                cancel.update(cx, |r, cx| {
-                                                    r.review.target = None;
-                                                    cx.notify();
-                                                })
-                                            }),
-                                    )
-                                    .child(
-                                        Button::new("comment-add", t("Add comment"))
-                                            .size(ControlSize::Sm)
-                                            .on_click(move |_, _, cx| {
-                                                let (root, file) = add.clone();
-                                                root.update(cx, |r, cx| {
-                                                    r.add_comment(&file, row, cx)
-                                                })
-                                            }),
-                                    ),
-                            ),
+                                    .flex_none()
+                                    .w(px(30.))
+                                    .text_right()
+                                    .pr_1()
+                                    .text_color(colors.fg_subtle)
+                                    .child(cell.number.map(|n| n.to_string()).unwrap_or_default()),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .w(px(10.))
+                                    .text_color(colors.fg_subtle)
+                                    .child(sign),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .whitespace_normal()
+                                    .text_color(colors.fg)
+                                    .child(if cell.text.is_empty() {
+                                        " ".to_string()
+                                    } else {
+                                        cell.text
+                                    }),
+                            )
+                            .into_any_element()
+                    };
+                    card = card.child(
+                        div()
+                            .id(SharedString::from(format!("side-{file_ix}-{side_ix}")))
+                            .flex()
+                            .items_start()
+                            .font_family(mono.clone())
+                            .text_size(tiny)
+                            .border_l_1()
+                            .border_color(colors.border)
+                            .child(cell(side.left))
+                            .child(cell(side.right)),
                     );
                 }
-            }
-            if file.lines.len() > MAX_LINES {
-                card = card.child(
-                    div()
-                        .px_2()
-                        .py_1()
-                        .text_size(tiny)
-                        .text_color(colors.fg_subtle)
-                        .child(tf(
-                            "{n} more lines not shown",
-                            &[("n", &(file.lines.len() - MAX_LINES))],
-                        )),
-                );
+            } else {
+                let mut hunk = 0usize;
+                for (row, line) in file.lines.iter().enumerate().take(MAX_LINES) {
+                    let hunk_undo = if line.kind == LineKind::Hunk {
+                        hunk += 1;
+                        self.hunk_button(
+                            file,
+                            hunk - 1,
+                            SharedString::from(format!("hunk-undo-{file_ix}-{row}")),
+                            cx,
+                        )
+                    } else {
+                        None
+                    };
+                    let (bg, sign) = match line.kind {
+                        LineKind::Added => (Some(colors.success.opacity(0.10)), "+"),
+                        LineKind::Removed => (Some(colors.danger.opacity(0.10)), "−"),
+                        LineKind::Hunk => (Some(colors.selection.opacity(0.5)), ""),
+                        LineKind::Context => (None, " "),
+                    };
+                    let number = |n: Option<u32>| {
+                        div()
+                            .flex_none()
+                            .w(px(34.))
+                            .text_right()
+                            .pr_1()
+                            .text_color(colors.fg_subtle)
+                            .child(n.map(|n| n.to_string()).unwrap_or_default())
+                    };
+                    let targeted = self.review.target.as_ref() == Some(&(file.path.clone(), row));
+                    let pick = (root.clone(), file.path.clone());
+                    let commentable = line.kind != LineKind::Hunk;
+                    card = card.child(
+                        div()
+                            .id(SharedString::from(format!("diff-{file_ix}-{row}")))
+                            .flex()
+                            .items_start()
+                            .font_family(mono.clone())
+                            .text_size(tiny)
+                            .when_some(bg, |el, bg| el.bg(bg))
+                            .when(targeted, |el| el.bg(colors.accent.opacity(0.15)))
+                            .when(commentable, |el| {
+                                el.cursor_pointer()
+                                    .hover(|el| el.bg(colors.hover))
+                                    .on_click(move |_, window, cx| {
+                                        let (root, path) = pick.clone();
+                                        root.update(cx, |r, cx| {
+                                            r.review.target = Some((path, row));
+                                            let focus = r.comment_input.read(cx).focus_handle(cx);
+                                            focus.focus(window, cx);
+                                            cx.notify();
+                                        })
+                                    })
+                            })
+                            .child(number(line.old))
+                            .child(number(line.new))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .w(px(12.))
+                                    .text_color(colors.fg_subtle)
+                                    .child(sign),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .whitespace_normal()
+                                    .text_color(if line.kind == LineKind::Hunk {
+                                        colors.fg_subtle
+                                    } else {
+                                        colors.fg
+                                    })
+                                    .child(if line.text.is_empty() {
+                                        " ".to_string()
+                                    } else {
+                                        line.text.clone()
+                                    }),
+                            )
+                            .children(hunk_undo),
+                    );
+                    for (ix, comment) in self
+                        .review
+                        .comments
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, c)| c.path == file.path && c.row == row)
+                    {
+                        let remove = root.clone();
+                        card = card.child(
+                            div()
+                                .flex()
+                                .items_start()
+                                .gap_2()
+                                .mx_2()
+                                .my_1()
+                                .px_2()
+                                .py_1()
+                                .rounded(theme.radius(Radius::Md))
+                                .bg(colors.surface)
+                                .border_1()
+                                .border_color(colors.accent.opacity(0.5))
+                                .text_size(small)
+                                .child(
+                                    Icon::new(IconName::MessageSquare)
+                                        .size(IconSize::Xs)
+                                        .color(colors.accent),
+                                )
+                                .child(div().flex_1().min_w_0().child(comment.text.clone()))
+                                .child(
+                                    IconButton::new(
+                                        SharedString::from(format!("uncomment-{ix}")),
+                                        IconName::X,
+                                    )
+                                    .variant(ButtonVariant::Ghost)
+                                    .size(ControlSize::Sm)
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            remove.update(cx, |r, cx| {
+                                                if ix < r.review.comments.len() {
+                                                    r.review.comments.remove(ix);
+                                                }
+                                                cx.notify();
+                                            })
+                                        },
+                                    ),
+                                ),
+                        );
+                    }
+                    if targeted {
+                        let add = (root.clone(), file.clone());
+                        let cancel = root.clone();
+                        card = card.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .m_2()
+                                .child(Input::new(&self.comment_input))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .justify_end()
+                                        .gap_1()
+                                        .child(
+                                            Button::new("comment-cancel", t("Cancel"))
+                                                .variant(ButtonVariant::Ghost)
+                                                .size(ControlSize::Sm)
+                                                .on_click(move |_, _, cx| {
+                                                    cancel.update(cx, |r, cx| {
+                                                        r.review.target = None;
+                                                        cx.notify();
+                                                    })
+                                                }),
+                                        )
+                                        .child(
+                                            Button::new("comment-add", t("Add comment"))
+                                                .size(ControlSize::Sm)
+                                                .on_click(move |_, _, cx| {
+                                                    let (root, file) = add.clone();
+                                                    root.update(cx, |r, cx| {
+                                                        r.add_comment(&file, row, cx)
+                                                    })
+                                                }),
+                                        ),
+                                ),
+                        );
+                    }
+                }
+                if file.lines.len() > MAX_LINES {
+                    card = card.child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .text_size(tiny)
+                            .text_color(colors.fg_subtle)
+                            .child(tf(
+                                "{n} more lines not shown",
+                                &[("n", &(file.lines.len() - MAX_LINES))],
+                            )),
+                    );
+                }
             }
             body = body.child(card);
         }

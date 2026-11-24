@@ -55,8 +55,8 @@ use crate::{
     settings::ThemePref,
     workspace::{Fill, Notice, Workspace},
 };
-pub use composer::AcceptPrediction;
 use composer::Composer;
+pub use composer::{AcceptPrediction, RecallNext, RecallPrevious};
 pub use context::format_speed;
 
 actions!(
@@ -77,6 +77,10 @@ actions!(
         ToggleChanges,
         CycleTranscript,
         OpenFolderPicker,
+        CycleModel,
+        CycleEffort,
+        ToggleSpeed,
+        CycleApproval,
     ]
 );
 
@@ -160,6 +164,18 @@ pub fn register_actions(cx: &mut App) {
     forward::<AttachFiles>(cx, |this, _, cx| {
         this.composer
             .update(cx, |composer, cx| composer.pick_files(cx))
+    });
+    forward::<CycleModel>(cx, |this, _, cx| {
+        this.workspace.update(cx, |ws, cx| ws.cycle_model(cx))
+    });
+    forward::<CycleEffort>(cx, |this, _, cx| {
+        this.workspace.update(cx, |ws, cx| ws.cycle_effort(cx))
+    });
+    forward::<ToggleSpeed>(cx, |this, _, cx| {
+        this.workspace.update(cx, |ws, cx| ws.toggle_speed(cx))
+    });
+    forward::<CycleApproval>(cx, |this, _, cx| {
+        this.workspace.update(cx, |ws, cx| ws.cycle_approval(cx))
     });
 }
 

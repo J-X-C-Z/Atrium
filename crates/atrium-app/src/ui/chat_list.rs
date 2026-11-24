@@ -21,7 +21,8 @@ use gpui::{
 };
 use jiff::{Timestamp, civil::Date, tz::TimeZone};
 
-use crate::workspace::CODEX;
+use crate::engine_view::{ChatActivity, ChatItem, ChatSection, chat_sections};
+use crate::i18n::t;
 
 /// One chat in the list.
 #[derive(Clone, Debug)]
@@ -35,17 +36,20 @@ pub struct ChatRow {
     pub agent: String,
     /// The device's name, for chats that run elsewhere.
     pub device: Option<String>,
+    /// A chat under Archived: it leaves the recent list but stays reachable.
+    pub archived: bool,
 }
 
 /// The icon and tint for an agent's chats. The component set has no brand
 /// marks, so each agent gets a distinct icon and colour.
 pub fn agent_icon(agent: &str) -> (IconName, Option<Hsla>) {
-    match agent {
-        a if a == CODEX => (IconName::Terminal, None),
-        "claude" => (IconName::Sparkles, Some(rgb(0xD97757).into())),
-        "antigravity" => (IconName::Rocket, Some(rgb(0x4285F4).into())),
-        "deepseek" => (IconName::Compass, Some(rgb(0x4D6BFE).into())),
-        _ => (IconName::Bot, None),
+    use crate::engine_view::AgentMark;
+    match crate::engine_view::agent_mark(agent) {
+        AgentMark::Codex => (IconName::Terminal, None),
+        AgentMark::Claude => (IconName::Sparkles, Some(rgb(0xD97757).into())),
+        AgentMark::Antigravity => (IconName::Rocket, Some(rgb(0x4285F4).into())),
+        AgentMark::DeepSeek => (IconName::Compass, Some(rgb(0x4D6BFE).into())),
+        AgentMark::Other => (IconName::Bot, None),
     }
 }
 
@@ -69,30 +73,48 @@ fn group_name(day: Date, today: Date) -> String {
     }
 }
 
-/// The rows `query` keeps: pinned first, then under their day, newest first.
+/// The activity the list sorts by.
+fn activity(status: ConversationStatus) -> ChatActivity {
+    match status {
+        ConversationStatus::Idle => ChatActivity::Idle,
+        ConversationStatus::Working => ChatActivity::Working,
+        ConversationStatus::Waiting => ChatActivity::Waiting,
+        ConversationStatus::Unread(n) => ChatActivity::Unread(n as u32),
+    }
+}
+
+/// The rows `query` keeps, by state: pinned, working, recent by day, archived.
 fn grouped(
     rows: &[ChatRow],
     query: &str,
     today: Date,
     zone: &TimeZone,
 ) -> Vec<(String, Vec<usize>)> {
-    let mut kept: Vec<usize> = (0..rows.len())
+    let kept: Vec<usize> = (0..rows.len())
         .filter(|ix| matches(&rows[*ix], query))
         .collect();
-    kept.sort_by_key(|ix| std::cmp::Reverse(rows[*ix].at));
-    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
-    let pinned: Vec<usize> = kept.iter().copied().filter(|ix| rows[*ix].pinned).collect();
-    if !pinned.is_empty() {
-        groups.push((word("chat.group.pinned").to_string(), pinned));
-    }
-    for ix in kept.into_iter().filter(|ix| !rows[*ix].pinned) {
-        let name = group_name(rows[ix].at.to_zoned(zone.clone()).date(), today);
-        match groups.last_mut() {
-            Some((last, items)) if *last == name => items.push(ix),
-            _ => groups.push((name, vec![ix])),
-        }
-    }
-    groups
+    let items: Vec<ChatItem> = kept
+        .iter()
+        .map(|ix| ChatItem {
+            at_sec: rows[*ix].at.as_second(),
+            pinned: rows[*ix].pinned,
+            archived: rows[*ix].archived,
+            activity: activity(rows[*ix].status),
+        })
+        .collect();
+    chat_sections(&items, today, zone)
+        .into_iter()
+        .map(|(section, order)| {
+            let label = match section {
+                ChatSection::Pinned => word("chat.group.pinned").to_string(),
+                ChatSection::Working => t("Working").to_string(),
+                ChatSection::Archived => t("Archived").to_string(),
+                ChatSection::Day(day) => group_name(day, today),
+            };
+            let rows = order.into_iter().map(|pos| kept[pos]).collect();
+            (label, rows)
+        })
+        .collect()
 }
 
 type OnKey = Rc<dyn Fn(&SharedString, &mut Window, &mut App)>;
@@ -375,6 +397,7 @@ mod tests {
             status: ConversationStatus::Idle,
             agent: "codex".into(),
             device: device.map(str::to_string),
+            archived: false,
         }
     }
 

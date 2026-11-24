@@ -137,6 +137,13 @@ impl CodexEngineRuntime {
         &self.adapter
     }
 
+    /// The capabilities the adapter declares (T3's `ProviderCapabilities`).
+    /// The app reads these for the composer's controls instead of guessing
+    /// from a backend name.
+    pub fn provider_capabilities(&self) -> crate::contracts::ProviderCapabilities {
+        self.adapter.capabilities()
+    }
+
     fn session(&self, id: &str) -> Result<Arc<EngineSession>, RuntimeError> {
         self.inner
             .sessions
