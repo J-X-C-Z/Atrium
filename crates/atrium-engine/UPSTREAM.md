@@ -31,6 +31,8 @@ one implementation instead of adding a second subsystem):
 | --- | --- | --- |
 | `atrium-project/src/pr_watch` (`evaluate`, `sync_due`, `watch_message`, `watch_end_message`) | `apps/server/src/orchestration-v2/pullRequestWatch.ts`, `PullRequestSyncReactor.ts` (`isDue` cadence and failed-read backoff), `packages/contracts/src/threadPullRequest.ts` (watch fields) | 31 |
 | `atrium-project/src/pr` (`Observation`, comment/review remarks, head SHA, mergeability) | `apps/server/src/pullRequest/pullRequestSyncKey.ts`/`pullRequestTarget.ts` shape only; `gh pr view` replaces T3's provider reads | 31 |
+| `crates/atrium-app/src/schedule.rs` (schedule kinds, next-run and DST rules, structural comparison, run status, restart recovery) | `apps/server/src/scheduledTasks/Schedule.ts`, `packages/contracts/src/scheduledTask.ts` | 31 |
+| `crates/atrium-app/src/workspace_schedules.rs` (startup recovery, one-run-at-a-time dispatch) | `apps/server/src/scheduledTasks/ScheduledTaskService.ts` | 31 |
 
 The T3 unit tests for `evaluatePullRequestWatch` were ported alongside the
 module in `atrium-project/src/pr_watch.rs`. Deliberately left out: T3's
