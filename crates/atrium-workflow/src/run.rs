@@ -91,6 +91,10 @@ pub struct Attempt {
     /// What the agent was told to fix, from failed checks or the user.
     #[serde(default)]
     pub feedback: Vec<String>,
+    /// What the agent reported when its turn ended. Later steps' prompts
+    /// carry a short form, since every try starts a new conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
     #[serde(default)]
     pub checks: Vec<CheckResult>,
 }
@@ -465,6 +469,7 @@ impl Run {
                 started_ms: now_ms,
                 finished_ms: Some(now_ms),
                 feedback: Vec::new(),
+                answer: None,
                 checks: vec![CheckResult::fail(from, "no items listed")],
             });
             self.state = RunState::Waiting;
@@ -548,6 +553,7 @@ impl Run {
             started_ms: now_ms,
             finished_ms: None,
             feedback,
+            answer: None,
             checks: Vec::new(),
         });
         step.status = StepStatus::Running;
@@ -569,6 +575,45 @@ impl Run {
             a.turn = Some(turn);
         }
         Ok(())
+    }
+
+    /// Keeps what the agent reported at the end of its turn. An empty
+    /// report clears it.
+    pub fn set_answer(&mut self, id: &str, answer: impl Into<String>) -> Result<(), RunError> {
+        let ix = self.ix(id)?;
+        let answer = answer.into();
+        if let Some(attempt) = self.steps[ix].attempts.last_mut() {
+            attempt.answer = (!answer.trim().is_empty()).then_some(answer);
+        }
+        Ok(())
+    }
+
+    /// The last answer a step's agent gave.
+    pub fn answer_of(&self, id: &str) -> Option<&str> {
+        self.step(id)?
+            .attempts
+            .iter()
+            .rev()
+            .find_map(|attempt| attempt.answer.as_deref())
+    }
+
+    /// Finished steps before `id` and what they reported, in order. A later
+    /// step's prompt carries these because each try is a new conversation.
+    pub fn answers_before(&self, id: &str) -> Vec<(String, String)> {
+        let Some(pos) = self.steps.iter().position(|step| step.id == id) else {
+            return Vec::new();
+        };
+        self.steps[..pos]
+            .iter()
+            .filter(|step| step.status == StepStatus::Done)
+            .filter_map(|step| {
+                step.attempts
+                    .iter()
+                    .rev()
+                    .find_map(|attempt| attempt.answer.as_ref())
+                    .map(|answer| (self.title_of(&step.id), answer.clone()))
+            })
+            .collect()
     }
 
     /// The agent's turn on `id` ended; its checks run next.
@@ -1126,6 +1171,35 @@ attempts = 3
         let plan = run.step("plan").unwrap();
         assert_eq!(plan.status, StepStatus::Running);
         assert_eq!(plan.last().unwrap().turn.as_deref(), Some("turn-plan"));
+    }
+
+    #[test]
+    fn a_finished_step_keeps_its_answer_for_later_steps() {
+        let mut run = Run::new(template(), inputs(), &[], 0).unwrap();
+        go(&mut run, "plan", pass());
+        run.set_answer("plan", "A queueing model with two servers.")
+            .unwrap();
+        assert_eq!(
+            run.answer_of("plan"),
+            Some("A queueing model with two servers.")
+        );
+        run.approve("plan", None, "", 4).unwrap();
+        assert_eq!(
+            run.answers_before("write"),
+            vec![(
+                "Plan".to_string(),
+                "A queueing model with two servers.".to_string()
+            )]
+        );
+        assert!(
+            run.answers_before("plan").is_empty(),
+            "a step does not report to itself"
+        );
+        let saved = Run::from_json(&run.to_json()).unwrap();
+        assert_eq!(saved, run, "the answer survives a save");
+
+        run.set_answer("plan", "   ").unwrap();
+        assert_eq!(run.answer_of("plan"), None, "an empty answer clears it");
     }
 
     fn contest() -> Template {

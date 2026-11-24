@@ -158,6 +158,11 @@ fn mock(
                         json!({"method": "turn/started", "params": {
                             "threadId": thread, "turn": {"id": turn, "status": "inProgress", "items": []}
                         }}),
+                        json!({"method": "item/completed", "params": {
+                            "threadId": thread, "turnId": turn,
+                            "item": {"type": "agentMessage", "id": format!("item-{turn}"),
+                                     "text": "done"}
+                        }}),
                         json!({"method": "turn/completed", "params": {
                             "threadId": thread,
                             "turn": {"id": turn, "status": "completed", "items": [{
@@ -219,6 +224,20 @@ outputs = ["three.txt"]
         .filter(|request| request["method"] == "thread/start")
         .count();
     assert_eq!(starts, 3, "each step gets a new conversation");
+    let prompts: Vec<&str> = seen
+        .iter()
+        .filter(|request| request["method"] == "turn/start")
+        .filter_map(|request| request["params"]["input"][0]["text"].as_str())
+        .collect();
+    assert!(
+        prompts.iter().any(|prompt| prompt.contains("One: done")),
+        "a later step starts with what the step before it reported"
+    );
+    assert_eq!(
+        saved.answer_of("one").map(str::trim),
+        Some("done"),
+        "the try keeps the agent's report"
+    );
 }
 
 #[gpui::test(iterations = 1)]

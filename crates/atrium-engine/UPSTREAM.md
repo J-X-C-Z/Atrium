@@ -25,7 +25,10 @@ with the transport.
 ### Ported outside `atrium-engine`
 
 These live where Atrium's own code already does the job (the port folds into
-one implementation instead of adding a second subsystem):
+one implementation instead of adding a second subsystem). Item 31 compared
+T3's provider-native workflows with Atrium's own workflow runner
+(`crates/atrium-workflow`) and ported the parts Atrium lacked into that runner
+rather than adding a second engine. The same MIT notice covers these files.
 
 | Atrium module | T3 source | Item |
 | --- | --- | --- |
@@ -33,6 +36,8 @@ one implementation instead of adding a second subsystem):
 | `atrium-project/src/pr` (`Observation`, comment/review remarks, head SHA, mergeability) | `apps/server/src/pullRequest/pullRequestSyncKey.ts`/`pullRequestTarget.ts` shape only; `gh pr view` replaces T3's provider reads | 31 |
 | `crates/atrium-app/src/schedule.rs` (schedule kinds, next-run and DST rules, structural comparison, run status, restart recovery) | `apps/server/src/scheduledTasks/Schedule.ts`, `packages/contracts/src/scheduledTask.ts` | 31 |
 | `crates/atrium-app/src/workspace_schedules.rs` (startup recovery, one-run-at-a-time dispatch) | `apps/server/src/scheduledTasks/ScheduledTaskService.ts` | 31 |
+| `crates/atrium-workflow/src/files.rs` | `apps/server/src/orchestration-v2/workflowFileRead.ts` | 31 |
+| `crates/atrium-workflow/src/answers.rs` | `apps/server/src/orchestration-v2/workflowAgentAnswers.ts`, `workflowAgentTranscript.ts` | 31 |
 
 The T3 unit tests for `evaluatePullRequestWatch` were ported alongside the
 module in `atrium-project/src/pr_watch.rs`. Deliberately left out: T3's
