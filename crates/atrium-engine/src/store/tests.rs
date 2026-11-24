@@ -171,8 +171,14 @@ fn append_assigns_monotonic_sequences_and_derives_index_columns() {
             .collect::<Vec<_>>(),
         vec![1, 2, 3]
     );
-    assert_eq!(stored[0].command_id.as_ref().map(|id| id.as_str()), Some("command:1"));
-    assert_eq!(stored[0].run_id.as_ref().map(|id| id.as_str()), Some("run:1"));
+    assert_eq!(
+        stored[0].command_id.as_ref().map(|id| id.as_str()),
+        Some("command:1")
+    );
+    assert_eq!(
+        stored[0].run_id.as_ref().map(|id| id.as_str()),
+        Some("run:1")
+    );
 
     let conn = store.connection();
     let (kind, stream, version, event_type, command_id, correlation_id, actor): (
