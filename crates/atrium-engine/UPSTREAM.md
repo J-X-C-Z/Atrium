@@ -13,7 +13,7 @@ Keep this table current when a module lands or moves.
 | `src/orchestration` | `apps/server/src/orchestration-v2/Orchestrator.ts`, `EventSink.ts`, `EffectWorker.ts`, `runtimeLayer.ts` | 25 |
 | `src/providers` | `packages/provider-core`, `packages/effect-codex-app-server`, `packages/provider-acp` | 22, 23, 24 |
 | `src/usage` | `orchestration-v2/UsageLimitRecoveryWorker.ts`, limit schemas | 26 |
-| `src/checkpoint` | `apps/server/src/checkpointing`, `orchestration-v2/Checkpoint*Service.ts` | 27 |
+| `src/checkpoint` | `apps/server/src/checkpointing`, `orchestration-v2/CheckpointService.ts`, `CheckpointCaptureService.ts`, `CheckpointRollbackService.ts`, `CheckpointRestoreSafety.ts`, `ThreadForkService.ts`, and `ProjectionStore.ts` (`getCheckpointContext` scope ownership) | 27 |
 | `src/mcp` | `packages/contracts/src/orchestratorMcp.ts`, `apps/server/src/mcp` | 28 |
 
 ## What is not ported

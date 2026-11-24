@@ -402,17 +402,28 @@ fn checkpoint_ref(thread: &str, turn: usize) -> String {
 
 /// A tree of the working tree as it is now, untracked files included and
 /// ignored ones left out, without touching the user's index.
-fn snapshot_tree(root: &Path) -> Result<String> {
-    let dir = tempdir()?;
-    let index = dir.join("index");
+///
+/// Public so the engine's checkpoint store can reuse the same snapshot
+/// semantics for its own refs.
+pub fn snapshot_tree(root: &Path) -> Result<String> {
+    snapshot_tree_at(root, root)
+}
+
+/// A snapshot staged from `cwd`, which may be a subdirectory of the
+/// repository. Files outside `cwd` keep their `HEAD` version, matching the
+/// workspace a checkpoint was taken from.
+pub fn snapshot_tree_at(dir: &Path, cwd: &Path) -> Result<String> {
+    let root = root(dir).context("not a git repository")?;
+    let temp = tempdir()?;
+    let index = temp.join("index");
     let result = (|| {
-        if has_head(root) {
-            git_index(root, &index, &["read-tree", "HEAD"])?;
+        if has_head(&root) {
+            git_index(cwd, &index, &["read-tree", "HEAD"])?;
         }
-        git_index(root, &index, &["add", "-A"])?;
-        Ok(git_index(root, &index, &["write-tree"])?.trim().to_string())
+        git_index(cwd, &index, &["add", "-A", "--", "."])?;
+        Ok(git_index(cwd, &index, &["write-tree"])?.trim().to_string())
     })();
-    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&temp);
     result
 }
 
@@ -569,13 +580,112 @@ pub fn restore(dir: &Path, thread: &str, turn: usize, undo_turn: usize) -> Resul
     .context("no checkpoint for that turn")?;
     let target = target.trim().to_string();
     checkpoint(&root, thread, undo_turn)?;
+    restore_worktree_to_tree(&root, &target)
+}
+
+/// The tree of `rev`, if it resolves in `dir`'s repository.
+pub fn tree_of_commit(dir: &Path, rev: &str) -> Option<String> {
+    let root = root(dir)?;
+    git(
+        &root,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{rev}^{{tree}}"),
+        ],
+    )
+    .ok()
+    .map(|tree| tree.trim().to_string())
+    .filter(|tree| !tree.is_empty())
+}
+
+/// The commit `reference` points at, if it resolves in `dir`'s repository.
+pub fn resolve_reference(dir: &Path, reference: &str) -> Option<String> {
+    let root = root(dir)?;
+    git(
+        &root,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{reference}^{{commit}}"),
+        ],
+    )
+    .ok()
+    .map(|commit| commit.trim().to_string())
+    .filter(|commit| !commit.is_empty())
+}
+
+/// Whether `reference` resolves to a commit in `dir`'s repository.
+pub fn has_reference(dir: &Path, reference: &str) -> bool {
+    resolve_reference(dir, reference).is_some()
+}
+
+/// Points `reference` at a commit built from `tree` and `parents`.
+///
+/// This is the shared checkpoint primitive: the app's turn refs and the
+/// engine's scope refs differ only in their ref name and message.
+pub fn commit_tree_reference(
+    dir: &Path,
+    reference: &str,
+    tree: &str,
+    message: &str,
+    parents: &[&str],
+    committer_date: Option<&str>,
+) -> Result<String> {
+    let root = root(dir).context("not a git repository")?;
+    let mut args = vec!["commit-tree", tree];
+    for parent in parents {
+        args.extend(["-p", parent]);
+    }
+    args.extend(["-m", message]);
+    let mut cmd = command("git", &root);
+    cmd.args(&args)
+        .env("GIT_AUTHOR_NAME", "Atrium")
+        .env("GIT_AUTHOR_EMAIL", "atrium@localhost")
+        .env("GIT_COMMITTER_NAME", "Atrium")
+        .env("GIT_COMMITTER_EMAIL", "atrium@localhost");
+    if let Some(date) = committer_date {
+        cmd.env("GIT_COMMITTER_DATE", date);
+    }
+    let commit = checked(cmd.output().context("running git")?, "git commit-tree")?;
+    let commit = commit.trim().to_string();
+    git(&root, &["update-ref", reference, &commit])?;
+    Ok(commit)
+}
+
+/// Deletes `reference` if it exists; an absent ref is not an error.
+pub fn delete_reference(dir: &Path, reference: &str) -> Result<()> {
+    let root = root(dir).context("not a git repository")?;
+    let out = command("git", &root)
+        .args(["update-ref", "-d", reference])
+        .output()
+        .context("running git")?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let detail = first_error(&out).unwrap_or_else(|| out.status.to_string());
+    // Deleting an absent ref is fine; anything else is a real failure.
+    if detail.contains("reference does not exist") {
+        Ok(())
+    } else {
+        bail!("git update-ref: {detail}")
+    }
+}
+
+/// Puts the working tree back to `tree`: changed and deleted files are
+/// restored, files created since are removed. Ignored files are left alone and
+/// the user's staging area is not touched.
+pub fn restore_worktree_to_tree(dir: &Path, target: &str) -> Result<()> {
+    let root = root(dir).context("not a git repository")?;
     let now = snapshot_tree(&root)?;
     if now == target {
         return Ok(());
     }
     let changed = git(
         &root,
-        &["diff", "--name-status", "--no-renames", "-z", &target, &now],
+        &["diff", "--name-status", "--no-renames", "-z", target, &now],
     )?;
     let mut fields = changed.split('\0').filter(|f| !f.is_empty());
     let mut put_back = Vec::new();
@@ -590,7 +700,7 @@ pub fn restore(dir: &Path, thread: &str, turn: usize, undo_turn: usize) -> Resul
         let dir = tempdir()?;
         let index = dir.join("index");
         let result = (|| {
-            git_index(&root, &index, &["read-tree", &target])?;
+            git_index(&root, &index, &["read-tree", target])?;
             let mut args = vec!["checkout-index", "-f", "--"];
             args.extend(put_back.iter().map(String::as_str));
             git_index(&root, &index, &args)
