@@ -40,10 +40,11 @@ fn unattended_notice_wake_uses_scoped_turn_and_durable_budget(cx: &mut TestAppCo
 fn exercise_notice_delivery(cx: &mut TestAppContext, rpc_error: bool, unattended: bool) {
     // Real socket I/O wakes the GPUI foreground task externally.
     cx.executor().allow_parking();
-    let fixture = Fixture(
-        std::env::temp_dir().join(format!("atrium-workspace-ticker-{}", uuid::Uuid::new_v4())),
-    );
-    fs::create_dir(&fixture.0).unwrap();
+    let dir =
+        std::env::temp_dir().join(format!("atrium-workspace-ticker-{}", uuid::Uuid::new_v4()));
+    fs::create_dir(&dir).unwrap();
+    // Projects are keyed by their real path (on macOS /var is /private/var).
+    let fixture = Fixture(dir.canonicalize().unwrap());
     let mut project = Project::open(&fixture.0).unwrap();
     project.file.streams.push(Workstream {
         id: "controller".into(),
