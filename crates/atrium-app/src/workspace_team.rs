@@ -7,9 +7,9 @@ use std::{
     time::SystemTime,
 };
 
-use atrium_core::{AgentEvent, Item};
+use atrium_core::{AgentEvent, ConfigOption, Item};
 use atrium_team::{
-    Quotas, Team, schedule,
+    Pick, Quotas, Team, schedule,
     watch::{self, Signal, Watch},
 };
 use gpui::Context;
@@ -18,6 +18,7 @@ use super::Workspace;
 use crate::{
     agents,
     project::{ATRIUM, Role, TaskStatus},
+    settings::ModelChoice,
 };
 
 /// A project's own team, with the files' times it was read at.
@@ -40,8 +41,38 @@ pub struct TeamState {
     pub spent: HashMap<PathBuf, BTreeSet<String>>,
     /// One per running lead or worker, by project and stream.
     pub watches: HashMap<(PathBuf, String), Watch>,
-    /// The member a stream runs as when it stands in for another.
-    pub stand_ins: HashMap<(PathBuf, String), String>,
+    /// The model and effort a started task asked for, by project and
+    /// stream, so Codex turns keep the member's choice.
+    pub starts: HashMap<(PathBuf, String), ModelChoice>,
+}
+
+/// The model and effort to start a placed task's session with, when the
+/// member named any.
+pub fn start_choice(placed: &Pick) -> Option<ModelChoice> {
+    (placed.model.is_some() || placed.effort.is_some()).then(|| ModelChoice {
+        model: placed.model.clone(),
+        effort: placed.effort.clone(),
+    })
+}
+
+/// The ACP config options to change so a member's `model` and `effort`
+/// apply, by category: ACP calls them `model` and `thought_level`.
+pub fn option_updates(
+    options: &[ConfigOption],
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Vec<(String, String)> {
+    options
+        .iter()
+        .filter_map(|option| {
+            let value = match option.category.as_deref() {
+                Some("model") => model,
+                Some("thought_level") => effort,
+                _ => None,
+            }?;
+            (!value.is_empty()).then(|| (option.id.clone(), value.to_string()))
+        })
+        .collect()
 }
 
 fn mtime(path: &Path) -> Option<SystemTime> {
@@ -229,16 +260,28 @@ impl Workspace {
         self.team
             .watches
             .retain(|(r, id), _| r != root || (on && live(id)));
-        self.team
-            .stand_ins
-            .retain(|(r, id), _| r != root || live(id));
+        self.team.starts.retain(|(r, id), _| r != root || live(id));
+        let mut forgot = false;
+        if let Some(streams) = self.settings.team_stand_ins.get_mut(root) {
+            let before = streams.len();
+            streams.retain(|id, _| live(id));
+            forgot = streams.len() != before;
+            if streams.is_empty() {
+                self.settings.team_stand_ins.remove(root);
+            }
+        }
+        if forgot {
+            self.settings.save();
+        }
     }
 
     /// A backend's usage limit was hit or cleared: every member it runs
-    /// is marked, so their stand-ins take over until the reset.
+    /// is marked, so their stand-ins take over until the reset. The app's
+    /// team and each open project's own team count, since a limit is per
+    /// account and a project may name its members differently.
     pub fn team_limit(&mut self, backend: &str, reached: bool, resets_at: Option<i64>) {
         let now = jiff::Timestamp::now().as_second();
-        let names: Vec<String> = self
+        let mut names: BTreeSet<String> = self
             .team
             .team
             .members
@@ -246,6 +289,17 @@ impl Workspace {
             .filter(|(_, m)| m.agent == backend)
             .map(|(name, _)| name.clone())
             .collect();
+        for project in self.team.projects.values() {
+            names.extend(
+                project
+                    .team
+                    .members
+                    .iter()
+                    .filter(|(_, m)| m.agent == backend)
+                    .map(|(name, _)| name.clone()),
+            );
+        }
+        let names: Vec<String> = names.into_iter().collect();
         for name in names {
             if reached {
                 self.team.quotas.hit(&name, resets_at, now);
@@ -339,9 +393,10 @@ impl Workspace {
     }
 
     /// An ACP agent's turn failed. If it says a usage limit was hit, the
-    /// member is marked spent. In an unattended project the stream's task
-    /// goes back to open when a stand-in can take it, so the scheduler
-    /// starts it again through `pick` (the same path as any task start).
+    /// member is marked spent. Whenever the team is on, the stream's task
+    /// goes back to open when a stand-in can take it, so the scheduler's
+    /// normal task start places it again through `pick`; the autopilot is
+    /// not needed for this.
     pub(super) fn team_turn_failed(&mut self, root: &Path, stream: &str, error: &str) {
         let Some(project) = self.projects.iter().find(|p| p.root == root) else {
             return;
@@ -356,29 +411,30 @@ impl Workspace {
             return;
         }
         let backend = s.backend.clone();
-        let hand_back = project.file.autopilot.on
-            && !s.retired
-            && s.parent.is_some()
-            && project
-                .task_of(s)
-                .filter(|t| s.task.as_deref() == Some(t.key().as_str()) && !t.status.finished())
-                .map(|t| {
-                    let owner = project.stream(&t.owner).map(|o| o.backend.clone());
-                    (t.key(), t.agent.clone().or(owner))
-                })
-                .is_some();
-        let target = project.task_of(s).map(|t| {
-            let owner = project.stream(&t.owner).map(|o| o.backend.clone());
-            (t.key(), t.agent.clone().or(owner))
-        });
+        let target = project
+            .task_of(s)
+            .filter(|t| {
+                !s.retired
+                    && s.parent.is_some()
+                    && s.task.as_deref() == Some(t.key().as_str())
+                    && !t.status.finished()
+            })
+            .map(|t| {
+                let owner = project.stream(&t.owner).map(|o| o.backend.clone());
+                (t.key(), t.agent.clone().or(owner))
+            });
         self.team_limit(&backend, true, None);
-        let Some((key, Some(wanted))) = target.filter(|_| hand_back) else {
+        let Some((key, Some(wanted))) = target else {
             return;
         };
-        let moves = self
-            .place_task(root, &wanted)
-            .is_ok_and(|placed| placed.agent != backend);
-        if !moves {
+        if !schedule::limit_handback(
+            self.project_team(root),
+            &wanted,
+            &backend,
+            &self.team.quotas,
+            |b| self.backend_ready(b),
+            now(),
+        ) {
             return;
         }
         if let Some(project) = self.projects.iter_mut().find(|p| p.root == root) {
@@ -395,3 +451,72 @@ impl Workspace {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atrium_core::ConfigChoice;
+
+    fn option(id: &str, category: Option<&str>, current: &str) -> ConfigOption {
+        ConfigOption {
+            id: id.into(),
+            name: id.into(),
+            category: category.map(str::to_owned),
+            current: current.into(),
+            choices: vec![ConfigChoice {
+                value: current.into(),
+                name: current.into(),
+                description: None,
+                group: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn a_members_model_and_effort_reach_the_options_their_categories_name() {
+        let options = [
+            option("mode", Some("mode"), "default"),
+            option("model", Some("model"), "default"),
+            option("reasoning_effort", Some("thought_level"), "high"),
+        ];
+        assert_eq!(
+            option_updates(&options, Some("sonnet"), Some("low")),
+            vec![
+                ("model".to_string(), "sonnet".to_string()),
+                ("reasoning_effort".to_string(), "low".to_string()),
+            ]
+        );
+        // Only what the member set changes.
+        assert_eq!(
+            option_updates(&options, Some("sonnet"), None),
+            vec![("model".to_string(), "sonnet".to_string())]
+        );
+        assert!(option_updates(&options, None, None).is_empty());
+        // Categories the member does not name stay as they are.
+        let unknown = [option("weird", Some("something_else"), "x")];
+        assert!(option_updates(&unknown, Some("sonnet"), Some("low")).is_empty());
+    }
+
+    #[test]
+    fn only_a_member_that_names_model_or_effort_overrides_the_defaults() {
+        let placed = |model: Option<&str>, effort: Option<&str>| Pick {
+            member: "gemini".into(),
+            agent: "antigravity".into(),
+            model: model.map(str::to_owned),
+            effort: effort.map(str::to_owned),
+            instead_of: None,
+        };
+        assert_eq!(
+            start_choice(&placed(Some("flash"), Some("low"))),
+            Some(ModelChoice {
+                model: Some("flash".into()),
+                effort: Some("low".into()),
+            })
+        );
+        assert_eq!(start_choice(&placed(None, None)), None);
+    }
+}
+
+#[cfg(all(test, unix, feature = "workspace-ticker-test"))]
+#[path = "workspace_team_test.rs"]
+mod ticker_tests;
