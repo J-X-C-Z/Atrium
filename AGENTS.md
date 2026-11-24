@@ -56,7 +56,7 @@ do not mark it done from mocks.
 | 26 | **Usage, limits, context**: usage readers, limit classification, continue after reset, context budget, auto-compaction | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | 22 |
 | 27 | **Checkpoints, rewind, fork** | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | 22 |
 | 28 | **MCP orchestration toolkit** merged with the `atrium` MCP server | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | 25 |
-| 29 | **Engine on the node**: threads live on the device that runs them and continue from any device; heartbeat and wake probe | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | 21, 22 |
+| 29 | ✓ done in #19. **Engine on the node**: threads live on the device that runs them and continue from any device; heartbeat and wake probe | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | 21, 22 |
 | 30 | **App on the engine**: model pill, quiet extras, queue chips, usage banner, chat list by state, changes panel, work log | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | 25, 26 |
 | 31 | **Overlaps**: scheduled tasks, PR watch, workflows; fold what Atrium lacks into Atrium's own | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | 30 |
 | 32 | ✓ done in #8. **Runtime seam** (`atrium-runtime`): the project layer talks to agents through one trait | [`docs/native-parity-implementation.md`](docs/native-parity-implementation.md) | — |

@@ -19,7 +19,7 @@ use std::{
     process::{Child, ChildStdin, Command, Stdio},
     sync::{Arc, Condvar, Mutex},
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde_json::{Value, json};
@@ -88,11 +88,66 @@ impl Proc {
     }
 }
 
+struct ThreadLog {
+    events: Vec<(i64, Value)>,
+    next: i64,
+    pruned_through: i64,
+}
+
+/// A thread log the mock owns. Multiple clients may attach; unlike a process,
+/// a thread stream is read-only, so a new reader never replaces an old one.
+struct MockThread {
+    id: String,
+    app_thread: Value,
+    log: Mutex<ThreadLog>,
+    changed: Condvar,
+}
+
+impl MockThread {
+    fn new(id: String, app_thread: Value) -> Arc<Self> {
+        Arc::new(Self {
+            id,
+            app_thread: app_thread.clone(),
+            log: Mutex::new(ThreadLog {
+                events: vec![(
+                    1,
+                    json!({ "type": "thread.created", "payload": app_thread }),
+                )],
+                next: 2,
+                pruned_through: 0,
+            }),
+            changed: Condvar::new(),
+        })
+    }
+
+    fn append(&self, event: Value) -> i64 {
+        let mut log = self.log.lock().unwrap();
+        let sequence = log.next;
+        log.next += 1;
+        log.events.push((sequence, event));
+        self.changed.notify_all();
+        sequence
+    }
+
+    fn summary(&self) -> Value {
+        let log = self.log.lock().unwrap();
+        json!({
+            "id": self.id,
+            "projectId": self.app_thread["projectId"].clone(),
+            "title": self.app_thread["title"].clone(),
+            "updatedAt": self.app_thread["updatedAt"].clone(),
+            "archivedAt": self.app_thread["archivedAt"].clone(),
+            "highWater": log.next - 1,
+        })
+    }
+}
+
 struct Node {
     name: String,
     roots: Vec<PathBuf>,
     agents: Vec<AgentSpec>,
     procs: Mutex<HashMap<String, Arc<Proc>>>,
+    threads: Mutex<HashMap<String, Arc<MockThread>>>,
     counter: Mutex<u64>,
 }
 
@@ -154,6 +209,7 @@ fn main() {
         roots,
         agents,
         procs: Mutex::new(HashMap::new()),
+        threads: Mutex::new(HashMap::new()),
         counter: Mutex::new(0),
     });
     for stream in listener.incoming().flatten() {
@@ -246,6 +302,7 @@ fn respond(
     let reason = match status {
         200 => "OK",
         201 => "Created",
+        202 => "Accepted",
         204 => "No Content",
         400 => "Bad Request",
         403 => "Forbidden",
@@ -341,6 +398,94 @@ fn serve(node: &Arc<Node>, mut stream: TcpStream) -> std::io::Result<()> {
                     "agents": agents, "magpie": null,
                 }),
             )
+        }
+        ("GET", ["v1", "threads"]) => {
+            let threads: Vec<Value> = node
+                .threads
+                .lock()
+                .unwrap()
+                .values()
+                .map(|thread| thread.summary())
+                .collect();
+            json_response(&mut stream, 200, json!({ "threads": threads }))
+        }
+        ("POST", ["v1", "threads"]) => {
+            let body: Value =
+                serde_json::from_slice(&read_body(&mut stream, &head)?).unwrap_or_default();
+            let app_thread = body.get("thread").cloned().unwrap_or_else(|| body.clone());
+            let Some(id) = app_thread["id"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned)
+            else {
+                return error(&mut stream, 400, "bad_request", "thread.id is required");
+            };
+            if node.threads.lock().unwrap().contains_key(&id) {
+                return error(&mut stream, 409, "bad_request", "thread already exists");
+            }
+            let thread = MockThread::new(id.clone(), app_thread);
+            node.threads.lock().unwrap().insert(id.clone(), thread);
+            json_response(&mut stream, 201, json!({ "id": id, "sequence": 1 }))
+        }
+        ("GET", ["v1", "threads", id, "attach"]) => {
+            let thread = node.threads.lock().unwrap().get(*id).cloned();
+            let Some(thread) = thread else {
+                return error(&mut stream, 404, "not_found", "no such thread");
+            };
+            let after: Option<i64> = head.query.get("after").and_then(|after| after.parse().ok());
+            attach_thread(thread, stream, head, after)
+        }
+        ("POST", ["v1", "threads", id, "send"]) => {
+            let thread = node.threads.lock().unwrap().get(*id).cloned();
+            let Some(thread) = thread else {
+                return error(&mut stream, 404, "not_found", "no such thread");
+            };
+            let body: Value =
+                serde_json::from_slice(&read_body(&mut stream, &head)?).unwrap_or_default();
+            let message_id = body["messageId"]
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("message-{}", now()));
+            let text = body["text"].as_str().unwrap_or_default();
+            let at = now();
+            let payload = json!({
+                "id": message_id,
+                "threadId": thread.id,
+                "role": "user",
+                "text": text,
+                "createdBy": "user",
+                "creationSource": "web",
+                "createdAt": at,
+                "updatedAt": at,
+                "streaming": false,
+                "attachments": [],
+                "runId": null,
+                "nodeId": null,
+            });
+            let sequence = thread.append(json!({ "type": "message.updated", "payload": payload }));
+            json_response(
+                &mut stream,
+                202,
+                json!({ "messageId": message_id, "sequence": sequence }),
+            )
+        }
+        ("POST", ["_mock", "threads", id, "prune"]) => {
+            let thread = node.threads.lock().unwrap().get(*id).cloned();
+            let Some(thread) = thread else {
+                return error(&mut stream, 404, "not_found", "no such thread");
+            };
+            let through: i64 = head
+                .query
+                .get("through")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            {
+                let mut log = thread.log.lock().unwrap();
+                log.pruned_through = through;
+                log.events.retain(|(sequence, _)| *sequence > through);
+                thread.changed.notify_all();
+            }
+            respond(&mut stream, 204, "text/plain", b"")
         }
         ("GET", ["v1", "procs"]) => {
             let owner = head.query.get("owner");
@@ -535,6 +680,156 @@ fn serve(node: &Arc<Node>, mut stream: TcpStream) -> std::io::Result<()> {
             }
         }
         _ => error(&mut stream, 404, "not_found", "no such route"),
+    }
+}
+
+/// T3's `THREAD_RESUME_MAX_REPLAY_EVENTS`; the mock uses the same bound so a
+/// test can cross it.
+const MOCK_THREAD_REPLAY_MAX: usize = 128;
+
+fn thread_snapshot(thread: &MockThread, log: &ThreadLog) -> Value {
+    let high = log.next - 1;
+    let messages: Vec<Value> = log
+        .events
+        .iter()
+        .filter(|(_, event)| event["type"] == "message.updated")
+        .map(|(_, event)| event["payload"].clone())
+        .collect();
+    json!({
+        "kind": "snapshot",
+        "snapshotSequence": high,
+        "projection": {
+            "thread": thread.app_thread.clone(),
+            "runs": [],
+            "attempts": [],
+            "nodes": [],
+            "subagents": [],
+            "providerSessions": [],
+            "providerThreads": [],
+            "providerTurns": [],
+            "runtimeRequests": [],
+            "messages": messages,
+            "plans": [],
+            "turnItems": [],
+            "checkpointScopes": [],
+            "checkpoints": [],
+            "contextHandoffs": [],
+            "contextTransfers": [],
+            "visibleTurnItems": [],
+            "updatedAt": thread.app_thread["updatedAt"].clone(),
+        },
+        "historyCursor": null,
+        "hasMoreHistory": false,
+        "latestLocalTurnOrdinal": null,
+    })
+}
+
+/// What a fresh attachment gets: replay from the cursor, or one snapshot when
+/// the cursor is ahead, below what was pruned, or the replay is too long.
+fn initial_thread_items(thread: &MockThread, after: Option<i64>) -> (Vec<Value>, i64) {
+    let log = thread.log.lock().unwrap();
+    let high = log.next - 1;
+    let needs_snapshot = match after {
+        None => true,
+        Some(after) => after > high || (after < high && after < log.pruned_through),
+    };
+    if needs_snapshot {
+        return (vec![thread_snapshot(thread, &log)], high);
+    }
+    let after = after.unwrap_or(0);
+    let replay: Vec<(i64, &Value)> = log
+        .events
+        .iter()
+        .filter(|(sequence, _)| *sequence > after)
+        .map(|(sequence, event)| (*sequence, event))
+        .collect();
+    // A retained creation event may describe a recreated or deleted thread;
+    // the engine replaces that replay with a snapshot when one exists.
+    if replay.len() > MOCK_THREAD_REPLAY_MAX
+        || replay
+            .iter()
+            .any(|(_, event)| event["type"] == "thread.created")
+    {
+        (vec![thread_snapshot(thread, &log)], high)
+    } else {
+        (
+            replay
+                .into_iter()
+                .map(|(sequence, event)| {
+                    json!({ "kind": "event", "sequence": sequence, "event": event })
+                })
+                .collect(),
+            after,
+        )
+    }
+}
+
+fn attach_thread(
+    thread: Arc<MockThread>,
+    stream: TcpStream,
+    head: Head,
+    after: Option<i64>,
+) -> std::io::Result<()> {
+    let replay = Replay {
+        head: std::io::Cursor::new(head.raw),
+        stream,
+    };
+    let mut socket =
+        tungstenite::accept(replay).map_err(|error| std::io::Error::other(error.to_string()))?;
+    let transport = &socket.get_ref().stream;
+    transport.set_read_timeout(Some(Duration::from_millis(50)))?;
+    // Every reader starts with the same initial items; readers do not replace
+    // one another.
+    let (items, mut sent) = initial_thread_items(&thread, after);
+    for item in items {
+        socket
+            .send(Message::text(item.to_string()))
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+    }
+    socket
+        .send(Message::text(json!({ "kind": "synchronized" }).to_string()))
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let mut last_ping = Instant::now();
+    loop {
+        match socket.read() {
+            Ok(Message::Ping(payload)) => {
+                let _ = socket.send(Message::Pong(payload));
+            }
+            Ok(Message::Close(_)) => return Ok(()),
+            Ok(_) => {}
+            Err(tungstenite::Error::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(_) => return Ok(()),
+        }
+        let frames = {
+            let mut log = thread.log.lock().unwrap();
+            if log.next - 1 <= sent {
+                let (guard, _) = thread
+                    .changed
+                    .wait_timeout(log, Duration::from_millis(30))
+                    .unwrap();
+                log = guard;
+            }
+            log.events
+                .iter()
+                .filter(|(sequence, _)| *sequence > sent)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        for (sequence, event) in frames {
+            let item = json!({ "kind": "event", "sequence": sequence, "event": event });
+            if socket.send(Message::text(item.to_string())).is_err() {
+                return Ok(());
+            }
+            sent = sequence;
+        }
+        if last_ping.elapsed() >= Duration::from_secs(15) {
+            last_ping = Instant::now();
+            let _ = socket.send(Message::Ping(Vec::new()));
+        }
     }
 }
 
