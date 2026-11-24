@@ -34,10 +34,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             xvfb xauth xdotool imagemagick pkg-config \
-            libxkbcommon-x11-0 libxkbcommon0 libxkbcommon-dev \
-            libx11-xcb1 libx11-dev libxcb1 libxcb1-dev \
-            libxcb-randr0 libxcb-shape0 libxcb-render0 libxcb-xfixes0 \
-            libxcb-xkb1 libxi6 libxrandr2 libxcursor1 libxrender1 \
+            libxkbcommon-x11-0 libxkbcommon-x11-dev libxkbcommon0 libxkbcommon-dev \
+            libx11-xcb1 libx11-xcb-dev libx11-dev libxcb1 libxcb1-dev \
+            libxcb-randr0 libxcb-randr0-dev libxcb-shape0 libxcb-shape0-dev \
+            libxcb-render0 libxcb-render0-dev libxcb-xfixes0 libxcb-xfixes0-dev \
+            libxcb-xkb1 libxcb-xkb-dev libxcb-shm0-dev libxcb-sync-dev \
+            libxcb-present-dev libxcb-composite0-dev libxcb-damage0-dev \
+            libxcb-glx0-dev libxcb-util-dev libxcb-image0-dev libxcb-keysyms1-dev \
+            libxi6 libxi-dev libxrandr2 libxrandr-dev libxcursor1 libxcursor-dev \
+            libxrender1 libxrender-dev libxext-dev libsm-dev libice-dev \
             libwayland-dev libfontconfig1-dev libfreetype6-dev \
             libgl1-mesa-dev libegl1-mesa-dev libvulkan1 libvulkan-dev \
             mesa-vulkan-drivers
