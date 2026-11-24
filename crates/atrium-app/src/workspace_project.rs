@@ -191,6 +191,10 @@ pub struct StreamView {
 pub(super) struct ScheduleState {
     task_pool: pool::TaskPoolSchedule,
     pr_poll: pr_status::Poll,
+    /// Per-lead pull request read state and what the lead has heard.
+    pub(super) pr_sync: HashMap<(PathBuf, String), pr_status::Sync>,
+    /// Whether the last sweep could not find `gh`; log the pause once.
+    pub(super) pr_gh_missing: bool,
     pilot: autopilot::Pilot,
     inhibitor: crate::sleep_inhibitor::SleepInhibitor,
     inhibitor_failed: bool,

@@ -22,6 +22,22 @@ bounded-snapshot helpers. The store-level snapshot and compaction cases are
 ported in `src/store/stream_tests.rs`; the WebSocket/HTTP framing is skipped
 with the transport.
 
+### Ported outside `atrium-engine`
+
+These live where Atrium's own code already does the job (the port folds into
+one implementation instead of adding a second subsystem):
+
+| Atrium module | T3 source | Item |
+| --- | --- | --- |
+| `atrium-project/src/pr_watch` (`evaluate`, `sync_due`, `watch_message`, `watch_end_message`) | `apps/server/src/orchestration-v2/pullRequestWatch.ts`, `PullRequestSyncReactor.ts` (`isDue` cadence and failed-read backoff), `packages/contracts/src/threadPullRequest.ts` (watch fields) | 31 |
+| `atrium-project/src/pr` (`Observation`, comment/review remarks, head SHA, mergeability) | `apps/server/src/pullRequest/pullRequestSyncKey.ts`/`pullRequestTarget.ts` shape only; `gh pr view` replaces T3's provider reads | 31 |
+
+The T3 unit tests for `evaluatePullRequestWatch` were ported alongside the
+module in `atrium-project/src/pr_watch.rs`. Deliberately left out: T3's
+per-file viewed state, change breakdown, linked-PR sources and stacks,
+provider registry and merge-queue reads — Atrium has no UI or data path for
+them, and `gh pr view` exposes no merge-queue removals.
+
 ## What is not ported
 
 T3's web UI, Electron shell, mobile apps, relay, pairing and OAuth stay out;

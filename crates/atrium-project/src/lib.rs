@@ -31,6 +31,7 @@ pub mod mcp;
 pub mod notice_delivery;
 pub mod pool;
 pub mod pr;
+pub mod pr_watch;
 pub mod preview;
 pub mod repo;
 pub mod scheduler;
