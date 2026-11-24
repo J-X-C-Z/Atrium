@@ -9,12 +9,18 @@ Keep this table current when a module lands or moves.
 | `atrium-engine` module | T3 source | Item |
 | --- | --- | --- |
 | `src/contracts` | `packages/contracts/src` (base schemas, orchestration V2, model selection) | 20 |
-| `src/store` | `apps/server/src/orchestration-v2/EventStore.ts`, `ProjectionStore.ts`, `apps/server/src/persistence/Migrations/055_OrchestrationV2.ts` | 21 |
+| `src/store` | `apps/server/src/orchestration-v2/EventStore.ts`, `ProjectionStore.ts`, `apps/server/src/persistence/Migrations/055_OrchestrationV2.ts`, `ThreadStream.ts`, `LiveStreamBudget.ts`, `threadHistoryPaging.ts`, `WireProjection.ts`, `packages/shared/src/orchestrationV2BoundedSnapshot.ts` | 21 |
 | `src/orchestration` | `apps/server/src/orchestration-v2/Orchestrator.ts`, `EventSink.ts`, `EffectWorker.ts`, `runtimeLayer.ts` | 25 |
 | `src/providers` | `packages/provider-core`, `packages/effect-codex-app-server`, `packages/provider-acp` | 22, 23, 24 |
 | `src/usage` | `orchestration-v2/UsageLimitRecoveryWorker.ts`, limit schemas | 26 |
 | `src/checkpoint` | `apps/server/src/checkpointing`, `orchestration-v2/Checkpoint*Service.ts` | 27 |
 | `src/mcp` | `packages/contracts/src/orchestratorMcp.ts`, `apps/server/src/mcp` | 28 |
+
+`boundedSnapshotTransport.ts` has no module of its own in v0.1.11; only its
+HTTP-level test exists, backed by `threadHistoryPaging.ts` and the shared
+bounded-snapshot helpers. The store-level snapshot and compaction cases are
+ported in `src/store/stream_tests.rs`; the WebSocket/HTTP framing is skipped
+with the transport.
 
 ## What is not ported
 
