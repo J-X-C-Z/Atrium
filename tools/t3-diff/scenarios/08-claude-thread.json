@@ -1,0 +1,19 @@
+{
+  "name": "08-claude-thread",
+  "agent": "claude",
+  "project": "scratch",
+  "model": "claude-sonnet-4-6",
+  "turns": [
+    {"text": "say hi"},
+    {"text": "now say bye"}
+  ],
+  "t3": "skip: T3 cannot drive a Claude account headlessly; this scenario drives atrium-engine only",
+  "expect": {
+    "final_status": "completed",
+    "stream_contains": [
+      {"kind": "item", "role": "assistant", "text": "echo: say hi"},
+      {"kind": "item", "role": "assistant", "text": "echo: now say bye"}
+    ],
+    "provider_methods": ["initialize"]
+  }
+}

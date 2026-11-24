@@ -15,3 +15,6 @@ Ported sources:
 - T3's recorded fixtures
   `apps/server/src/orchestration-v2/testkit/fixtures/*/claude_transcript.ndjson`
   -> protocol tests and `mock-claude` scripts
+- Item 23's adapter work extends `mock-claude` with thinking, TodoWrite plan
+  and subagent-lifecycle scripts for `tools/t3-diff`; the adapter itself lives
+  in `atrium-engine/src/providers/claude*`.

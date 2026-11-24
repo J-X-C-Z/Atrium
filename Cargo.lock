@@ -659,6 +659,8 @@ version = "0.1.0"
 dependencies = [
  "atrium-core",
  "atrium-runtime",
+ "base64 0.22.1",
+ "claude-client",
  "codex-client",
  "futures",
  "jiff 0.2.46",

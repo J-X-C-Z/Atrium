@@ -62,6 +62,11 @@ pub struct TurnMessage {
     pub scheduled_task_id: Option<ScheduledTaskId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_thread_id: Option<ThreadId>,
+    /// Local image files the adapter should read and send. T3 keeps image
+    /// bytes in its own store; Atrium passes the paths alongside the wire
+    /// attachment records. Not serialized, so the contract JSON is unchanged.
+    #[serde(skip)]
+    pub image_paths: Vec<String>,
 }
 
 impl TurnMessage {
@@ -74,6 +79,7 @@ impl TurnMessage {
             creation_source: CreationSource::Server,
             scheduled_task_id: None,
             sender_thread_id: None,
+            image_paths: Vec::new(),
         }
     }
 }

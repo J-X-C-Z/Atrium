@@ -263,6 +263,18 @@ fn user_turn(state: &mut State, value: &Value) {
         );
         return;
     }
+    if prompt.contains("plan") || prompt.contains("todo") {
+        plan_turn(state, &prompt);
+        return;
+    }
+    if prompt.contains("subagent") || prompt.contains("spawn") {
+        subagent_turn(state, &prompt);
+        return;
+    }
+    if prompt.contains("think about") {
+        thinking_turn(state, &prompt);
+        return;
+    }
     if prompt.contains("run") || prompt.contains("tool") {
         state.request_seq += 1;
         let tool_use_id = format!("toolu_mock_{}", state.request_seq);
@@ -323,6 +335,143 @@ fn user_turn(state: &mut State, value: &Value) {
         "session_id": state.session_id.clone(),
     }));
     emit_result(state, false, "completed", &format!("echo: {prompt}"), None);
+}
+
+/// A TodoWrite call that the adapter projects as a plan card.
+fn plan_turn(state: &mut State, prompt: &str) {
+    let message_id = format!("msg_mock_{}_plan", state.turn);
+    emit(json!({
+        "type": "assistant",
+        "message": {
+            "id": message_id,
+            "model": state.model.clone(),
+            "type": "message",
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "id": format!("toolu_plan_{}", state.turn),
+                "name": "TodoWrite",
+                "input": {"todos": [
+                    {"content": "Inspect the request", "status": "completed", "activeForm": "Inspecting"},
+                    {"content": "Write the plan", "status": "in_progress", "activeForm": "Writing"},
+                    {"content": "Verify the result", "status": "pending", "activeForm": "Verifying"}
+                ]},
+                "caller": {"type": "direct"}
+            }],
+            "stop_reason": null,
+            "usage": {"input_tokens": 3, "output_tokens": 7}
+        },
+        "parent_tool_use_id": null,
+        "session_id": state.session_id.clone(),
+        "uuid": uuid(state, 70),
+    }));
+    emit(json!({
+        "type": "user",
+        "message": {"role": "user", "content": [{
+            "type": "tool_result",
+            "tool_use_id": format!("toolu_plan_{}", state.turn),
+            "content": "Todos updated"
+        }]},
+        "parent_tool_use_id": null,
+        "session_id": state.session_id.clone(),
+        "uuid": uuid(state, 71),
+    }));
+    emit_assistant(state, &format!("Plan recorded for: {prompt}"));
+    emit_result(state, false, "completed", "Plan recorded.", None);
+}
+
+/// Claude's native subagent lifecycle frames.
+fn subagent_turn(state: &mut State, prompt: &str) {
+    let task_id = format!("task-{}", state.turn);
+    emit(json!({
+        "type": "system", "subtype": "task_started",
+        "task_id": task_id,
+        "description": "Explore the repository",
+        "subagent_type": "Explore",
+        "task_type": "local_agent",
+        "prompt": prompt,
+        "is_backgrounded": false,
+        "spawn_depth": 0,
+        "uuid": uuid(state, 72),
+        "session_id": state.session_id.clone(),
+    }));
+    emit(json!({
+        "type": "system", "subtype": "task_progress",
+        "task_id": task_id,
+        "description": "Explore the repository",
+        "subagent_type": "Explore",
+        "last_tool_name": "Read",
+        "summary": "read 2 files",
+        "usage": {"total_tokens": 512, "tool_uses": 2, "duration_ms": 1200},
+        "uuid": uuid(state, 73),
+        "session_id": state.session_id.clone(),
+    }));
+    emit_assistant(state, "The sub-agent finished.");
+    emit(json!({
+        "type": "system", "subtype": "task_notification",
+        "task_id": task_id,
+        "status": "completed",
+        "summary": "read 2 files",
+        "output_file": "",
+        "usage": {"total_tokens": 512, "tool_uses": 2, "duration_ms": 1200},
+        "uuid": uuid(state, 74),
+        "session_id": state.session_id.clone(),
+    }));
+    emit_result(state, false, "completed", "Sub-agent finished.", None);
+}
+
+/// Streamed thinking, then a text answer.
+fn thinking_turn(state: &mut State, prompt: &str) {
+    let message_id = format!("msg_mock_{}_think", state.turn);
+    emit(json!({
+        "type": "stream_event",
+        "event": {
+            "type": "message_start",
+            "message": {
+                "model": state.model.clone(), "id": message_id, "type": "message", "role": "assistant",
+                "content": [], "stop_reason": null,
+                "usage": {"input_tokens": 3, "output_tokens": 1}
+            }
+        },
+        "session_id": state.session_id.clone(), "parent_tool_use_id": null, "uuid": uuid(state, 80),
+    }));
+    emit(json!({
+        "type": "stream_event",
+        "event": {"type": "content_block_start", "index": 0,
+                  "content_block": {"type": "thinking", "thinking": "", "signature": ""}},
+        "session_id": state.session_id.clone(), "parent_tool_use_id": null, "uuid": uuid(state, 81),
+    }));
+    for (offset, chunk) in ["Weighing the ", "options."].iter().enumerate() {
+        emit(json!({
+            "type": "stream_event",
+            "event": {"type": "content_block_delta", "index": 0,
+                      "delta": {"type": "thinking_delta", "thinking": chunk}},
+            "session_id": state.session_id.clone(), "parent_tool_use_id": null,
+            "uuid": uuid(state, 82 + offset as u64),
+        }));
+    }
+    emit(json!({
+        "type": "stream_event",
+        "event": {"type": "content_block_stop", "index": 0},
+        "session_id": state.session_id.clone(), "parent_tool_use_id": null, "uuid": uuid(state, 84),
+    }));
+    emit(json!({
+        "type": "assistant",
+        "message": {
+            "id": message_id,
+            "model": state.model.clone(),
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "thinking", "thinking": "Weighing the options.", "signature": "sig"}],
+            "stop_reason": null,
+            "usage": {"input_tokens": 3, "output_tokens": 4}
+        },
+        "parent_tool_use_id": null,
+        "session_id": state.session_id.clone(),
+        "uuid": uuid(state, 85),
+    }));
+    emit_assistant(state, &format!("Thinking about: {prompt}"));
+    emit_result(state, false, "completed", "Thought it through.", None);
 }
 
 fn message_text(message: &Value) -> String {

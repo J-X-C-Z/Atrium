@@ -21,6 +21,10 @@ Scenario kinds:
   `atrium_engine::runtime::CodexEngineRuntime`, the `AgentRuntime` seam the
   app selects. The driver receives the app's `AgentEvent`s, so the stream is
   the same shape the app sees.
+* `"agent": "claude"` selects the Claude backend instead: the same engine
+  kind runs `ClaudeEngineRuntime` over `claude-client` and `mock-claude`.
+  T3 0.1.11 cannot drive a Claude account headlessly, so these scenarios
+  always carry `"t3": "skip: <reason>"` and run engine-only.
 * `"kind": "adapter"` drives `CodexSessionRuntime` directly for behaviour the
   T3 0.1.11 CLI cannot reach: mid-thread settings, `skills/list` /
   `config/read`, MCP elicitation outside full access, and `thread/read`
@@ -29,6 +33,11 @@ Scenario kinds:
   `{"op":"skills"}`, `{"op":"config"}`, `{"op":"read_snapshot"}`,
   `{"op":"hold_writer"}`, `{"op":"read_vs_write"}`, `{"op":"resume"}` and
   `{"op":"turn","text":"...","answer":"accept","runtime_mode":"approval-required"}`.
+  With `"agent": "claude"` the adapter kind drives `ClaudeSessionRuntime`;
+  its actions add `{"op":"commands"}` and `{"op":"skills"}`, and its traces
+  are `claude.settings`, `claude.commands`, `claude.skills`, `claude.plan`,
+  `claude.subagent`, `claude.rateLimits`, `claude.runtimeRequest` and
+  `claude.responded`.
   Adapter scenarios carry `"t3": "skip: <reason>"`; the runner records the
   reason in `diff.txt` instead of pretending a T3 comparison happened.
 
@@ -40,7 +49,9 @@ Scenario kinds:
   runs go through a small logging wrapper (`mock-wrap.py`), so T3's provider
   probe (`initialize`, `skills/list`, `config/read`, `model/list`, ...) and
   the engine's are checked against the same list. Per-side methods land in
-  `t3-methods.json` and `engine-methods.json`.
+  `t3-methods.json` and `engine-methods.json`. For Claude, the host's
+  `control_request` subtypes (`initialize`, `set_model`,
+  `set_permission_mode`, `interrupt`, ...) are collected the same way.
 
 Scenarios:
 
@@ -53,6 +64,10 @@ Scenarios:
 | `05-elicitation` | MCP elicitation becomes a runtime request and is answered |
 | `06-read-vs-write` | `thread/read` works while the writer lock is held; `thread/resume` reports in use |
 | `07-provider-probe` | both sides call `initialize`, `model/list`, `skills/list`, `config/read`, `thread/start`, `turn/start` |
+| `08-claude-thread` | Claude engine: two turns, echoed messages and final status (engine-only) |
+| `09-claude-tool-approval` | Claude engine: a `can_use_tool` prompt leaves the turn waiting (engine-only) |
+| `10-claude-adapter-events` | Claude adapter: slash commands, skills, TodoWrite plan, thinking, subagent lifecycle and mid-thread settings (engine-only) |
+| `11-claude-usage-limit` | Claude engine: `rate_limit_event` + 429 result ends the turn failed (engine-only) |
 
 ## Build
 
@@ -61,12 +76,14 @@ export NO_PROXY='*'
 export CARGO_TARGET_DIR="/path/to/target"   # optional; target/ in the repo also works
 
 cargo build -p codex-client --bin mock-codex
+cargo build -p claude-client --bin mock-claude
 cargo build -p atrium-engine --bin atrium-engine-driver
 ```
 
-`run.py` finds both binaries in `$CARGO_TARGET_DIR/{debug,release}` first,
+`run.py` finds the binaries in `$CARGO_TARGET_DIR/{debug,release}` first,
 then `<repo>/target/{debug,release}`, then `PATH`. Override with
-`--mock-codex-bin`, `--engine-bin`, or `MOCK_CODEX_BIN`, `ENGINE_BIN`.
+`--mock-codex-bin`, `--mock-claude-bin`, `--engine-bin`, or
+`MOCK_CODEX_BIN`, `MOCK_CLAUDE_BIN`, `ENGINE_BIN`.
 
 T3 is looked up as `--t3-bin`, then `$T3_BIN`, then
 `~/.t3/runtime/versions/0.1.11/t3`, then the newest installed version, then
@@ -115,7 +132,9 @@ run is waiting on a person, which is a scenario outcome, not an error.
 from stdin and writes normalized JSON lines to stdout. Turns run through
 `CodexEngineRuntime` (the `atrium_runtime::AgentRuntime` implementation) and
 the ported Codex adapter over `codex-client`; item text and statuses come from
-the same provider output T3 sees. The driver still owns the one-thread,
+the same provider output T3 sees. With `"agent": "claude"` the driver runs
+`ClaudeEngineRuntime`/`ClaudeAdapter` over `claude-client` and `mock-claude`
+instead, and the T3 side is always skipped. The driver still owns the one-thread,
 sequential-turns shape of a scenario; the orchestration queue itself is item
 25. Adapter scenarios call the session runtime directly, as described above.
 
