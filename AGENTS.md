@@ -63,7 +63,7 @@ do not mark it done from mocks.
 | 33 | **Team gaps**: apply member model/effort, pool workers through `pick`, persist the stand-in badge, stand-in on ACP limits without the autopilot | [`docs/parallel-lanes.md`](docs/parallel-lanes.md) | — |
 | 34 | **Soak and footprint**: hours-long headless runs with mocks, RSS/files/CPU over time, leak fixes, the same numbers for T3 | [`docs/parallel-lanes.md`](docs/parallel-lanes.md) | — |
 | 35 | **Office vs LibreOffice**: render a generated corpus both ways, per-page diff report, fix the worst differences | [`docs/parallel-lanes.md`](docs/parallel-lanes.md) | — |
-| 36 | **Installers and updates**: dmg (signed when secrets exist), msi/exe, AppImage/deb, node as a service, release workflow | [`docs/parallel-lanes.md`](docs/parallel-lanes.md) | — |
+| 36 | ✓ done in #15. **Installers and updates**: dmg (signed when secrets exist), installer exe, AppImage/deb, node as a service, release workflow | [`docs/parallel-lanes.md`](docs/parallel-lanes.md) | — |
 | 37 | **Small cleanups**: the `&PathBuf` warning, symlinked-path keys, CI on pushes to main | [`docs/parallel-lanes.md`](docs/parallel-lanes.md) | — |
 
 Do one item per pull request. In each PR, tick its row here (add "✓ done in
