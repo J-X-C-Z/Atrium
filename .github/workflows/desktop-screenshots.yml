@@ -33,11 +33,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            xvfb xauth xdotool imagemagick \
-            libxkbcommon-x11-0 libxkbcommon0 libx11-xcb1 libxcb1 \
+            xvfb xauth xdotool imagemagick pkg-config \
+            libxkbcommon-x11-0 libxkbcommon0 libxkbcommon-dev \
+            libx11-xcb1 libx11-dev libxcb1 libxcb1-dev \
             libxcb-randr0 libxcb-shape0 libxcb-render0 libxcb-xfixes0 \
             libxcb-xkb1 libxi6 libxrandr2 libxcursor1 libxrender1 \
-            libvulkan1 mesa-vulkan-drivers
+            libwayland-dev libfontconfig1-dev libfreetype6-dev \
+            libgl1-mesa-dev libegl1-mesa-dev libvulkan1 libvulkan-dev \
+            mesa-vulkan-drivers
       - name: Build and capture English and Chinese chat lists
         run: |
           set -euo pipefail
