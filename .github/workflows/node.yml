@@ -29,6 +29,35 @@ name: Native backend acceptance
       - 'scripts/test_prepare_node_demo.py'
       - 'scripts/test-project-model.py'
       - 'scripts/test-notice-dispatch.py'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/atrium-node/**'
+      - 'crates/atrium-project/**'
+      - 'crates/atrium-app/src/i18n.rs'
+      - 'crates/atrium-app/src/ui/project.rs'
+      - 'crates/atrium-app/src/workspace.rs'
+      - 'crates/atrium-app/src/workspace_ticker_test.rs'
+      - 'crates/atrium-app/src/workspace_project.rs'
+      - 'crates/atrium-app/src/workspace_acp.rs'
+      - 'crates/atrium-app/src/notice_delivery.rs'
+      - 'crates/atrium-app/src/notice_dispatch.rs'
+      - 'crates/atrium-app/Cargo.toml'
+      - 'crates/agent-rpc/**'
+      - 'crates/codex-client/**'
+      - 'crates/acp-client/**'
+      - 'crates/atrium-core/**'
+      - 'crates/atrium-engine/**'
+      - 'crates/atrium-runtime/**'
+      - 'crates/claude-client/**'
+      - 'tools/t3-diff/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/node.yml'
+      - 'scripts/prepare-node-demo.py'
+      - 'scripts/test_prepare_node_demo.py'
+      - 'scripts/test-project-model.py'
+      - 'scripts/test-notice-dispatch.py'
   workflow_dispatch:
 
 permissions:

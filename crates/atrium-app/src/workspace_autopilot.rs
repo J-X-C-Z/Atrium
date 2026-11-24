@@ -30,7 +30,7 @@ impl Workspace {
                     self.project_schedule
                         .pilot
                         .streams
-                        .entry((p.root.clone(), s.id.clone()))
+                        .entry((p.root.to_path_buf(), s.id.clone()))
                         .or_default()
                         .clock
                         .restarted(at);
@@ -103,7 +103,7 @@ impl Workspace {
         if !p.file.autopilot.on || s.retired {
             return;
         }
-        let key = (p.root.clone(), s.id.clone());
+        let key = (p.root.to_path_buf(), s.id.clone());
         let state = self.project_schedule.pilot.streams.entry(key).or_default();
         state.clock.failed(Instant::now());
         state.needs_resume |= resume;
@@ -122,7 +122,7 @@ impl Workspace {
         if !p.file.autopilot.on || s.retired {
             return;
         }
-        let key = (p.root.clone(), s.id.clone());
+        let key = (p.root.to_path_buf(), s.id.clone());
         let now = Instant::now();
         match event {
             AgentEvent::TurnStarted { .. } => {
@@ -166,13 +166,13 @@ impl Workspace {
     #[allow(dead_code)] // Consumed by the separate pool retirement scheduler.
     pub(in crate::workspace) fn stalled_pool_claim(
         &self,
-        root: &PathBuf,
+        root: &Path,
         worker: &str,
     ) -> Option<&str> {
         let p = self
             .projects
             .iter()
-            .find(|p| p.root == *root && p.file.autopilot.on)?;
+            .find(|p| p.root.as_path() == root && p.file.autopilot.on)?;
         let s = p.stream(worker)?;
         let thread = s.thread_id.as_ref()?;
         if s.retired || self.loading.contains(thread) || self.transcripts.get(thread)?.is_running()
@@ -183,14 +183,14 @@ impl Workspace {
             .project_schedule
             .pilot
             .streams
-            .get(&(root.clone(), worker.to_owned()))?
+            .get(&(root.to_path_buf(), worker.to_owned()))?
             .retire_after_interrupt
             .as_deref()?;
         p.task_of(s).filter(|t| t.key() == key).map(|_| key)
     }
 
     /// Also used before a scheduler-owned kickoff (pool workers included).
-    pub(in crate::workspace) fn scheduler_turn_slot(&mut self, root: &PathBuf) -> bool {
+    pub(in crate::workspace) fn scheduler_turn_slot(&mut self, root: &Path) -> bool {
         let Some(p) = self.project_mut(root) else {
             return false;
         };
@@ -241,8 +241,8 @@ impl Workspace {
         backoff.0 = now + project::scheduler::retry_delay(backoff.1);
     }
 
-    pub(super) fn tick_autopilot(&mut self, root: &PathBuf, cx: &mut Context<Self>) {
-        let Some(p) = self.projects.iter().find(|p| p.root == *root) else {
+    pub(super) fn tick_autopilot(&mut self, root: &Path, cx: &mut Context<Self>) {
+        let Some(p) = self.projects.iter().find(|p| p.root.as_path() == root) else {
             return;
         };
         if !p.file.autopilot.on {
@@ -261,11 +261,15 @@ impl Workspace {
         }
     }
 
-    fn tick_pilot_stream(&mut self, root: &PathBuf, s: &Workstream, cx: &mut Context<Self>) {
-        let p = self.projects.iter().find(|p| p.root == *root).unwrap();
+    fn tick_pilot_stream(&mut self, root: &Path, s: &Workstream, cx: &mut Context<Self>) {
+        let p = self
+            .projects
+            .iter()
+            .find(|p| p.root.as_path() == root)
+            .unwrap();
         let thread = s.thread_id.as_deref().unwrap();
         let now = Instant::now();
-        let key = (root.clone(), s.id.clone());
+        let key = (root.to_path_buf(), s.id.clone());
         let has_work = p.has_work(s);
         let notice = self.project_schedule.pending.contains(&key) && !p.unread(&s.id).is_empty();
         let state = self
@@ -359,14 +363,18 @@ impl Workspace {
 
     fn wake(
         &mut self,
-        root: &PathBuf,
+        root: &Path,
         s: &Workstream,
         why: Wake,
         now: Instant,
         cx: &mut Context<Self>,
     ) {
-        let p = self.projects.iter().find(|p| p.root == *root).unwrap();
-        let key = (root.clone(), s.id.clone());
+        let p = self
+            .projects
+            .iter()
+            .find(|p| p.root.as_path() == root)
+            .unwrap();
+        let key = (root.to_path_buf(), s.id.clone());
         let thread = s.thread_id.as_ref().unwrap();
         if agents::split_backend(&s.backend).1.is_none() {
             let directory = p.work_dir(&s.id);
@@ -432,7 +440,28 @@ impl Workspace {
         }
     }
 
-    fn pilot_notice(&mut self, root: &PathBuf, s: &Workstream, text: &str, parent: bool) {
+    #[cfg(all(test, unix, feature = "workspace-ticker-test"))]
+    pub(super) fn test_requested(&self, root: &Path, id: &str) -> bool {
+        self.project_schedule
+            .pilot
+            .streams
+            .get(&(root.to_owned(), id.to_owned()))
+            .is_some_and(|state| state.requested.is_some())
+    }
+
+    #[cfg(all(test, unix, feature = "workspace-ticker-test"))]
+    pub(super) fn test_clear_requested(&mut self, root: &Path, id: &str) {
+        if let Some(state) = self
+            .project_schedule
+            .pilot
+            .streams
+            .get_mut(&(root.to_owned(), id.to_owned()))
+        {
+            state.requested = None;
+        }
+    }
+
+    fn pilot_notice(&mut self, root: &Path, s: &Workstream, text: &str, parent: bool) {
         let mut to = vec![project::YOU.to_owned()];
         if parent && let Some(parent) = &s.parent {
             to.push(parent.clone());
@@ -491,14 +520,14 @@ impl Workspace {
                     approval::acp_decision(&dir, wire)
                 }
             });
-        let root = p.root.clone();
+        let root = p.root.to_path_buf();
         let stream = s.clone();
         self.pilot_answer(&root, &stream, request, answer, cx);
     }
 
     fn pilot_answer(
         &mut self,
-        root: &PathBuf,
+        root: &Path,
         s: &Workstream,
         req: &atrium_core::ApprovalRequest,
         answer: atrium_core::ApprovalDecision,
@@ -540,7 +569,7 @@ impl Workspace {
         }
     }
 
-    fn answer_unattended(&mut self, root: &PathBuf, s: &Workstream, cx: &mut Context<Self>) {
+    fn answer_unattended(&mut self, root: &Path, s: &Workstream, cx: &mut Context<Self>) {
         let thread = s.thread_id.as_ref().unwrap();
         let Some(t) = self.transcripts.get(thread) else {
             return;

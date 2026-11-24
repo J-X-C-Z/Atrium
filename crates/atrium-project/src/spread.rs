@@ -16,7 +16,7 @@
 
 use std::{
     collections::BTreeMap,
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
 };
 
 use crate::{Project, Role, Workstream, glob_match, scope_label};
@@ -32,7 +32,16 @@ pub fn device_of(backend: &str) -> Option<&str> {
 /// The project's path inside the workspace, with `/` between parts, when it
 /// is inside it: `photo-engine` for `~/Atrium Workspace/photo-engine`.
 pub fn relative(project_root: &Path, workspace: &Path) -> Option<String> {
-    let rest = project_root.strip_prefix(workspace).ok()?;
+    let rest: PathBuf = match project_root.strip_prefix(workspace) {
+        Ok(rest) => rest.to_path_buf(),
+        Err(_) => {
+            // The two may name one folder differently: macOS resolves
+            // `/var` to `/private/var`, and either side may be a symlink.
+            let root = project_root.canonicalize().ok()?;
+            let workspace = workspace.canonicalize().ok()?;
+            root.strip_prefix(workspace).ok()?.to_path_buf()
+        }
+    };
     let parts: Vec<String> = rest
         .components()
         .map(|c| match c {
@@ -313,6 +322,24 @@ mod tests {
         assert_eq!(workspace_in_roots(&["~/code".into()]), None);
         assert_eq!(device_of("codex@win"), Some("win"));
         assert_eq!(device_of("claude"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_workspace_and_project_are_one_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("Atrium Workspace");
+        let project = workspace.join("photo");
+        std::fs::create_dir_all(&project).unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&workspace, &alias).unwrap();
+
+        assert_eq!(
+            relative(&alias.join("photo"), &workspace),
+            Some("photo".into())
+        );
+        assert_eq!(relative(&project, &alias), Some("photo".into()));
+        assert_eq!(relative(&alias.join("photo"), &alias), Some("photo".into()));
     }
 
     #[test]

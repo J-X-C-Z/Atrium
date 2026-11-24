@@ -22,17 +22,28 @@ bounded-snapshot helpers. The store-level snapshot and compaction cases are
 ported in `src/store/stream_tests.rs`; the WebSocket/HTTP framing is skipped
 with the transport.
 
-## Ported outside atrium-engine
+### Ported outside `atrium-engine`
 
-Item 31 compared T3's provider-native workflows with Atrium's own workflow
-runner (`crates/atrium-workflow`) and ported the parts Atrium lacked into
-that runner rather than adding a second engine. The same MIT notice covers
-these files.
+These live where Atrium's own code already does the job (the port folds into
+one implementation instead of adding a second subsystem). Item 31 compared
+T3's provider-native workflows with Atrium's own workflow runner
+(`crates/atrium-workflow`) and ported the parts Atrium lacked into that runner
+rather than adding a second engine. The same MIT notice covers these files.
 
 | Atrium module | T3 source | Item |
 | --- | --- | --- |
+| `atrium-project/src/pr_watch` (`evaluate`, `sync_due`, `watch_message`, `watch_end_message`) | `apps/server/src/orchestration-v2/pullRequestWatch.ts`, `PullRequestSyncReactor.ts` (`isDue` cadence and failed-read backoff), `packages/contracts/src/threadPullRequest.ts` (watch fields) | 31 |
+| `atrium-project/src/pr` (`Observation`, comment/review remarks, head SHA, mergeability) | `apps/server/src/pullRequest/pullRequestSyncKey.ts`/`pullRequestTarget.ts` shape only; `gh pr view` replaces T3's provider reads | 31 |
+| `crates/atrium-app/src/schedule.rs` (schedule kinds, next-run and DST rules, structural comparison, run status, restart recovery) | `apps/server/src/scheduledTasks/Schedule.ts`, `packages/contracts/src/scheduledTask.ts` | 31 |
+| `crates/atrium-app/src/workspace_schedules.rs` (startup recovery, one-run-at-a-time dispatch) | `apps/server/src/scheduledTasks/ScheduledTaskService.ts` | 31 |
 | `crates/atrium-workflow/src/files.rs` | `apps/server/src/orchestration-v2/workflowFileRead.ts` | 31 |
 | `crates/atrium-workflow/src/answers.rs` | `apps/server/src/orchestration-v2/workflowAgentAnswers.ts`, `workflowAgentTranscript.ts` | 31 |
+
+The T3 unit tests for `evaluatePullRequestWatch` were ported alongside the
+module in `atrium-project/src/pr_watch.rs`. Deliberately left out: T3's
+per-file viewed state, change breakdown, linked-PR sources and stacks,
+provider registry and merge-queue reads — Atrium has no UI or data path for
+them, and `gh pr view` exposes no merge-queue removals.
 
 ## What is not ported
 

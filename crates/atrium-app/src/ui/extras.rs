@@ -25,7 +25,10 @@ pub struct ExtrasInputs {
     pub push_topic: Entity<TextInput>,
     pub schedule_name: Entity<TextInput>,
     pub schedule_time: Entity<TextInput>,
+    pub schedule_interval: Entity<TextInput>,
+    pub schedule_once: Entity<TextInput>,
     pub schedule_prompt: Entity<TextInput>,
+    pub schedule_kind: crate::schedule::Kind,
     pub schedule_days: crate::schedule::Days,
     pub device_name: Entity<TextInput>,
     pub device_alias: Entity<TextInput>,
@@ -52,6 +55,11 @@ impl ExtrasInputs {
                 TextInput::new(window, cx).placeholder(t("Name, such as Morning CI check"))
             }),
             schedule_time: cx.new(|cx| TextInput::new(window, cx).placeholder("09:00")),
+            schedule_interval: cx
+                .new(|cx| TextInput::new(window, cx).placeholder(t("Minutes, such as 15"))),
+            schedule_once: cx.new(|cx| {
+                TextInput::new(window, cx).placeholder(t("Time, such as 2026-11-01 09:00"))
+            }),
             device_name: cx.new(|cx| {
                 TextInput::new(window, cx).placeholder(t("Name, such as studio or laptop"))
             }),
@@ -69,6 +77,7 @@ impl ExtrasInputs {
                     "What to ask, such as: Check last night's CI runs and summarise the failures",
                 ))
             }),
+            schedule_kind: crate::schedule::Kind::Fixed,
             schedule_days: crate::schedule::Days::Weekdays,
             push_topic: cx.new(|cx| {
                 TextInput::new(window, cx)
@@ -130,7 +139,7 @@ impl RootView {
     /// Scheduled chats: the list, and a form for a new one in the current
     /// folder with the current agent.
     pub(super) fn schedules_section(&self, cx: &mut Context<Self>) -> AnyElement {
-        use crate::schedule::{Days, Schedule, parse_time};
+        use crate::schedule::{Days, Kind, Schedule, parse_once, parse_time};
         let ws = self.workspace.read(cx);
         let theme = cx.theme();
         let colors = theme.colors.clone();
@@ -147,6 +156,36 @@ impl RootView {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| s.folder.clone());
+            let when = match s.kind {
+                Kind::Fixed => format!("{} {}", t(s.days.label()), s.time),
+                Kind::Interval => tf("Every {minutes} min", &[("minutes", &s.interval_minutes())]),
+                Kind::Once => {
+                    let at = s
+                        .run_at
+                        .as_deref()
+                        .and_then(|at| at.parse::<jiff::Timestamp>().ok())
+                        .map(|at| {
+                            at.to_zoned(jiff::tz::TimeZone::system())
+                                .strftime("%Y-%m-%d %H:%M")
+                                .to_string()
+                        })
+                        .or_else(|| s.run_at.clone())
+                        .unwrap_or_default();
+                    tf("Once, {time}", &[("time", &at)])
+                }
+            };
+            let detail = crate::workspace::schedules::schedule_detail(s);
+            let summary = if detail.is_empty() {
+                format!(
+                    "{when} · {folder} · {}",
+                    self.workspace.read(cx).backend_label(&s.backend)
+                )
+            } else {
+                format!(
+                    "{when} · {folder} · {} · {detail}",
+                    self.workspace.read(cx).backend_label(&s.backend)
+                )
+            };
             list = list.child(
                 row_box(cx)
                     .when(s.off, |el| el.opacity(0.55))
@@ -168,13 +207,7 @@ impl RootView {
                             .truncate()
                             .text_size(theme.text_size(TextSize::Xs))
                             .text_color(colors.fg_subtle)
-                            .child(format!(
-                                "{} {} · {} · {}",
-                                t(s.days.label()),
-                                s.time,
-                                folder,
-                                self.workspace.read(cx).backend_label(&s.backend)
-                            )),
+                            .child(summary),
                     )
                     .child(
                         Button::new(
@@ -237,6 +270,53 @@ impl RootView {
                 }),
             );
         }
+        let mut kinds = div().flex().items_center().gap_1();
+        for (kind, label) in [
+            (Kind::Fixed, "At a time"),
+            (Kind::Interval, "Every"),
+            (Kind::Once, "Once"),
+        ] {
+            let on = self.extras.schedule_kind == kind;
+            let root = cx.entity();
+            kinds = kinds.child(
+                Button::new(
+                    SharedString::from(format!("schedule-kind-{kind:?}")),
+                    t(label),
+                )
+                .variant(if on {
+                    ButtonVariant::Primary
+                } else {
+                    ButtonVariant::Ghost
+                })
+                .size(ControlSize::Sm)
+                .on_click(move |_, _, cx| {
+                    root.update(cx, |r, cx| {
+                        r.extras.schedule_kind = kind;
+                        cx.notify();
+                    })
+                }),
+            );
+        }
+        let mut when = div().flex().items_center().gap_2();
+        when = match self.extras.schedule_kind {
+            Kind::Fixed => when
+                .child(
+                    div()
+                        .w(gpui::px(80.))
+                        .child(Input::new(&self.extras.schedule_time)),
+                )
+                .child(days),
+            Kind::Interval => when.child(
+                div()
+                    .w(gpui::px(110.))
+                    .child(Input::new(&self.extras.schedule_interval)),
+            ),
+            Kind::Once => when.child(
+                div()
+                    .w(gpui::px(190.))
+                    .child(Input::new(&self.extras.schedule_once)),
+            ),
+        };
         let add = (
             cx.entity(),
             self.workspace.clone(),
@@ -248,18 +328,14 @@ impl RootView {
                 .flex()
                 .flex_col()
                 .gap_2()
+                .child(kinds)
                 .child(
                     div()
                         .flex()
                         .items_center()
                         .gap_2()
                         .child(div().flex_1().child(Input::new(&self.extras.schedule_name)))
-                        .child(
-                            div()
-                                .w(gpui::px(80.))
-                                .child(Input::new(&self.extras.schedule_time)),
-                        )
-                        .child(days),
+                        .child(when),
                 )
                 .child(Input::new(&self.extras.schedule_prompt))
                 .child(
@@ -290,26 +366,77 @@ impl RootView {
                                     let read = |e: &Entity<TextInput>, cx: &gpui::App| {
                                         e.read(cx).text().trim().to_string()
                                     };
-                                    let (name, time, prompt, days) = {
+                                    let (name, prompt, kind, time, interval, once, days) = {
                                         let r = root.read(cx);
                                         (
                                             read(&r.extras.schedule_name, cx),
-                                            read(&r.extras.schedule_time, cx),
                                             read(&r.extras.schedule_prompt, cx),
+                                            r.extras.schedule_kind,
+                                            read(&r.extras.schedule_time, cx),
+                                            read(&r.extras.schedule_interval, cx),
+                                            read(&r.extras.schedule_once, cx),
                                             r.extras.schedule_days,
                                         )
                                     };
-                                    let Some(at) = parse_time(&time) else {
-                                        root.update(cx, |r, cx| {
-                                            r.toast(
-                                                &crate::workspace::Notice::Info(
-                                                    t("Write the time as HH:MM, such as 09:00.")
-                                                        .into(),
-                                                ),
-                                                cx,
-                                            )
-                                        });
-                                        return;
+                                    let (time, every_minutes, run_at) = match kind {
+                                        Kind::Fixed => {
+                                            let Some(at) = parse_time(&time) else {
+                                                root.update(cx, |r, cx| {
+                                                    r.toast(
+                                                        &crate::workspace::Notice::Info(
+                                                            t("Write the time as HH:MM, such as 09:00.")
+                                                                .into(),
+                                                        ),
+                                                        cx,
+                                                    )
+                                                });
+                                                return;
+                                            };
+                                            (at.strftime("%H:%M").to_string(), 0, None)
+                                        }
+                                        Kind::Interval => match interval.parse::<u32>() {
+                                            Ok(minutes) if minutes >= 1 => {
+                                                (String::new(), minutes, None)
+                                            }
+                                            _ => {
+                                                root.update(cx, |r, cx| {
+                                                    r.toast(
+                                                        &crate::workspace::Notice::Info(
+                                                            t("Write whole minutes, at least 1.")
+                                                                .into(),
+                                                        ),
+                                                        cx,
+                                                    )
+                                                });
+                                                return;
+                                            }
+                                        },
+                                        Kind::Once => {
+                                            let Some(at) = parse_once(&once) else {
+                                                root.update(cx, |r, cx| {
+                                                    r.toast(
+                                                        &crate::workspace::Notice::Info(
+                                                            t("Write the date and time as YYYY-MM-DD HH:MM.")
+                                                                .into(),
+                                                        ),
+                                                        cx,
+                                                    )
+                                                });
+                                                return;
+                                            };
+                                            if at <= jiff::Timestamp::now() {
+                                                root.update(cx, |r, cx| {
+                                                    r.toast(
+                                                        &crate::workspace::Notice::Info(
+                                                            t("Pick a time in the future.").into(),
+                                                        ),
+                                                        cx,
+                                                    )
+                                                });
+                                                return;
+                                            }
+                                            (String::new(), 0, Some(at.to_string()))
+                                        }
                                     };
                                     if prompt.is_empty() {
                                         root.update(cx, |r, cx| {
@@ -335,10 +462,12 @@ impl RootView {
                                                 prompt,
                                                 folder,
                                                 backend,
-                                                time: at.strftime("%H:%M").to_string(),
+                                                time,
                                                 days,
-                                                off: false,
-                                                last_run: None,
+                                                kind,
+                                                every_minutes,
+                                                run_at,
+                                                ..Schedule::default()
                                             },
                                             cx,
                                         )
@@ -347,6 +476,8 @@ impl RootView {
                                         for e in [
                                             &r.extras.schedule_name,
                                             &r.extras.schedule_time,
+                                            &r.extras.schedule_interval,
+                                            &r.extras.schedule_once,
                                             &r.extras.schedule_prompt,
                                         ] {
                                             e.update(cx, |i, cx| i.set_text("", cx));
