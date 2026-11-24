@@ -669,7 +669,12 @@ impl Workspace {
         let picked = choice.and_then(|id| {
             let run = load_run(dir)?;
             let file = run.options_file(step)?;
-            let text = std::fs::read_to_string(dir.join(file)).ok()?;
+            let text = atrium_workflow::files::read_text(
+                dir,
+                file,
+                atrium_workflow::files::DEFAULT_BYTE_CAP,
+            )
+            .ok()?;
             atrium_workflow::read_choices(&text)
                 .into_iter()
                 .find(|c| c.id == id)

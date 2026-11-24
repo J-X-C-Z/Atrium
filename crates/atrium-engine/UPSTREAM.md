@@ -22,6 +22,18 @@ bounded-snapshot helpers. The store-level snapshot and compaction cases are
 ported in `src/store/stream_tests.rs`; the WebSocket/HTTP framing is skipped
 with the transport.
 
+## Ported outside atrium-engine
+
+Item 31 compared T3's provider-native workflows with Atrium's own workflow
+runner (`crates/atrium-workflow`) and ported the parts Atrium lacked into
+that runner rather than adding a second engine. The same MIT notice covers
+these files.
+
+| Atrium module | T3 source | Item |
+| --- | --- | --- |
+| `crates/atrium-workflow/src/files.rs` | `apps/server/src/orchestration-v2/workflowFileRead.ts` | 31 |
+| `crates/atrium-workflow/src/answers.rs` | `apps/server/src/orchestration-v2/workflowAgentAnswers.ts`, `workflowAgentTranscript.ts` | 31 |
+
 ## What is not ported
 
 T3's web UI, Electron shell, mobile apps, relay, pairing and OAuth stay out;

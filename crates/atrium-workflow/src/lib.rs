@@ -23,9 +23,11 @@
 //! agents, waiting for their turns, running commands and asking a reviewer
 //! are the runner's (see `docs/workflow-implementation.md`).
 
+pub mod answers;
 pub mod author;
 pub mod builtin;
 pub mod check;
+pub mod files;
 pub mod render;
 pub mod run;
 pub mod runner;

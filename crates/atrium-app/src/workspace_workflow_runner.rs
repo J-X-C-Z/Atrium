@@ -292,9 +292,22 @@ impl Workspace {
                     EntryKind::Error(message) => Some(message.clone()),
                     _ => None,
                 });
+            // Every try is a new conversation, so keep what this one
+            // reported for the steps that follow.
+            let answer = transcript
+                .entries()
+                .iter()
+                .rev()
+                .find_map(|entry| match &entry.kind {
+                    EntryKind::Item(Item::Agent { text, .. }) => Some(text.clone()),
+                    _ => None,
+                });
             if let Err(error) = run.turn_finished(&step, super::workflows::now_ms()) {
                 log::warn!("workflow {} turn: {error}", dir.display());
                 continue;
+            }
+            if let Some(answer) = answer {
+                let _ = run.set_answer(&step, answer);
             }
             let _ = save_run(dir, run);
             append_log(
@@ -330,7 +343,12 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         for (id, from) in run.to_expand() {
-            let text = std::fs::read_to_string(dir.join(&from)).unwrap_or_default();
+            let text = atrium_workflow::files::read_text(
+                dir,
+                &from,
+                atrium_workflow::files::DEFAULT_BYTE_CAP,
+            )
+            .unwrap_or_default();
             let items = atrium_workflow::read_choices(&text);
             let count = items.len();
             let now = super::workflows::now_ms();

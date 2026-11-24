@@ -34,6 +34,17 @@ pub fn fill(text: &str, run: &Run) -> String {
     out
 }
 
+/// `text` cut to `max` characters, with an ellipsis when it was.
+fn shorten(text: &str, max: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= max {
+        return trimmed.to_string();
+    }
+    let mut cut: String = trimmed.chars().take(max).collect();
+    cut.push('…');
+    cut
+}
+
 /// The full prompt for step `id`'s next try. `skills` says whether the
 /// step's agent can use installed skills (Claude Code, `claude`, can).
 pub fn prompt(run: &Run, id: &str, skills: bool, lang: Lang) -> Option<String> {
@@ -97,6 +108,21 @@ pub fn prompt(run: &Run, id: &str, skills: bool, lang: Lang) -> Option<String> {
             format!("### 用户已经做出的决定（必须遵循；确实行不通时在报告里说明，不要擅自改变）\n{list}")
         } else {
             format!("### What the user decided (follow it; if it truly cannot work, say so in your report rather than change it)\n{list}")
+        });
+    }
+    // Every try is a new conversation, so later steps learn what earlier
+    // steps reported only from files and this section.
+    let reports = run.answers_before(id);
+    if !reports.is_empty() {
+        let list = reports
+            .iter()
+            .map(|(title, answer)| format!("- {title}: {}", shorten(answer, 600)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        parts.push(if zh {
+            format!("### 前面步骤的报告（供参考）\n{list}")
+        } else {
+            format!("### What earlier steps reported (for reference)\n{list}")
         });
     }
     if skills && let Some(skill) = &step.skill {
@@ -255,5 +281,39 @@ checks = [{ kind = "pdf_pages", path = "paper/main.pdf", max = 30 }]
         .unwrap();
         let again = prompt(&run, "write", true, Lang::Zh).unwrap();
         assert!(again.contains("别推倒重来）\n- paper/main.pdf 不超过 30 页: 有 33 页"));
+    }
+
+    #[test]
+    fn a_later_prompt_carries_what_earlier_steps_reported() {
+        let t = Template::parse(
+            r#"
+id = "t"
+name = "T"
+[[steps]]
+id = "plan"
+title = "Plan"
+prompt = "Plan."
+[[steps]]
+id = "write"
+title = "Write"
+prompt = "Write."
+"#,
+        )
+        .unwrap();
+        let mut run = Run::new(t, HashMap::new(), &[], 0).unwrap();
+        run.begin("plan", None, 1).unwrap();
+        run.turn_finished("plan", 2).unwrap();
+        run.checked("plan", vec![CheckResult::pass("ok")], 3)
+            .unwrap();
+        run.set_answer("plan", "Use a queueing model.").unwrap();
+        let p = prompt(&run, "write", false, Lang::En).unwrap();
+        assert!(p.contains("What earlier steps reported"));
+        assert!(p.contains("Plan: Use a queueing model."));
+
+        let long = "x".repeat(700);
+        run.set_answer("plan", long.clone()).unwrap();
+        let p = prompt(&run, "write", false, Lang::En).unwrap();
+        assert!(p.contains(&format!("Plan: {}…", "x".repeat(600))));
+        assert!(!p.contains(&long), "a long report is shortened");
     }
 }

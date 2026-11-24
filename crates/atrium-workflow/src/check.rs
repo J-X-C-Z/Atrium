@@ -11,14 +11,24 @@ use crate::{
     run::{CheckResult, Run},
 };
 
-/// Files under `dir` matching `pattern` (a path or a glob, relative).
+/// A verdict is small; reading more than this is a mistake, not a verdict.
+const VERDICT_BYTE_CAP: usize = 1024 * 1024;
+
+/// Files under `dir` matching `pattern` (a path or a glob, relative). A
+/// match that resolves outside the run folder, through `..` or a symlink,
+/// is left out.
 pub fn matches(dir: &Path, pattern: &str) -> Vec<PathBuf> {
     let full = dir.join(pattern);
     let Some(text) = full.to_str() else {
         return Vec::new();
     };
     glob::glob(text)
-        .map(|paths| paths.filter_map(Result::ok).collect())
+        .map(|paths| {
+            paths
+                .filter_map(Result::ok)
+                .filter(|path| crate::files::is_contained(dir, path))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -37,9 +47,17 @@ fn texts(dir: &Path, pattern: &str) -> Vec<(PathBuf, String)> {
     let mut out = Vec::new();
     let mut stack = matches(dir, pattern);
     while let Some(path) = stack.pop() {
+        if !crate::files::is_contained(dir, &path) {
+            continue;
+        }
         if path.is_dir() {
             if let Ok(entries) = std::fs::read_dir(&path) {
-                stack.extend(entries.filter_map(Result::ok).map(|e| e.path()));
+                stack.extend(
+                    entries
+                        .filter_map(Result::ok)
+                        .map(|e| e.path())
+                        .filter(|path| crate::files::is_contained(dir, path)),
+                );
             }
         } else if let Ok(bytes) = std::fs::read(&path)
             && bytes.len() <= 8 * 1024 * 1024
@@ -301,7 +319,7 @@ pub fn run_local(
             }
         }
         Check::Verdict { path } => {
-            let Ok(text) = std::fs::read_to_string(dir.join(path)) else {
+            let Ok(text) = crate::files::read_text(dir, path, VERDICT_BYTE_CAP) else {
                 return Some(result(
                     false,
                     if zh {
@@ -353,7 +371,7 @@ pub fn local_results(dir: &Path, run: &Run, id: &str, lang: Lang) -> Vec<CheckRe
     }
     for check in run.checks_of(id) {
         if let Check::Verdict { path } = &check
-            && let Ok(text) = std::fs::read_to_string(dir.join(path))
+            && let Ok(text) = crate::files::read_text(dir, path, VERDICT_BYTE_CAP)
         {
             out.extend(read_verdict(&text, lang));
             continue;
@@ -438,6 +456,57 @@ mod tests {
         assert!(!r[0].passed);
         assert!(read_verdict(r#"{"pass": true, "issues": []}"#, Lang::Zh)[0].passed);
         assert!(!read_verdict("not json", Lang::Zh)[0].passed);
+    }
+
+    #[test]
+    fn checks_never_read_outside_the_run_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let run = root.path().join("run");
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::write(root.path().join("outside.txt"), "secret").unwrap();
+        std::fs::write(root.path().join("verdict.json"), r#"{"pass": true}"#).unwrap();
+        let none = |_: &str| None;
+        let contains = Check::Contains {
+            path: "../outside.txt".into(),
+            pattern: "secret".into(),
+            message: None,
+        };
+        let result = run_local(&run, &contains, &none, Lang::En).unwrap();
+        assert!(!result.passed, "a parent path is not part of the run");
+        let verdict = Check::Verdict {
+            path: "../verdict.json".into(),
+        };
+        assert!(!run_local(&run, &verdict, &none, Lang::En).unwrap().passed);
+        assert!(matches(&run, "../outside.txt").is_empty());
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(root.path().join("outside.txt"), run.join("link.txt"))
+                .unwrap();
+            let exists = Check::Exists {
+                path: "link.txt".into(),
+                min: None,
+            };
+            assert!(
+                !run_local(&run, &exists, &none, Lang::En).unwrap().passed,
+                "a symlink out of the run folder is left out"
+            );
+            std::fs::create_dir_all(run.join("figures")).unwrap();
+            std::os::unix::fs::symlink(
+                root.path().join("outside.txt"),
+                run.join("figures/link.txt"),
+            )
+            .unwrap();
+            let nested = Check::Contains {
+                path: "figures".into(),
+                pattern: "secret".into(),
+                message: None,
+            };
+            assert!(
+                !run_local(&run, &nested, &none, Lang::En).unwrap().passed,
+                "a folder walk does not follow a symlink out"
+            );
+        }
     }
 
     #[test]
