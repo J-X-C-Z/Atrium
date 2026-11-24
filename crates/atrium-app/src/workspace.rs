@@ -4,7 +4,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -99,6 +99,27 @@ impl View {
 }
 
 const DRAFT: &str = "draft";
+
+/// A folder as one identity: symlinks resolved, so the same project opened
+/// as `/var/...` and `/private/var/...` on macOS is one project. A path that
+/// does not exist yet stays as it is.
+pub(super) fn canonical_path(path: &Path) -> PathBuf {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    #[cfg(windows)]
+    {
+        // `canonicalize` returns a `\\?\` path; the rest of the app builds
+        // ordinary paths, so keep that prefix off.
+        if let Some(text) = canonical.to_str() {
+            if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+                return PathBuf::from(format!(r"\\{rest}"));
+            }
+            if let Some(rest) = text.strip_prefix(r"\\?\") {
+                return PathBuf::from(rest);
+            }
+        }
+    }
+    canonical
+}
 
 /// What the composer hands over.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -2799,5 +2820,26 @@ mod next_step_tests {
             next_steps("The next step in the pipeline parses input.").is_empty(),
             "a sentence is not a heading"
         );
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::canonical_path;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_project_reached_through_a_symlink_has_one_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("project");
+        std::fs::create_dir_all(&real).unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+
+        assert_eq!(canonical_path(&alias), canonical_path(&real));
+        assert_eq!(canonical_path(&alias), real.canonicalize().unwrap());
+        // A path that does not exist yet keeps its spelling.
+        let missing = alias.join("not/created");
+        assert_eq!(canonical_path(&missing), missing);
     }
 }

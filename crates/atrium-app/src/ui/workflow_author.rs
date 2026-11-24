@@ -3,7 +3,11 @@
 //! of the draft so far — whether it reads, what will not work as meant,
 //! and the inputs and steps a run would have.
 
-use std::{cell::RefCell, path::PathBuf, time::SystemTime};
+use std::{
+    cell::RefCell,
+    path::{Path, PathBuf},
+    time::SystemTime,
+};
 
 use atrium_workflow::{InputKind, Template, author, author::Report};
 use ely_gpui_component::{
@@ -56,7 +60,7 @@ impl AuthorForm {
     }
 
     /// The draft's report, read again only when the file changed.
-    fn report(&self, dir: &PathBuf) -> Option<Report> {
+    fn report(&self, dir: &Path) -> Option<Report> {
         let file = dir.join(author::DRAFT_FILE);
         let mtime = std::fs::metadata(&file).and_then(|m| m.modified()).ok();
         let mut cache = self.cache.borrow_mut();
@@ -67,7 +71,7 @@ impl AuthorForm {
             return report.clone();
         }
         let report = draft_report(dir);
-        *cache = Some((dir.clone(), mtime, report.clone()));
+        *cache = Some((dir.to_path_buf(), mtime, report.clone()));
         report
     }
 
