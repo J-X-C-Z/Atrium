@@ -722,7 +722,7 @@ impl Workspace {
         let Some(event) = event else { return };
         let event = match event {
             AgentEvent::ThreadStarted(mut meta) => {
-                meta.backend = backend;
+                meta.backend = backend.clone();
                 AgentEvent::ThreadStarted(meta)
             }
             AgentEvent::RateLimitsUpdated(update) => {
@@ -732,6 +732,7 @@ impl Workspace {
             AgentEvent::AccountChanged | AgentEvent::LoginCompleted { .. } => return,
             event => event,
         };
+        self.runtime.observe(&backend, &event);
         self.apply(event, cx);
         cx.notify();
     }

@@ -1,0 +1,11 @@
+{
+  "name": "01-thread-lifecycle",
+  "project": "scratch",
+  "provider": "mockcodex",
+  "model": "mock-1",
+  "turns": [
+    {"text": "say hi"},
+    {"text": "now say bye"}
+  ],
+  "expect": {"final_status": "completed"}
+}

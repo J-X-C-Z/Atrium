@@ -1032,10 +1032,14 @@ pub struct Peer {
 /// The tailnet's other devices, or why they could not be listed.
 pub fn tailnet_peers() -> std::result::Result<Vec<Peer>, String> {
     let binary = tailscale_binary().ok_or("Tailscale is not installed here")?;
-    let output = std::process::Command::new(binary)
-        .args(["status", "--json"])
-        .output()
-        .map_err(|e| e.to_string())?;
+    let mut cmd = std::process::Command::new(binary);
+    cmd.args(["status", "--json"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let output = cmd.output().map_err(|e| e.to_string())?;
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }

@@ -129,6 +129,11 @@ pub fn show(title: &str, body: &str) {
         );
         let mut c = Command::new("powershell");
         c.args(["-NoProfile", "-Command", &script]);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            c.creation_flags(0x0800_0000);
+        }
         c
     } else {
         let mut c = Command::new("notify-send");

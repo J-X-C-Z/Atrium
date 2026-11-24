@@ -12,6 +12,11 @@ use std::{
 fn command(program: &str, dir: &Path) -> Command {
     let mut cmd = Command::new(program);
     cmd.current_dir(dir).stdin(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
     for key in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX"] {
         cmd.env_remove(key);
     }

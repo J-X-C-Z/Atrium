@@ -98,10 +98,15 @@ fn has_chinese_font() -> bool {
 #[cfg(not(target_os = "macos"))]
 fn has_chinese_font() -> bool {
     // `fc-list` succeeds with no output when nothing matches.
-    Command::new("fc-list")
-        .args([":lang=zh", "family"])
-        .stderr(std::process::Stdio::null())
-        .output()
+    let mut cmd = Command::new("fc-list");
+    cmd.args([":lang=zh", "family"])
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    cmd.output()
         .is_ok_and(|out| out.status.success() && !out.stdout.trim_ascii().is_empty())
 }
 
@@ -127,12 +132,16 @@ pub fn command(dir: &Path, run: &str, cwd: Option<&str>, timeout_min: u32) -> Ch
         Err(error) => return failed(what, error.to_string()),
     };
     #[cfg(windows)]
-    let mut child = Command::new("cmd")
-        .args(["/C", run])
-        .current_dir(&work)
-        .stdout(file)
-        .stderr(file_err)
-        .spawn();
+    let child = {
+        use std::os::windows::process::CommandExt;
+        Command::new("cmd")
+            .args(["/C", run])
+            .current_dir(&work)
+            .stdout(file)
+            .stderr(file_err)
+            .creation_flags(0x0800_0000)
+            .spawn()
+    };
     #[cfg(not(windows))]
     let child = Command::new("sh")
         .args(["-c", run])

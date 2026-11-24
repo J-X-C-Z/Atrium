@@ -8,6 +8,7 @@ use std::{
 };
 
 use atrium_core::{EntryKind, Item, Transcript, TurnStatus};
+use atrium_runtime::{Delivery, SessionSpec, TurnInput};
 use atrium_workflow::{
     Check,
     check::{self, describe},
@@ -15,7 +16,7 @@ use atrium_workflow::{
     run::{CheckResult, Outcome, RunState, StepStatus},
     runner,
 };
-use codex_client::{AccessMode, StartThread, TurnRequest};
+use codex_client::AccessMode;
 use gpui::Context;
 
 use super::{
@@ -26,6 +27,8 @@ use crate::agents;
 
 impl Workspace {
     pub(super) fn init_workflow_runner(&mut self, cx: &mut Context<Self>) {
+        self.ensure_runtime_clients();
+        self.ensure_runtime_events(cx);
         self.refresh_workflows();
         self._workflow_ticker = Some(cx.spawn(async move |this, cx| {
             loop {
@@ -430,23 +433,37 @@ impl Workspace {
             self.start_chat_in(text, backend, cwd, false, cx);
             return;
         }
-        let Some(client) = self.codex_for(&backend) else {
+        if self.codex_for(&backend).is_none() {
             return;
-        };
+        }
+        self.ensure_runtime_clients();
         let title: String = text.chars().take(60).collect();
-        let options = StartThread {
-            cwd: Some(cwd.display().to_string()),
-            model: self.settings.model.clone(),
-            approval_policy: Some(AccessMode::Auto.approval_policy().into()),
-            sandbox: Some(AccessMode::Auto.sandbox_mode().into()),
-            mcp_servers: self.user_mcp(&backend),
-            env: self.session_env(),
-            developer_instructions: None,
-        };
+        let runtime = self.runtime.clone();
+        let send_runtime = runtime.clone();
+        let sink = self.runtime_sink(&backend);
         let dir = cwd.clone();
+        let spec = SessionSpec {
+            agent: backend.clone(),
+            model: self.settings.model.clone(),
+            effort,
+            service_tier: None,
+            folder: cwd,
+            worktree: None,
+            device: agents::split_backend(&backend).1.map(str::to_owned),
+            mcp_servers: self.user_mcp(&backend),
+            first_message: None,
+            access_mode: Some(
+                crate::runtime_adapters::access_mode_name(AccessMode::Auto).to_string(),
+            ),
+        };
+        let named = self.codex_for(&backend);
         cx.spawn(async move |this, cx| {
-            let meta = match client.thread_start(options).await {
-                Ok(meta) => meta,
+            let started = cx
+                .background_executor()
+                .spawn(async move { crate::runtime_adapters::start_session(&*runtime, spec, sink) })
+                .await;
+            let thread = match started {
+                Ok(thread) => thread,
                 Err(error) => {
                     let _ = this.update(cx, |ws, cx| {
                         let step = ws
@@ -460,18 +477,26 @@ impl Workspace {
                             })
                             .map(|step| step.id.clone());
                         if let Some(step) = step {
-                            ws.workflow_fail_start(&dir, &step, format!("{error:#}"), cx);
+                            ws.workflow_fail_start(&dir, &step, format!("{error}"), cx);
                         }
                     });
                     return;
                 }
             };
-            let thread = meta.id.clone();
-            let _ = client.thread_set_name(&thread, &title).await;
+            if let Some(client) = &named {
+                let _ = client.thread_set_name(&thread, &title).await;
+            }
             let prepared = this.update(cx, |ws, _| {
+                let now = jiff::Timestamp::now().as_second();
                 ws.upsert_thread(atrium_core::ThreadMeta {
+                    id: thread.clone(),
+                    backend: backend.clone(),
                     name: Some(title.clone()),
-                    ..meta
+                    preview: title.clone(),
+                    cwd: dir.display().to_string(),
+                    model: None,
+                    created_at: now,
+                    updated_at: now,
                 });
                 let mut transcript = Transcript::new();
                 transcript.push_local_user(text.clone(), Vec::new());
@@ -491,17 +516,17 @@ impl Workspace {
                     let _ = save_run(&dir, &run);
                 }
             });
-            let sent = client
-                .turn_start(
-                    &thread,
-                    TurnRequest {
-                        text,
-                        model: None,
-                        effort,
-                        mode: Some(AccessMode::Auto),
-                        ..Default::default()
-                    },
-                )
+            let call_thread = thread.clone();
+            let sent = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::runtime_adapters::send_turn(
+                        &*send_runtime,
+                        &call_thread,
+                        TurnInput::text(text),
+                        Delivery::Start,
+                    )
+                })
                 .await;
             match sent {
                 Ok(turn) => {
@@ -516,7 +541,7 @@ impl Workspace {
                 Err(error) => {
                     let _ = this.update(cx, |ws, cx| {
                         if let Some(transcript) = ws.transcripts.get_mut(&thread) {
-                            transcript.fail_pending_turn(format!("Could not send: {error:#}"));
+                            transcript.fail_pending_turn(format!("Could not send: {error}"));
                         }
                         ws.turn_started.remove(&thread);
                         let step = ws
@@ -532,7 +557,7 @@ impl Workspace {
                             })
                             .map(|step| step.id.clone());
                         if let Some(step) = step {
-                            ws.workflow_fail_start(&dir, &step, format!("{error:#}"), cx);
+                            ws.workflow_fail_start(&dir, &step, format!("{error}"), cx);
                         }
                     });
                 }
@@ -855,6 +880,17 @@ impl Workspace {
     pub(super) fn workflow_interrupt_thread(&mut self, thread: &str, cx: &mut Context<Self>) {
         if self.sync_is_remote(thread) {
             self.sync_remote_interrupt(thread, cx);
+            return;
+        }
+        self.ensure_runtime_clients();
+        if self.runtime.has_session(thread) {
+            let runtime = self.runtime.clone();
+            let id = thread.to_string();
+            cx.background_executor()
+                .spawn(async move {
+                    let _ = crate::runtime_adapters::interrupt_turn(&*runtime, &id);
+                })
+                .detach();
             return;
         }
         if !crate::agents::is_codex(self.backend_of(thread)) {

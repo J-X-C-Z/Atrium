@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Atrium
+Comment=Run Codex and ACP agents as chats or as projects
+Exec=atrium %U
+Icon=atrium
+Terminal=false
+Categories=Development;Utility;
+StartupNotify=true
+StartupWMClass=Atrium

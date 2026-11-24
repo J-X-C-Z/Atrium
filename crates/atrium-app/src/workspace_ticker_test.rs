@@ -9,7 +9,7 @@ use std::{
     fs,
     io::{BufRead, BufReader, ErrorKind, Write},
     os::unix::net::UnixStream,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -40,10 +40,11 @@ fn unattended_notice_wake_uses_scoped_turn_and_durable_budget(cx: &mut TestAppCo
 fn exercise_notice_delivery(cx: &mut TestAppContext, rpc_error: bool, unattended: bool) {
     // Real socket I/O wakes the GPUI foreground task externally.
     cx.executor().allow_parking();
-    let fixture = Fixture(
-        std::env::temp_dir().join(format!("atrium-workspace-ticker-{}", uuid::Uuid::new_v4())),
-    );
-    fs::create_dir(&fixture.0).unwrap();
+    let dir =
+        std::env::temp_dir().join(format!("atrium-workspace-ticker-{}", uuid::Uuid::new_v4()));
+    fs::create_dir(&dir).unwrap();
+    // Projects are keyed by their real path (on macOS /var is /private/var).
+    let fixture = Fixture(dir.canonicalize().unwrap());
     let mut project = Project::open(&fixture.0).unwrap();
     project.file.streams.push(Workstream {
         id: "controller".into(),
@@ -220,7 +221,7 @@ fn exercise_notice_delivery(cx: &mut TestAppContext, rpc_error: bool, unattended
     }
 }
 
-fn assert_reopened_workspace_holds_notice(cx: &mut TestAppContext, root: &PathBuf) {
+fn assert_reopened_workspace_holds_notice(cx: &mut TestAppContext, root: &Path) {
     // A new entity and transport read the same temporary disk state via real
     // startup initialization. This is not a process crash or remote replay.
     let (client, mock) = UnixStream::pair().unwrap();
@@ -230,7 +231,7 @@ fn assert_reopened_workspace_holds_notice(cx: &mut TestAppContext, root: &PathBu
         .unwrap();
     let reopened = cx.new(|cx| {
         let mut ws = Workspace::with_settings(Settings {
-            projects: vec![root.clone()],
+            projects: vec![root.to_path_buf()],
             ..Default::default()
         });
         ws.client = Some(CodexClient::over(connection));
@@ -239,7 +240,7 @@ fn assert_reopened_workspace_holds_notice(cx: &mut TestAppContext, root: &PathBu
         ws.init_projects(cx);
         // Simulate a later wake trigger; a new scheduler has no old cooldown.
         ws.project_schedule
-            .test_queue_first_wake(root.clone(), "controller".into());
+            .test_queue_first_wake(root.to_path_buf(), "controller".into());
         ws
     });
     cx.run_until_parked();
@@ -247,7 +248,7 @@ fn assert_reopened_workspace_holds_notice(cx: &mut TestAppContext, root: &PathBu
     cx.run_until_parked();
     reopened.update(cx, |ws, _| {
         ws.project_schedule
-            .assert_test_wake_attempt_still_pending(root.clone(), "controller".into());
+            .assert_test_wake_attempt_still_pending(root.to_path_buf(), "controller".into());
     });
     let mut unexpected = String::new();
     match BufReader::new(mock).read_line(&mut unexpected) {
@@ -298,7 +299,8 @@ fn restart_resumes_with_project_mcp_and_reactivates_goal_before_wake(cx: &mut Te
     let (client, mut socket) = UnixStream::pair().unwrap();
     let (connection, _events) =
         Connection::new(BufReader::new(client.try_clone().unwrap()), client);
-    let root = dir.0.clone();
+    // Projects are keyed by their real path (on macOS /var is /private/var).
+    let root = dir.0.canonicalize().unwrap();
     let (sent, received) = mpsc::channel();
     let mock = thread::spawn(move || {
         socket

@@ -7,6 +7,8 @@ members = [
     "crates/atrium-phone",
     "crates/atrium-sync",
     "crates/atrium-core",
+    "crates/atrium-runtime",
+    "crates/atrium-engine",
     "crates/agent-rpc",
     "crates/codex-client",
     "crates/acp-client",
@@ -41,10 +43,13 @@ jiff = "0.2"
 dirs = "6"
 base64 = "0.22"
 ureq = { version = "2", default-features = false, features = ["json"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
 
 atrium-process = { path = "crates/atrium-process" }
 atrium-core = { path = "crates/atrium-core" }
+atrium-runtime = { path = "crates/atrium-runtime" }
+atrium-engine = { path = "crates/atrium-engine" }
 atrium-node = { path = "crates/atrium-node" }
 atrium-sync = { path = "crates/atrium-sync" }
 codex-client = { path = "crates/codex-client" }

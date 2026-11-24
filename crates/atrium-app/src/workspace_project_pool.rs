@@ -2,7 +2,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -12,7 +12,7 @@ use gpui::Context;
 use super::{Composed, Workspace, waiting_on_user};
 use crate::{
     agents,
-    project::{Project, Role, TaskStatus, Workstream, autopilot::Wake, wake_allowed},
+    project::{ATRIUM, Project, Role, TaskStatus, Workstream, autopilot::Wake, wake_allowed},
 };
 
 const IDLE_RETIRE: Duration = Duration::from_secs(10 * 60);
@@ -113,8 +113,12 @@ fn worker_backend<'a>(project: &'a Project, lead: &'a Workstream) -> &'a str {
 }
 
 impl Workspace {
-    pub(super) fn tick_task_pools(&mut self, root: &PathBuf, cx: &mut Context<Self>) {
-        let Some(project) = self.projects.iter().find(|project| project.root == *root) else {
+    pub(super) fn tick_task_pools(&mut self, root: &Path, cx: &mut Context<Self>) {
+        let Some(project) = self
+            .projects
+            .iter()
+            .find(|project| project.root.as_path() == root)
+        else {
             return;
         };
         let now = Instant::now();
@@ -160,7 +164,11 @@ impl Workspace {
                 continue;
             }
             let lead = worker.parent.as_deref().expect("pool worker has a lead");
-            let Some(project) = self.projects.iter().find(|project| project.root == *root) else {
+            let Some(project) = self
+                .projects
+                .iter()
+                .find(|project| project.root.as_path() == root)
+            else {
                 return;
             };
             let held = project.task_of(&worker).map(|task| task.key());
@@ -178,7 +186,7 @@ impl Workspace {
                             !transcript.is_running() && waiting_on_user(transcript) == 0
                         })
             });
-            let key = (root.clone(), worker.id.clone());
+            let key = (root.to_path_buf(), worker.id.clone());
             if self.project_schedule.task_pool.starting.contains(&key) {
                 continue;
             }
@@ -271,7 +279,7 @@ impl Workspace {
                     Ok(true) => {
                         self.project_schedule
                             .pending
-                            .insert((root.clone(), lead.id));
+                            .insert((root.to_path_buf(), lead.id));
                     }
                     Ok(false) => {}
                     Err(error) => {
@@ -284,18 +292,18 @@ impl Workspace {
 
     pub(super) fn send_stream_kickoff(
         &mut self,
-        root: &PathBuf,
+        root: &Path,
         id: &str,
         thread: String,
         kickoff: String,
         cx: &mut Context<Self>,
     ) {
-        let project = self.projects.iter().find(|p| p.root == *root);
+        let project = self.projects.iter().find(|p| p.root.as_path() == root);
         if let Some((project, worker)) = project.and_then(|p| Some((p, p.stream(id)?)))
             && is_pool_worker(worker)
         {
             let now = Instant::now();
-            let key = (root.clone(), id.to_owned());
+            let key = (root.to_path_buf(), id.to_owned());
             let mut activity = WorkerActivity::new(now);
             activity.observe(now, true, project.task_of(worker).map(|t| t.key()), None);
             self.project_schedule
@@ -307,10 +315,10 @@ impl Workspace {
         self.send_to_thread(thread, Composed::text(kickoff), cx);
     }
 
-    pub(super) fn running_project_streams(&self, root: &PathBuf) -> usize {
+    pub(super) fn running_project_streams(&self, root: &Path) -> usize {
         self.projects
             .iter()
-            .find(|p| p.root == *root)
+            .find(|p| p.root.as_path() == root)
             .map_or(0, |p| {
                 p.file
                     .streams
@@ -320,7 +328,7 @@ impl Workspace {
                             .project_schedule
                             .task_pool
                             .starting
-                            .contains(&(root.clone(), s.id.clone()))
+                            .contains(&(root.to_path_buf(), s.id.clone()))
                         {
                             return true;
                         }
@@ -338,12 +346,12 @@ impl Workspace {
 
     fn start_pool_workers(
         &mut self,
-        root: &PathBuf,
+        root: &Path,
         lead: &Workstream,
         now: Instant,
         cx: &mut Context<Self>,
     ) {
-        let key = (root.clone(), lead.id.clone());
+        let key = (root.to_path_buf(), lead.id.clone());
         if self
             .project_schedule
             .task_pool
@@ -353,19 +361,25 @@ impl Workspace {
         {
             return;
         }
-        let Some(project) = self.projects.iter().find(|p| p.root == *root) else {
+        let Some(project) = self.projects.iter().find(|p| p.root.as_path() == root) else {
             return;
         };
-        let backend = worker_backend(project, lead).to_owned();
+        let wanted = worker_backend(project, lead).to_owned();
         let needed = project.workers_needed(&lead.id);
-        if !self.backend_ready(&backend) {
-            return;
-        }
         for _ in 0..needed {
             if self.running_project_streams(root) >= 12 {
                 break;
             }
-            let Some(project) = self.projects.iter().find(|p| p.root == *root) else {
+            // Pool workers are placed like leads: a spent member's pool
+            // starts its stand-in instead, and with nobody free it waits.
+            let Ok(placed) = self.place_task(root, &wanted) else {
+                break;
+            };
+            let backend = placed.agent.clone();
+            if !self.backend_ready(&backend) {
+                break;
+            }
+            let Some(project) = self.projects.iter().find(|p| p.root.as_path() == root) else {
                 return;
             };
             if project.workers_needed(&lead.id) == 0 {
@@ -378,15 +392,33 @@ impl Workspace {
                 .project_schedule
                 .task_pool
                 .starting
-                .contains(&(root.clone(), worker.id.clone()))
+                .contains(&(root.to_path_buf(), worker.id.clone()))
             {
                 break;
             }
-            let worker_key = (root.clone(), worker.id.clone());
+            let worker_key = (root.to_path_buf(), worker.id.clone());
             if !self.scheduler_turn_slot(root) {
                 break;
             }
-            self.start_stream(root, worker, cx);
+            let worker_id = worker.id.clone();
+            let choice = crate::workspace::team::start_choice(&placed);
+            self.start_stream(root, worker, choice, cx);
+            // The badge lives in app state so it survives a restart.
+            let previous = self.settings.stand_in(root, &worker_id).map(str::to_owned);
+            let current = placed.instead_of.as_ref().map(|_| placed.member.clone());
+            if previous != current {
+                self.settings
+                    .set_stand_in(root, &worker_id, current.as_deref());
+                self.settings.save();
+            }
+            if let Some(text) = Self::stand_in_notice(&worker_id, &placed) {
+                if let Some(project) = self.project_mut(root)
+                    && let Err(error) = project.post(ATRIUM, vec![lead.id.clone()], &text)
+                {
+                    log::warn!("could not post a pool stand-in notice: {error:#}");
+                }
+                self.queue_wake(root, lead.id.clone());
+            }
             if !self
                 .project_schedule
                 .task_pool
@@ -404,7 +436,7 @@ impl Workspace {
 
     fn retire_pool_worker(
         &mut self,
-        root: &PathBuf,
+        root: &Path,
         worker: &Workstream,
         held: Option<&str>,
         now: Instant,
@@ -424,14 +456,14 @@ impl Workspace {
         self.project_schedule
             .task_pool
             .workers
-            .remove(&(root.clone(), worker.id.clone()));
+            .remove(&(root.to_path_buf(), worker.id.clone()));
         self.complete_retired_pool_goal(root, worker, now, cx);
         cx.notify();
     }
 
     fn complete_retired_pool_goal(
         &mut self,
-        root: &PathBuf,
+        root: &Path,
         worker: &Workstream,
         now: Instant,
         cx: &mut Context<Self>,
@@ -451,7 +483,7 @@ impl Workspace {
         let Some(client) = self.codex_for(&worker.backend) else {
             return;
         };
-        let key = (root.clone(), worker.id.clone());
+        let key = (root.to_path_buf(), worker.id.clone());
         let schedule = &mut self.project_schedule.task_pool;
         if schedule.goal_cleaned.contains(&key)
             || schedule

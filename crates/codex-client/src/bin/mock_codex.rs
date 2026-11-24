@@ -28,6 +28,13 @@ use serde_json::{Value, json};
 
 type Out = Arc<Mutex<io::Stdout>>;
 
+/// The Codex release this mock speaks as. T3 Code 0.1.11 refuses app-servers
+/// older than 0.159.0 and reads the version after the slash in `userAgent`.
+const CODEX_VERSION: &str = "0.160.0";
+const CODEX_USER_AGENT: &str = "mock-codex/0.160.0";
+/// What `<bin> --version` prints, in the form T3's version probe parses.
+const CODEX_CLI_VERSION: &str = "codex-cli 0.160.0";
+
 fn send(out: &Out, message: Value) {
     let mut out = out.lock().unwrap();
     let _ = writeln!(out, "{message}");
@@ -74,7 +81,47 @@ fn thread_json(t: &Thread, with_turns: bool) -> Value {
         "model": "mock-1", "modelProvider": "mock", "createdAt": t.created, "updatedAt": t.updated,
         "recencyAt": t.updated, "status": {"type": "idle"}, "ephemeral": t.ephemeral,
         "turns": if with_turns { Value::Array(t.turns.clone()) } else { json!([]) },
+        // T3 Code decodes these on every thread it receives.
+        "cliVersion": CODEX_VERSION, "projectId": null, "source": "appServer",
     })
+}
+
+/// The result of `thread/start`, `thread/resume` and `thread/fork`, with the
+/// fields T3 Code's decoder requires on the response itself.
+fn thread_response(t: &Thread, with_turns: bool) -> Value {
+    let body = thread_json(t, with_turns);
+    json!({
+        "thread": body.clone(),
+        "model": "mock-1", "modelProvider": "mock", "cwd": body["cwd"],
+        "approvalPolicy": "never", "approvalsReviewer": "user",
+        "sandbox": {"type": "dangerFullAccess"},
+    })
+}
+
+fn initialize_result() -> Value {
+    json!({
+        "userAgent": CODEX_USER_AGENT,
+        "codexHome": codex_home().display().to_string(),
+        "platformFamily": "unix",
+        "platformOs": std::env::consts::OS,
+    })
+}
+
+/// `skills/list` as T3 Code decodes it: one entry per requested folder.
+fn skills_list_result(params: &Value) -> Value {
+    let cwd = params["cwds"]
+        .as_array()
+        .and_then(|cwds| cwds.first())
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| std::env::current_dir().unwrap().display().to_string());
+    json!({"data": [{"cwd": cwd, "skills": [], "errors": []}]})
+}
+
+/// `config/read` as T3 Code decodes it. `origins` is required even when the
+/// mock ships no config layers.
+fn config_read_result() -> Value {
+    json!({"config": {}, "origins": {}})
 }
 
 fn codex_home() -> PathBuf {
@@ -181,6 +228,12 @@ struct State {
 }
 
 fn main() {
+    // T3 Code probes `<bin> --version` before launching `app-server`; answer
+    // like Codex instead of waiting for JSON-RPC on stdin.
+    if std::env::args().skip(1).any(|arg| arg == "--version") {
+        println!("{CODEX_CLI_VERSION}");
+        return;
+    }
     let out: Out = Arc::new(Mutex::new(io::stdout()));
     let state = Arc::new(State {
         threads: Mutex::new(Vec::new()),
@@ -260,11 +313,9 @@ fn reply(out: &Out, id: Value, result: Value) {
 
 fn handle(method: &str, id: Value, params: Value, out: &Out, state: &Arc<State>) {
     match method {
-        "initialize" => reply(
-            out,
-            id,
-            json!({"userAgent": "mock-codex/0.0.0", "codexHome": codex_home().display().to_string(), "platformFamily": "unix", "platformOs": std::env::consts::OS}),
-        ),
+        "initialize" => reply(out, id, initialize_result()),
+        "skills/list" => reply(out, id, skills_list_result(&params)),
+        "config/read" => reply(out, id, config_read_result()),
         "account/read" => {
             let account = if state.signed_in.load(Ordering::Relaxed) {
                 json!({"type": "chatgpt", "email": "you@example.com", "planType": "pro", "workspaceName": null})
@@ -384,12 +435,9 @@ fn handle(method: &str, id: Value, params: Value, out: &Out, state: &Arc<State>)
                 persist_thread(&fork);
             }
             state.resumed.lock().unwrap().insert(fork.id.clone());
+            let response = thread_response(&fork, false);
             state.threads.lock().unwrap().push(fork);
-            reply(
-                out,
-                id,
-                json!({"thread": body.clone(), "model": "mock-1", "modelProvider": "mock", "cwd": body["cwd"]}),
-            );
+            reply(out, id, response);
             notify(out, "thread/started", json!({"thread": body}));
         }
         "thread/revert" => {
@@ -574,12 +622,9 @@ fn handle(method: &str, id: Value, params: Value, out: &Out, state: &Arc<State>)
             let body = thread_json(&thread, false);
             persist_thread(&thread);
             state.resumed.lock().unwrap().insert(thread.id.clone());
+            let response = thread_response(&thread, false);
             state.threads.lock().unwrap().push(thread);
-            reply(
-                out,
-                id,
-                json!({"thread": body.clone(), "model": "mock-1", "modelProvider": "mock", "cwd": body["cwd"]}),
-            );
+            reply(out, id, response);
             notify(out, "thread/started", json!({"thread": body}));
         }
         "thread/resume" | "thread/read" => {
@@ -603,11 +648,7 @@ fn handle(method: &str, id: Value, params: Value, out: &Out, state: &Arc<State>)
                         persist_thread(&thread);
                         state.resumed.lock().unwrap().insert(thread.id.clone());
                     }
-                    reply(
-                        out,
-                        id,
-                        json!({"thread": thread_json(&thread, true), "model": "mock-1"}),
-                    )
+                    reply(out, id, thread_response(&thread, true))
                 }
                 None => send(
                     out,
@@ -893,10 +934,13 @@ fn run_turn(
         "**Reading the request** The user wrote {} characters and attached {attached} file(s). I'll answer plainly and show what I did.",
         text.chars().count()
     );
+    // T3 Code's decoder requires `summaryIndex` on summary deltas.
+    let mut reasoning_ids = ids.clone();
+    reasoning_ids["summaryIndex"] = json!(0);
     let mut interrupted = !stream(
         out,
         "item/reasoning/summaryTextDelta",
-        &ids,
+        &reasoning_ids,
         &reasoning_id,
         &thought,
         stop,
@@ -1371,4 +1415,80 @@ fn write_png(path: &std::path::Path, width: u32, height: u32) {
     chunk(&mut png, b"IDAT", &zlib);
     chunk(&mut png, b"IEND", &[]);
     let _ = std::fs::write(path, png);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_thread() -> Thread {
+        Thread {
+            id: "thread-1".into(),
+            preview: "hi".into(),
+            cwd: "/tmp/work".into(),
+            created: 1,
+            updated: 2,
+            turns: Vec::new(),
+            ephemeral: false,
+        }
+    }
+
+    #[test]
+    fn initialize_reports_a_codex_version_t3_accepts() {
+        let result = initialize_result();
+        let user_agent = result["userAgent"].as_str().unwrap();
+        // T3 Code parses what follows the first slash in `userAgent`.
+        let version = user_agent
+            .split_once('/')
+            .map(|(_, version)| version.split_whitespace().next().unwrap())
+            .unwrap();
+        assert_eq!(version, CODEX_VERSION);
+        let parts: Vec<u64> = version.split('.').map(|p| p.parse().unwrap()).collect();
+        assert!(
+            parts.as_slice() >= [0, 159, 0].as_slice(),
+            "T3 Code refuses Codex below 0.159.0: {user_agent}"
+        );
+        assert_eq!(result["platformFamily"], "unix");
+        assert!(result["codexHome"].as_str().is_some());
+    }
+
+    #[test]
+    fn thread_bodies_carry_the_fields_t3_decodes() {
+        let thread = sample_thread();
+        let body = thread_json(&thread, false);
+        assert_eq!(body["cliVersion"], CODEX_VERSION);
+        assert!(body["projectId"].is_null());
+        assert_eq!(body["source"], "appServer");
+
+        let response = thread_response(&thread, true);
+        assert_eq!(response["approvalPolicy"], "never");
+        assert_eq!(response["approvalsReviewer"], "user");
+        assert_eq!(response["sandbox"], json!({"type": "dangerFullAccess"}));
+        assert_eq!(response["model"], "mock-1");
+        assert_eq!(response["modelProvider"], "mock");
+        assert_eq!(response["cwd"], "/tmp/work");
+        assert_eq!(response["thread"], thread_json(&thread, true));
+    }
+
+    #[test]
+    fn skills_and_config_have_the_shapes_t3_decodes() {
+        let skills = skills_list_result(&json!({"cwds": ["/tmp/work", "/other"]}));
+        assert_eq!(
+            skills,
+            json!({"data": [{"cwd": "/tmp/work", "skills": [], "errors": []}]})
+        );
+        // A call without `cwds` still answers with a usable folder.
+        let fallback = skills_list_result(&json!({}));
+        assert!(fallback["data"][0]["cwd"].as_str().is_some());
+
+        let config = config_read_result();
+        assert_eq!(config["config"], json!({}));
+        assert_eq!(config["origins"], json!({}));
+    }
+
+    #[test]
+    fn the_version_flag_prints_a_parseable_codex_version() {
+        // T3's probe matches a bare `0.160.0` in the output.
+        assert_eq!(CODEX_CLI_VERSION, "codex-cli 0.160.0");
+    }
 }

@@ -1,13 +1,19 @@
 //! The client against `mock-codex`: a whole turn with an approval, end to end
 //! through a real child process and the real translation layer.
 
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    io::{BufRead, BufReader, Lines, Write},
+    path::PathBuf,
+    process::{ChildStdin, ChildStdout, Command, Stdio},
+};
 
 use atrium_core::{AgentEvent, ApprovalDecision, EntryKind, Item, ItemStatus, Transcript};
 use codex_client::{
     AccessMode, CodexClient, CodexConfig, Incoming, StartThread, TurnRequest, translate,
 };
 use futures::{StreamExt, executor::block_on};
+use serde_json::{Value, json};
 
 #[test]
 fn a_turn_with_an_approved_command_runs_to_completion() {
@@ -328,4 +334,108 @@ fn rename_compact_review_and_search() {
             "{found:?}"
         );
     });
+}
+
+/// Sends one JSON-RPC request and returns its result, skipping notifications.
+fn request(
+    stdin: &mut ChildStdin,
+    lines: &mut Lines<BufReader<ChildStdout>>,
+    id: i64,
+    method: &str,
+    params: Value,
+) -> Value {
+    writeln!(
+        stdin,
+        "{}",
+        json!({"id": id, "method": method, "params": params})
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    loop {
+        let line = lines.next().expect("mock stays open").unwrap();
+        let value: Value = serde_json::from_str(&line).unwrap();
+        if value.get("id").and_then(Value::as_i64) == Some(id) {
+            return value.get("result").cloned().unwrap_or(Value::Null);
+        }
+    }
+}
+
+/// The handshake T3 Code 0.1.11 performs against an unmodified mock binary:
+/// `--version`, `initialize`, `skills/list`, `config/read`, `thread/start`
+/// and `thread/resume`, checked against T3's decoder expectations.
+#[test]
+fn the_protocol_shapes_t3_code_decodes() {
+    let bin = env!("CARGO_BIN_EXE_mock-codex");
+    let version = Command::new(bin).arg("--version").output().unwrap();
+    assert!(version.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&version.stdout).trim(),
+        "codex-cli 0.160.0"
+    );
+
+    let mut child = Command::new(bin)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+
+    let initialize = request(&mut stdin, &mut lines, 1, "initialize", json!({}));
+    let user_agent = initialize["userAgent"].as_str().unwrap();
+    // T3 parses the version after the first slash and refuses < 0.159.0.
+    assert_eq!(user_agent.split_once('/').unwrap().1, "0.160.0");
+
+    let skills = request(
+        &mut stdin,
+        &mut lines,
+        2,
+        "skills/list",
+        json!({"cwds": ["/tmp/atrium-t3"]}),
+    );
+    assert_eq!(skills["data"][0]["cwd"], "/tmp/atrium-t3");
+    assert!(skills["data"][0]["skills"].as_array().unwrap().is_empty());
+    assert!(skills["data"][0]["errors"].as_array().unwrap().is_empty());
+
+    let config = request(
+        &mut stdin,
+        &mut lines,
+        3,
+        "config/read",
+        json!({"includeLayers": false}),
+    );
+    assert!(config["config"].is_object());
+    assert!(config["origins"].is_object());
+
+    let started = request(
+        &mut stdin,
+        &mut lines,
+        4,
+        "thread/start",
+        json!({"cwd": "/tmp/atrium-t3"}),
+    );
+    assert_eq!(started["approvalPolicy"], "never");
+    assert_eq!(started["approvalsReviewer"], "user");
+    assert_eq!(started["sandbox"], json!({"type": "dangerFullAccess"}));
+    assert_eq!(started["thread"]["cliVersion"], "0.160.0");
+    assert!(started["thread"]["projectId"].is_null());
+    assert_eq!(started["thread"]["source"], "appServer");
+    let thread_id = started["thread"]["id"].as_str().unwrap().to_string();
+
+    let resumed = request(
+        &mut stdin,
+        &mut lines,
+        5,
+        "thread/resume",
+        json!({"threadId": thread_id}),
+    );
+    assert_eq!(resumed["approvalPolicy"], "never");
+    assert_eq!(resumed["approvalsReviewer"], "user");
+    assert_eq!(resumed["sandbox"], json!({"type": "dangerFullAccess"}));
+    assert_eq!(resumed["thread"]["cliVersion"], "0.160.0");
+    assert_eq!(resumed["thread"]["source"], "appServer");
+
+    drop(stdin);
+    let _ = child.wait();
 }

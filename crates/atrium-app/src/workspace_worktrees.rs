@@ -24,6 +24,7 @@ impl Workspace {
         mut stream: Workstream,
         title: String,
         kickoff: String,
+        choice: Option<ModelChoice>,
         cx: &mut Context<Self>,
     ) {
         let Some(project) = self.project_mut(&root).cloned() else {
@@ -60,11 +61,11 @@ impl Workspace {
                     Some(dir) => Ok(dir),
                     None => {
                         project.disable_non_git_worktrees()?;
-                        Ok(root.clone())
+                        Ok(root.to_path_buf())
                     }
                 });
                 match cwd {
-                    Ok(cwd) => ws.launch_stream(root, stream, title, kickoff, cwd, cx),
+                    Ok(cwd) => ws.launch_stream(root, stream, title, kickoff, cwd, choice, cx),
                     Err(e) => ws.stream_failed(&root, &stream.id, e, cx),
                 }
             });
@@ -72,11 +73,11 @@ impl Workspace {
         .detach();
     }
 
-    pub(super) fn tick_worktrees(&mut self, root: &PathBuf, cx: &mut Context<Self>) {
+    pub(super) fn tick_worktrees(&mut self, root: &Path, cx: &mut Context<Self>) {
         if self.project_schedule.tree_jobs.contains(root) {
             return;
         }
-        let Some(project) = self.projects.iter().find(|p| p.root == *root) else {
+        let Some(project) = self.projects.iter().find(|p| p.root.as_path() == root) else {
             return;
         };
         let idle = |s: &Workstream| {
@@ -105,9 +106,9 @@ impl Workspace {
         if workers.is_empty() {
             return;
         }
-        self.project_schedule.tree_jobs.insert(root.clone());
+        self.project_schedule.tree_jobs.insert(root.to_path_buf());
         let mut project = project.clone();
-        let root = root.clone();
+        let root = root.to_path_buf();
         let work = cx.background_spawn(async move {
             for id in workers {
                 if let Err(e) = project.reconcile_worker_tree(&id) {
@@ -124,13 +125,8 @@ impl Workspace {
         .detach();
     }
 
-    pub(super) fn clean_removed_checkout(
-        &mut self,
-        root: &PathBuf,
-        id: &str,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(project) = self.projects.iter().find(|p| p.root == *root) else {
+    pub(super) fn clean_removed_checkout(&mut self, root: &Path, id: &str, cx: &mut Context<Self>) {
+        let Some(project) = self.projects.iter().find(|p| p.root.as_path() == root) else {
             return;
         };
         let Some(stream) = project.stream(id).cloned() else {
