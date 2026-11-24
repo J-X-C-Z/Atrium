@@ -511,7 +511,34 @@ impl RootView {
         )
     }
 
-    /// A file's undo and open buttons, for its card's header in git mode.
+    /// A changed file's open button, in git and transcript views alike.
+    pub(super) fn open_file_button(
+        &self,
+        ix: usize,
+        path: &str,
+        cwd: &str,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        let full = crate::engine_view::resolve_file_path(path, cwd);
+        let root = cx.entity();
+        Some(
+            IconButton::new(
+                SharedString::from(format!("file-open-{ix}")),
+                IconName::ExternalLink,
+            )
+            .variant(ButtonVariant::Ghost)
+            .size(ControlSize::Sm)
+            .tooltip(t("Open in editor"))
+            .on_click(move |_, _, cx| {
+                root.update(cx, |r, cx| {
+                    r.open_in_editor(&PathBuf::from(&full), None, cx)
+                })
+            })
+            .into_any_element(),
+        )
+    }
+
+    /// A file's undo button, for its card's header in git mode.
     pub(super) fn file_buttons(
         &self,
         ix: usize,
@@ -524,28 +551,12 @@ impl RootView {
             .iter()
             .find(|(f, _)| f.path == file.path)?;
         let root = cx.entity();
-        let (undo, open) = (
-            (root.clone(), change.clone()),
-            (root, PathBuf::from(&file.path)),
-        );
+        let undo = (root, change.clone());
         let enabled = self.tools.busy.is_none();
         Some(
             div()
                 .flex()
                 .items_center()
-                .child(
-                    IconButton::new(
-                        SharedString::from(format!("file-open-{ix}")),
-                        IconName::ExternalLink,
-                    )
-                    .variant(ButtonVariant::Ghost)
-                    .size(ControlSize::Sm)
-                    .tooltip(t("Open in editor"))
-                    .on_click(move |_, _, cx| {
-                        let (root, path) = open.clone();
-                        root.update(cx, |r, cx| r.open_in_editor(&path, None, cx))
-                    }),
-                )
                 .child(
                     IconButton::new(
                         SharedString::from(format!("file-undo-{ix}")),

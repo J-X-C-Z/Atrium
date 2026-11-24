@@ -4,7 +4,7 @@
 use atrium_core::{Account, plan_label};
 use ely_gpui_component::{
     buttons::{Button, ButtonVariant, IconButton, SegmentedControl},
-    chat::new_chat_button,
+    chat::{ConversationStatus, new_chat_button},
     data_display::{Avatar, Badge, Tone},
     forms::{SearchInput, TextInput},
     layout::Sidebar,
@@ -119,7 +119,7 @@ pub fn render(
     let in_workflows = matches!(ws.room, crate::workspace::Room::Workflows { .. });
     // Workstreams' sessions live in their project, not among the chats.
     let project_threads = ws.project_threads();
-    let conversations: Vec<ChatRow> = ws
+    let mut conversations: Vec<ChatRow> = ws
         .threads
         .iter()
         .filter(|thread| !project_threads.contains(&thread.id) && ws.chat_shown(&thread.id))
@@ -134,8 +134,27 @@ pub fn render(
             device: ws
                 .chat_device(&thread.id)
                 .map(|device| ws.device_label(&device)),
+            archived: false,
         })
         .collect();
+    // Archived chats keep their row so the list can show them and Undo can
+    // put them back.
+    conversations.extend(ws.archived_chats().iter().map(|chat| {
+        ChatRow {
+            key: chat.meta.id.clone().into(),
+            title: chat.meta.title(),
+            at: Timestamp::from_second(chat.meta.updated_at).unwrap_or(now),
+            pinned: false,
+            status: ConversationStatus::Idle,
+            agent: crate::agents::split_backend(&chat.meta.backend)
+                .0
+                .to_string(),
+            device: ws
+                .chat_device(&chat.meta.id)
+                .map(|device| ws.device_label(&device)),
+            archived: true,
+        }
+    }));
     let active: Option<SharedString> = match &ws.view {
         View::Thread(id) => Some(id.clone().into()),
         View::Draft => None,
@@ -194,6 +213,49 @@ pub fn render(
             )]
         }
     };
+    // Undo on the last archive, delete or pin, in place above the list.
+    let undo_bar: Option<AnyElement> = ws.undo.as_ref().map(|undo| {
+        let label = match undo {
+            crate::workspace::Undo::Archive { .. } => t("Chat archived"),
+            crate::workspace::Undo::Delete { .. } => t("Chat deleted"),
+            crate::workspace::Undo::Pin { pinned: true, .. } => t("Chat pinned"),
+            crate::workspace::Undo::Pin { pinned: false, .. } => t("Chat unpinned"),
+        };
+        let undoer = workspace.clone();
+        let dismisser = workspace.clone();
+        div()
+            .mx_2()
+            .mb_2()
+            .px_2()
+            .py_1()
+            .flex()
+            .items_center()
+            .gap_1()
+            .rounded(theme.radius(ely_gpui_component::theme::Radius::Md))
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.surface)
+            .text_size(theme.text_size(TextSize::Xs))
+            .text_color(colors.fg_muted)
+            .child(div().flex_1().min_w_0().truncate().child(label))
+            .child(
+                Button::new("undo-list", t("Undo"))
+                    .variant(ButtonVariant::Ghost)
+                    .size(ControlSize::Sm)
+                    .on_click(move |_, _, cx| {
+                        undoer.update(cx, |ws, cx| ws.undo_last(cx));
+                    }),
+            )
+            .child(
+                IconButton::new("undo-dismiss", IconName::X)
+                    .variant(ButtonVariant::Ghost)
+                    .size(ControlSize::Sm)
+                    .on_click(move |_, _, cx| {
+                        dismisser.update(cx, |ws, cx| ws.dismiss_undo(cx));
+                    }),
+            )
+            .into_any_element()
+    });
     let list = ChatList::new(
         conversations,
         active,
@@ -201,7 +263,12 @@ pub fn render(
         today,
         move |key, _, cx| {
             let id = key.to_string();
-            open.update(cx, |ws, cx| ws.open_thread(id, cx));
+            open.update(cx, |ws, cx| {
+                if ws.is_archived(&id) {
+                    ws.unarchive(&id, cx);
+                }
+                ws.open_thread(id, cx);
+            });
         },
         {
             let root = root.clone();
@@ -216,7 +283,7 @@ pub fn render(
         },
         move |key, _, cx| {
             let id = key.to_string();
-            archive.update(cx, |ws, cx| ws.archive(id, cx));
+            archive.update(cx, |ws, cx| ws.delete_chat(id, cx));
         },
         extra,
     );
@@ -406,6 +473,7 @@ pub fn render(
                                         ),
                                 )
                             })
+                            .children(undo_bar)
                             // With only message hits, the list's "no match" would push them away.
                             .when(!empty && (titles_match || hits.is_empty()), |column| {
                                 column.child(list)

@@ -32,6 +32,8 @@ use atrium_runtime::{
 use codex_client::{AccessMode, CodexClient, StartThread, TurnRequest};
 
 use crate::agents;
+use crate::engine_store::EngineProjector;
+use crate::engine_view::ProjectedChat;
 
 /// The clients the app has connected, and the sessions started through them.
 ///
@@ -51,6 +53,8 @@ struct Inner {
     /// Paired with `sessions`: `wait` sleeps here until a turn completes.
     turn_ended: Condvar,
     caps: Mutex<HashMap<String, Capabilities>>,
+    /// Live engine projections fed by the same events the transcripts see.
+    projector: Option<EngineProjector>,
 }
 
 #[derive(Clone)]
@@ -90,6 +94,11 @@ struct Session {
 
 impl Inner {
     fn observe(&self, event: &AgentEvent) {
+        // Project before the session lookup: a fast provider can emit its
+        // first turn before the app has recorded the session.
+        if let Some(projector) = &self.projector {
+            projector.apply(event);
+        }
         let Some(thread) = event.thread_id() else {
             return;
         };
@@ -156,6 +165,7 @@ impl RuntimeAdapters {
                 sessions: Mutex::new(HashMap::new()),
                 turn_ended: Condvar::new(),
                 caps: Mutex::new(HashMap::new()),
+                projector: EngineProjector::new().ok(),
             }),
         }
     }
@@ -196,13 +206,44 @@ impl RuntimeAdapters {
     }
 
     /// Whether `backend` runs on the ported engine.
-    #[allow(dead_code)]
     pub fn uses_engine(&self, backend: &str) -> bool {
         self.inner
             .engine_codex
             .lock()
             .expect("runtime engine codex")
             .contains_key(backend)
+    }
+
+    /// Whether this session was opened through an engine runtime.
+    ///
+    /// The chat list uses the engine projections for these sessions and the
+    /// legacy transcript path for the rest.
+    pub fn is_engine_session(&self, session: &str) -> bool {
+        self.inner
+            .sessions
+            .lock()
+            .expect("runtime sessions")
+            .get(session)
+            .is_some_and(|state| state.engine.is_some())
+    }
+
+    /// What the live engine projections say about `thread_id`, when the
+    /// app has seen it. Only engine-backed sessions read this path.
+    pub fn projected_chat(&self, thread_id: &str) -> Option<ProjectedChat> {
+        self.inner
+            .projector
+            .as_ref()
+            .and_then(|projector| projector.chat(thread_id))
+    }
+
+    /// The engine's declared capabilities for `backend`, when it runs on the
+    /// ported engine. The composer reads these instead of a backend name.
+    pub fn engine_provider_capabilities(
+        &self,
+        backend: &str,
+    ) -> Option<atrium_engine::contracts::ProviderCapabilities> {
+        self.engine_for(backend)
+            .map(|engine| engine.provider_capabilities())
     }
 
     fn engine_for(&self, backend: &str) -> Option<Arc<CodexEngineRuntime>> {

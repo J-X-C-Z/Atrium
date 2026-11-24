@@ -23,6 +23,33 @@ pub struct ModelChoice {
     pub effort: Option<String>,
 }
 
+/// A message held for a chat until its running turn ends.
+///
+/// Saved with settings so a restart keeps the queue; it is not conversation
+/// state the engine owns.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SavedQueuedMessage {
+    pub id: u64,
+    pub text: String,
+    pub images: Vec<PathBuf>,
+    pub mentions: Vec<PathBuf>,
+}
+
+/// A chat taken out of the list, enough to rebuild its row after a restart.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SavedArchivedChat {
+    pub id: String,
+    pub backend: String,
+    pub name: Option<String>,
+    pub preview: String,
+    pub cwd: String,
+    pub model: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -59,6 +86,13 @@ pub struct Settings {
     pub agent_commands: std::collections::HashMap<String, String>,
     /// Agent sessions the user archived (ACP has no archive of its own).
     pub hidden_sessions: Vec<String>,
+    /// Chats taken out of the list, rebuilt into the Archived section after a
+    /// restart.
+    pub archived_chats: Vec<SavedArchivedChat>,
+    /// Messages each chat was still holding when Atrium closed, by chat key.
+    pub queues: std::collections::HashMap<String, Vec<SavedQueuedMessage>>,
+    /// The next queue id, so ids stay unique across restarts.
+    pub next_queue_id: u64,
     /// Project folders, in the order they were added.
     pub projects: Vec<PathBuf>,
     /// Launch configurations explicitly approved on this device, keyed by project.
@@ -239,6 +273,34 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn queues_and_archived_chats_round_trip_through_json() {
+        let mut settings = Settings::default();
+        settings.queues.insert(
+            "thread-1".into(),
+            vec![SavedQueuedMessage {
+                id: 2,
+                text: "later".into(),
+                images: vec![PathBuf::from("/tmp/a.png")],
+                mentions: Vec::new(),
+            }],
+        );
+        settings.next_queue_id = 3;
+        settings.archived_chats.push(SavedArchivedChat {
+            id: "thread-2".into(),
+            backend: "claude".into(),
+            name: Some("Archived".into()),
+            updated_at: 42,
+            ..SavedArchivedChat::default()
+        });
+        let text = serde_json::to_string(&settings).expect("settings serialize");
+        let loaded: Settings = serde_json::from_str(&text).expect("settings parse");
+        assert_eq!(loaded.queues["thread-1"][0].text, "later");
+        assert_eq!(loaded.next_queue_id, 3);
+        assert_eq!(loaded.archived_chats[0].id, "thread-2");
+        assert_eq!(loaded.archived_chats[0].updated_at, 42);
+    }
 
     #[test]
     fn recent_folders_stay_unique_and_short() {

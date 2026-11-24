@@ -1,7 +1,10 @@
 //! Where messages are written: text, attached images, `@` file mentions,
 //! `/` commands, and the pickers for access, effort and folder.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use atrium_core::ConfigOption;
 use codex_client::AccessMode;
@@ -16,7 +19,7 @@ use ely_gpui_component::{
 use gpui::{
     AnyElement, App, AppContext, Context, Entity, Focusable, InteractiveElement, IntoElement,
     ParentElement, PathPromptOptions, Render, SharedString, Styled, Subscription, Task, Window,
-    actions, div, prelude::FluentBuilder,
+    actions, div, prelude::FluentBuilder, px,
 };
 
 use super::{NewChat, OpenSettings, ToggleSidebar};
@@ -34,11 +37,16 @@ pub struct Composer {
     searched: Option<String>,
     /// The placeholder last shown: the default, a prediction, or a steering hint.
     placeholder: SharedString,
+    /// The chat whose draft is in the field, and the drafts of the others.
+    view_key: String,
+    drafts: HashMap<String, String>,
+    /// Where prompt recall is, into the shown chat's newest-first history.
+    recall: Option<usize>,
     _search: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
-actions!(atrium, [AcceptPrediction]);
+actions!(atrium, [AcceptPrediction, RecallPrevious, RecallNext]);
 
 fn default_placeholder() -> String {
     tf(
@@ -101,9 +109,41 @@ impl Composer {
             found: Vec::new(),
             searched: None,
             placeholder: default_placeholder().into(),
+            view_key: String::new(),
+            drafts: HashMap::new(),
+            recall: None,
             _search: None,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Keeps one draft per chat as the user moves between them.
+    fn sync_draft(&mut self, cx: &mut Context<Self>) {
+        let key = self.workspace.read(cx).view_key().to_string();
+        if key == self.view_key {
+            return;
+        }
+        let text = self.draft.read(cx).text().to_string();
+        let next = crate::engine_view::swap_draft(&mut self.drafts, &self.view_key, &key, &text);
+        self.view_key = key;
+        self.recall = None;
+        if self.draft.read(cx).text() != next {
+            self.draft.update(cx, |input, cx| input.set_text(&next, cx));
+        }
+    }
+
+    /// Recalls a sent prompt into the field; Up walks back, Down forward.
+    fn recall_prompt(&mut self, older: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let history = self.workspace.read(cx).prompts_for_view().to_vec();
+        let (index, text) = crate::engine_view::recall_prompt(&history, self.recall, older);
+        if index.is_none() && self.recall.is_none() {
+            return;
+        }
+        self.recall = index;
+        let text = text.unwrap_or_default();
+        self.draft.update(cx, |input, cx| input.set_text(&text, cx));
+        self.focus(window, cx);
+        cx.notify();
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
@@ -171,6 +211,7 @@ impl Composer {
             mentions: std::mem::take(&mut self.mentions),
         };
         self.draft.update(cx, |input, cx| input.set_text("", cx));
+        self.recall = None;
         self.workspace.update(cx, |ws, cx| ws.send(composed, cx));
         self.focus(window, cx);
         cx.notify();
@@ -290,63 +331,39 @@ impl Composer {
     }
 
     /// Codex's toggles and pickers: plan mode, Fast and access.
-    fn codex_tools(&self, tools: &mut Vec<AnyElement>, cx: &mut Context<Self>) {
+    /// Fast as one toggle in the pill; the model must offer a tier.
+    fn fast_toggle(&self, cx: &App) -> AnyElement {
         let ws = self.workspace.read(cx);
-        // Plan mode and Fast.
         let workspace = self.workspace.clone();
-        tools.push(
-            ToggleButton::new(
-                "plan-mode",
-                ToggleItem::new("plan")
-                    .label(t("Plan"))
-                    .icon(IconName::ListChecks)
-                    .tooltip(t(
-                        "Plan mode: Codex proposes a plan and waits before changing anything",
-                    )),
-                ws.settings.plan_mode,
-            )
-            .size(ControlSize::Sm)
-            .on_toggle(move |on, _, cx| {
-                workspace.update(cx, |ws, cx| {
-                    ws.settings.plan_mode = on;
-                    ws.settings.save();
-                    cx.notify();
-                })
+        ToggleButton::new(
+            "fast",
+            ToggleItem::new("fast").icon(IconName::Zap).tooltip(tf(
+                "Speed: {state}. Fast is about twice the speed and uses more of your plan's usage",
+                &[(
+                    "state",
+                    &if ws.settings.fast {
+                        t("Fast")
+                    } else {
+                        t("Standard")
+                    },
+                )],
+            )),
+            ws.settings.fast,
+        )
+        .size(ControlSize::Sm)
+        .on_toggle(move |on, _, cx| {
+            workspace.update(cx, |ws, cx| {
+                ws.settings.fast = on;
+                ws.settings.save();
+                cx.notify();
             })
-            .into_any_element(),
-        );
-        if ws.fast_tier().is_some() {
-            let workspace = self.workspace.clone();
-            tools.push(
-                ToggleButton::new(
-                    "fast",
-                    ToggleItem::new("fast").icon(IconName::Zap).tooltip(tf(
-                        "Speed: {state}. Fast is about twice the speed and uses more of your plan's usage",
-                        &[(
-                            "state",
-                            &if ws.settings.fast {
-                                t("Fast")
-                            } else {
-                                t("Standard")
-                            },
-                        )],
-                    )),
-                    ws.settings.fast,
-                )
-                .size(ControlSize::Sm)
-                .on_toggle(move |on, _, cx| {
-                    workspace.update(cx, |ws, cx| {
-                        ws.settings.fast = on;
-                        ws.settings.save();
-                        cx.notify();
-                    })
-                })
-                .into_any_element(),
-            );
-        }
+        })
+        .into_any_element()
+    }
 
-        // Access mode.
-        let current = ws.settings.mode;
+    /// The access-mode choices, shared by the pill and its overflow.
+    fn approval_choices(&self, cx: &App) -> Menu {
+        let current = self.workspace.read(cx).settings.mode;
         let mut menu = Menu::new();
         for mode in AccessMode::ALL {
             let workspace = self.workspace.clone();
@@ -358,17 +375,82 @@ impl Composer {
                 .on_click(move |_, cx| workspace.update(cx, |ws, cx| ws.set_mode(mode, cx))),
             );
         }
+        menu
+    }
+
+    /// The approval mode shows in the pill only when it is not the default.
+    fn approval_icon(&self, cx: &App) -> AnyElement {
+        let current = self.workspace.read(cx).settings.mode;
         let icon = match current {
             AccessMode::ReadOnly => IconName::Lock,
             AccessMode::Auto => IconName::Shield,
             AccessMode::FullAccess => IconName::LockOpen,
         };
-        tools.push(
-            OverflowMenu::new("mode", menu)
-                .icon(icon)
-                .tooltip(tf("Approval: {mode}", &[("mode", &t(current.label()))]))
-                .into_any_element(),
-        );
+        OverflowMenu::new("mode", self.approval_choices(cx))
+            .icon(icon)
+            .tooltip(tf("Approval: {mode}", &[("mode", &t(current.label()))]))
+            .into_any_element()
+    }
+
+    /// Everything the pill does not show: plan, Fast and the approval mode.
+    fn codex_overflow(&self, controls: &crate::engine_view::Controls, cx: &App) -> AnyElement {
+        let ws = self.workspace.read(cx);
+        let current = ws.settings.mode;
+        let mut menu = Menu::new();
+        if controls.plan {
+            let workspace = self.workspace.clone();
+            menu = menu.item(
+                MenuItem::check(t("Plan"), ws.settings.plan_mode)
+                    .icon(IconName::ListChecks)
+                    .keys("secondary-shift-l")
+                    .on_click(move |_, cx| {
+                        workspace.update(cx, |ws, cx| {
+                            ws.settings.plan_mode = !ws.settings.plan_mode;
+                            ws.settings.save();
+                            cx.notify();
+                        })
+                    }),
+            );
+        }
+        if controls.speed && ws.fast_tier().is_some() {
+            let workspace = self.workspace.clone();
+            menu = menu.item(
+                MenuItem::check(t("Fast"), ws.settings.fast)
+                    .icon(IconName::Zap)
+                    .keys("secondary-shift-f")
+                    .on_click(move |_, cx| workspace.update(cx, |ws, cx| ws.toggle_speed(cx))),
+            );
+        }
+        if controls.approval {
+            menu = menu.separator().item(
+                MenuItem::submenu(
+                    tf("Approval: {mode}", &[("mode", &t(current.label()))]),
+                    self.approval_choices(cx),
+                )
+                .keys("secondary-shift-y"),
+            );
+        }
+        OverflowMenu::new("pill-more", menu)
+            .icon(IconName::SlidersHorizontal)
+            .tooltip(t("More controls"))
+            .into_any_element()
+    }
+
+    /// One rounded pill: the agent, model, effort, speed and the rest.
+    fn pill(children: Vec<AnyElement>, cx: &App) -> AnyElement {
+        let theme = cx.theme();
+        let colors = theme.colors.clone();
+        div()
+            .flex()
+            .items_center()
+            .gap_0p5()
+            .px_1()
+            .rounded_full()
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.surface)
+            .children(children)
+            .into_any_element()
     }
 
     /// Which agent runs the chat, and on which device: chosen for a new
@@ -387,7 +469,10 @@ impl Composer {
         };
         if ws.active_thread().is_some() {
             let theme = cx.theme();
-            return div()
+            let (mark, tint) =
+                super::chat_list::agent_icon(crate::engine_view::backend_agent(&backend));
+            let device = crate::agents::split_backend(&backend).1.map(str::to_string);
+            let mut row = div()
                 .flex_none()
                 .flex()
                 .items_center()
@@ -396,12 +481,24 @@ impl Composer {
                 .text_size(theme.text_size(TextSize::Sm))
                 .text_color(theme.colors.fg_muted)
                 .child(
-                    Icon::new(icon)
+                    Icon::new(mark)
                         .size(IconSize::Sm)
-                        .color(theme.colors.fg_subtle),
+                        .color(tint.unwrap_or(theme.colors.fg_subtle)),
                 )
-                .child(label)
-                .into_any_element();
+                .child(label);
+            if let Some(device) = device {
+                row = row.child(
+                    div()
+                        .px_1p5()
+                        .rounded_full()
+                        .bg(theme.colors.sunken)
+                        .border_1()
+                        .border_color(theme.colors.border)
+                        .text_size(theme.text_size(TextSize::Xs))
+                        .child(ws.device_label(&device)),
+                );
+            }
+            return row.into_any_element();
         }
         let item = |id: String, name: String| {
             let workspace = workspace.clone();
@@ -525,10 +622,15 @@ impl Composer {
             .filter(|o| o.choices.len() > 1)
             .collect();
         let primary = |o: &ConfigOption| {
-            matches!(
-                o.category.as_deref(),
-                Some("mode" | "model" | "thought_level")
-            )
+            // A default approval mode is not worth a control of its own; it
+            // stays in the overflow menu with the rest.
+            let default_mode = o.category.as_deref() == Some("mode")
+                && crate::engine_view::approval_is_default(&o.current_name());
+            !default_mode
+                && matches!(
+                    o.category.as_deref(),
+                    Some("mode" | "model" | "thought_level")
+                )
         };
         // Mode, model and reasoning level get their own pickers.
         for option in options.iter().filter(|o| primary(o)) {
@@ -614,29 +716,54 @@ impl Composer {
 
     fn tools(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let ws = self.workspace.read(cx);
+        let controls = ws.control_set();
         let mut tools = Vec::new();
         let this = cx.entity();
 
-        tools.push(
-            IconButton::new("attach", IconName::Paperclip)
-                .variant(ButtonVariant::Ghost)
-                .size(ControlSize::Sm)
-                .tooltip(t("Attach images or files"))
-                .on_click(move |_, _, cx| this.update(cx, |this, cx| this.pick_files(cx)))
-                .into_any_element(),
-        );
+        if controls.images {
+            tools.push(
+                IconButton::new("attach", IconName::Paperclip)
+                    .variant(ButtonVariant::Ghost)
+                    .size(ControlSize::Sm)
+                    .tooltip(t("Attach images or files"))
+                    .on_click(move |_, _, cx| this.update(cx, |this, cx| this.pick_files(cx)))
+                    .into_any_element(),
+            );
+        }
 
-        tools.push(self.agent_picker(cx));
+        // One pill: agent · model · effort · speed, with the rest behind it.
+        let mut pill = vec![self.agent_picker(cx)];
         if ws.is_codex_view() {
+            let (_, effort) = ws.efforts();
+            let plan = crate::engine_view::pill_plan(
+                &controls,
+                Some(&ws.model_label()),
+                effort.as_deref(),
+                ws.fast_tier().as_deref(),
+                Some(t(ws.settings.mode.label())),
+            );
             // A device's Codex offers its own models, chosen the same way.
-            tools.push(self.model_picker(cx));
-            tools.extend(self.effort_picker(cx));
+            if plan.show_model {
+                pill.push(self.model_picker(cx));
+            }
+            if plan.show_effort
+                && let Some(effort) = self.effort_picker(cx)
+            {
+                pill.push(effort);
+            }
             if !ws.is_remote_view() {
-                self.codex_tools(&mut tools, cx);
+                if plan.show_speed {
+                    pill.push(self.fast_toggle(cx));
+                }
+                if plan.show_approval {
+                    pill.push(self.approval_icon(cx));
+                }
+                pill.push(self.codex_overflow(&controls, cx));
             }
         } else {
-            self.agent_tools(&mut tools, cx);
+            self.agent_tools(&mut pill, cx);
         }
+        tools.push(Self::pill(pill, cx));
         let ws = self.workspace.read(cx);
 
         // On another device: its folders, browsed through its node.
@@ -741,6 +868,7 @@ fn title_case(word: &str) -> String {
 
 impl Render for Composer {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_draft(cx);
         self.update_placeholder(cx);
         let predicting =
             self.workspace.read(cx).prediction().is_some() && self.draft.read(cx).text().is_empty();
@@ -749,6 +877,7 @@ impl Render for Composer {
         let colors = theme.colors.clone();
         let ws = self.workspace.read(cx);
         let running = ws.is_running();
+        let can_interrupt = ws.control_set().interrupt;
         let notice: Option<SharedString> = match &ws.status {
             Status::Connecting => Some(t("Starting Codex…").into()),
             Status::Failed(_) => {
@@ -771,7 +900,7 @@ impl Render for Composer {
         let mut input = PromptInput::new("composer", &self.draft, move |window, cx| {
             this.update(cx, |this, cx| this.send(window, cx))
         });
-        if running {
+        if running && can_interrupt {
             // Not `busy`: Enter must still send, to steer the running turn.
             let workspace = self.workspace.clone();
             input = input.tool(
@@ -841,6 +970,110 @@ impl Render for Composer {
             ));
         }
 
+        // Messages held until the running turn ends, each editable.
+        let queued = self.workspace.read(cx).queued_messages().to_vec();
+        if !queued.is_empty() {
+            let workspace = self.workspace.clone();
+            input = input.above(div().flex().flex_wrap().items_center().gap_1().children(
+                queued.into_iter().map(|message| {
+                    let id = message.id;
+                    let label = message
+                        .composed
+                        .text
+                        .lines()
+                        .map(str::trim)
+                        .find(|line| !line.is_empty())
+                        .unwrap_or("")
+                        .chars()
+                        .take(60)
+                        .collect::<String>();
+                    let editor = workspace.clone();
+                    let remover = workspace.clone();
+                    let earlier = workspace.clone();
+                    let later = workspace.clone();
+                    let sender = workspace.clone();
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_full()
+                        .bg(colors.surface)
+                        .border_1()
+                        .border_color(colors.border)
+                        .text_size(theme.text_size(TextSize::Xs))
+                        .text_color(colors.fg_muted)
+                        .child(
+                            Icon::new(IconName::Clock)
+                                .size(IconSize::Xs)
+                                .color(colors.fg_subtle),
+                        )
+                        .child(div().max_w(px(280.)).truncate().child(label))
+                        .child(
+                            IconButton::new(
+                                SharedString::from(format!("queue-up-{id}")),
+                                IconName::ArrowUp,
+                            )
+                            .variant(ButtonVariant::Ghost)
+                            .size(ControlSize::Sm)
+                            .tooltip(t("Move queued message up"))
+                            .on_click(move |_, _, cx| {
+                                earlier.update(cx, |ws, cx| ws.move_queued(id, true, cx))
+                            }),
+                        )
+                        .child(
+                            IconButton::new(
+                                SharedString::from(format!("queue-down-{id}")),
+                                IconName::ArrowDown,
+                            )
+                            .variant(ButtonVariant::Ghost)
+                            .size(ControlSize::Sm)
+                            .tooltip(t("Move queued message down"))
+                            .on_click(move |_, _, cx| {
+                                later.update(cx, |ws, cx| ws.move_queued(id, false, cx))
+                            }),
+                        )
+                        .child(
+                            IconButton::new(
+                                SharedString::from(format!("queue-send-{id}")),
+                                IconName::Send,
+                            )
+                            .variant(ButtonVariant::Ghost)
+                            .size(ControlSize::Sm)
+                            .tooltip(t("Send queued message now"))
+                            .on_click(move |_, _, cx| {
+                                sender.update(cx, |ws, cx| ws.send_queued_now(id, cx))
+                            }),
+                        )
+                        .child(
+                            IconButton::new(
+                                SharedString::from(format!("queue-edit-{id}")),
+                                IconName::Pencil,
+                            )
+                            .variant(ButtonVariant::Ghost)
+                            .size(ControlSize::Sm)
+                            .tooltip(t("Edit queued message"))
+                            .on_click(move |_, _, cx| {
+                                editor.update(cx, |ws, cx| ws.edit_queued(id, cx))
+                            }),
+                        )
+                        .child(
+                            IconButton::new(
+                                SharedString::from(format!("queue-remove-{id}")),
+                                IconName::X,
+                            )
+                            .variant(ButtonVariant::Ghost)
+                            .size(ControlSize::Sm)
+                            .tooltip(t("Remove queued message"))
+                            .on_click(move |_, _, cx| {
+                                remover.update(cx, |ws, cx| ws.remove_queued(id, cx))
+                            }),
+                        )
+                }),
+            ));
+        }
+
         // Review and compact are Codex's; an ACP agent brings its own commands.
         let codex = self.workspace.read(cx).is_codex_view();
         let mut commands: Vec<Choice> = COMMANDS
@@ -895,11 +1128,18 @@ impl Render for Composer {
             .flex()
             .flex_col()
             .gap_1p5()
+            .key_context("Composer")
             // Tab takes the prediction: bound only while one shows, so Tab
             // keeps moving focus otherwise.
             .when(predicting, |column| column.key_context("Predicting"))
             .on_action(cx.listener(|this, _: &AcceptPrediction, window, cx| {
                 this.accept_prediction(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &RecallPrevious, window, cx| {
+                this.recall_prompt(true, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &RecallNext, window, cx| {
+                this.recall_prompt(false, window, cx);
             }))
             .child(input)
             .child(
