@@ -72,6 +72,8 @@ struct State {
     answers: Mutex<HashMap<i64, mpsc::Sender<Value>>>,
     next_request: AtomicU64,
     cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// Prompts still to fail with a usage-limit error, from `--fail-limit`.
+    limit_failures: AtomicU64,
 }
 
 fn main() {
@@ -82,6 +84,12 @@ fn main() {
         .and_then(|ix| args.get(ix + 1))
         .cloned()
         .unwrap_or_else(|| "claude".into());
+    let limit_failures = args
+        .iter()
+        .position(|a| a == "--fail-limit")
+        .and_then(|ix| args.get(ix + 1))
+        .and_then(|n| n.parse::<u64>().ok())
+        .unwrap_or(0);
     let out: Out = Arc::new(Mutex::new(io::stdout()));
     let state = Arc::new(State {
         name: name.clone(),
@@ -89,6 +97,7 @@ fn main() {
         answers: Mutex::new(HashMap::new()),
         next_request: AtomicU64::new(100),
         cancels: Mutex::new(HashMap::new()),
+        limit_failures: AtomicU64::new(limit_failures),
     });
     {
         let mut sessions = state.sessions.lock().unwrap();
@@ -368,6 +377,17 @@ fn prompt(out: &Out, state: &State, id: Value, params: &Value) {
     let Some(session) = state.sessions.lock().unwrap().get(&session_id).cloned() else {
         return fail(out, id, -32602, "no such session");
     };
+    // `--fail-limit N`: the first N prompts fail like a spent account.
+    if state.limit_failures.load(Ordering::Relaxed) > 0 {
+        state.limit_failures.fetch_sub(1, Ordering::Relaxed);
+        // Not -32000: the client reads that as "sign in first".
+        return fail(
+            out,
+            id,
+            -32001,
+            "usage limit reached: this account's limit is reached until later",
+        );
+    }
     let stop = Arc::new(AtomicBool::new(false));
     state
         .cancels

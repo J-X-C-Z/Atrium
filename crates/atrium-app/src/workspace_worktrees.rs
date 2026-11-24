@@ -24,6 +24,7 @@ impl Workspace {
         mut stream: Workstream,
         title: String,
         kickoff: String,
+        choice: Option<ModelChoice>,
         cx: &mut Context<Self>,
     ) {
         let Some(project) = self.project_mut(&root).cloned() else {
@@ -64,7 +65,7 @@ impl Workspace {
                     }
                 });
                 match cwd {
-                    Ok(cwd) => ws.launch_stream(root, stream, title, kickoff, cwd, cx),
+                    Ok(cwd) => ws.launch_stream(root, stream, title, kickoff, cwd, choice, cx),
                     Err(e) => ws.stream_failed(&root, &stream.id, e, cx),
                 }
             });

@@ -284,7 +284,26 @@ impl RuntimeAdapters {
         let start =
             futures::executor::block_on(client.new_session_with(&spec.folder, &spec.mcp_servers))
                 .map_err(RuntimeError::failed)?;
-        let session = session_from_spec(&spec, sink, None, start.options);
+        // ACP names settings by category: `model` and `thought_level`.
+        let mut options = start.options;
+        for (option, value) in crate::workspace::team::option_updates(
+            &options,
+            spec.model.as_deref(),
+            spec.effort.as_deref(),
+        ) {
+            match futures::executor::block_on(client.set_option(&start.session_id, &option, &value))
+            {
+                Ok(Some(updated)) => options = updated,
+                Ok(None) => {}
+                Err(error) => {
+                    log::warn!(
+                        "could not set {option}={value} on {}: {error:#}",
+                        spec.agent
+                    )
+                }
+            }
+        }
+        let session = session_from_spec(&spec, sink, None, options);
         let id = start.session_id;
         self.insert_session(id.clone(), session);
         if let Some(input) = spec.first_message

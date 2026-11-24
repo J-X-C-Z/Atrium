@@ -122,6 +122,15 @@ pub struct Settings {
     pub device_workspaces: std::collections::HashMap<String, String>,
     /// What the user calls each other device, by device id (a 备注名).
     pub device_names: std::collections::HashMap<String, String>,
+    /// The team member each project stream runs as when it stands in for
+    /// another, by project root and stream id. App state, so the badge
+    /// survives a restart without changing `.atrium/`.
+    pub team_stand_ins:
+        std::collections::HashMap<PathBuf, std::collections::HashMap<String, String>>,
+    /// Where this state is saved; the usual place when unset. Kept out of
+    /// the file itself; tests point it at a temporary folder.
+    #[serde(skip)]
+    pub(crate) save_path: Option<PathBuf>,
 }
 
 impl Settings {
@@ -130,6 +139,34 @@ impl Settings {
         match self.device_names.get(device).map(|n| n.trim()) {
             Some(name) if !name.is_empty() => name.to_string(),
             _ => device.to_string(),
+        }
+    }
+
+    /// The member `stream` in `root` stands in for, if any.
+    pub fn stand_in(&self, root: &std::path::Path, stream: &str) -> Option<&str> {
+        self.team_stand_ins
+            .get(root)
+            .and_then(|streams| streams.get(stream))
+            .map(String::as_str)
+    }
+
+    /// Records (or with `None`, forgets) the member `stream` stands in for.
+    pub fn set_stand_in(&mut self, root: &std::path::Path, stream: &str, member: Option<&str>) {
+        match member {
+            Some(member) => {
+                self.team_stand_ins
+                    .entry(root.to_path_buf())
+                    .or_default()
+                    .insert(stream.to_string(), member.to_string());
+            }
+            None => {
+                if let Some(streams) = self.team_stand_ins.get_mut(root) {
+                    streams.remove(stream);
+                    if streams.is_empty() {
+                        self.team_stand_ins.remove(root);
+                    }
+                }
+            }
         }
     }
 
@@ -144,12 +181,15 @@ impl Settings {
         }
     }
 
-    fn path() -> Option<PathBuf> {
-        Some(dirs::config_dir()?.join("Atrium").join("settings.json"))
+    fn path(&self) -> Option<PathBuf> {
+        self.save_path
+            .clone()
+            .or_else(|| Some(dirs::config_dir()?.join("Atrium").join("settings.json")))
     }
 
     pub fn load() -> Self {
-        let Some(path) = Self::path() else {
+        let Some(path) = dirs::config_dir().map(|dir| dir.join("Atrium").join("settings.json"))
+        else {
             return Self::default();
         };
         match std::fs::read_to_string(&path) {
@@ -165,7 +205,7 @@ impl Settings {
     }
 
     pub fn save(&self) {
-        let Some(path) = Self::path() else { return };
+        let Some(path) = self.path() else { return };
         let result = path
             .parent()
             .map(std::fs::create_dir_all)
@@ -381,6 +421,26 @@ pub fn parse_vars(text: &str) -> Vec<(String, String)> {
 #[cfg(test)]
 mod parse_tests {
     use super::*;
+
+    #[test]
+    fn stand_in_marks_survive_saving_and_reloading() {
+        let root = std::path::Path::new("/projects/api");
+        let mut settings = Settings::default();
+        settings.set_stand_in(root, "web-1", Some("gemini"));
+        settings.set_stand_in(root, "web-2", Some("claude"));
+        // The app state file is JSON; the badge reads this back after a restart.
+        let text = serde_json::to_string(&settings).unwrap();
+        let back: Settings = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.stand_in(root, "web-1"), Some("gemini"));
+        assert_eq!(back.stand_in(root, "web-2"), Some("claude"));
+        assert_eq!(back.stand_in(root, "web-3"), None);
+        settings.set_stand_in(root, "web-1", None);
+        assert_eq!(settings.stand_in(root, "web-1"), None);
+        assert_eq!(settings.stand_in(root, "web-2"), Some("claude"));
+        // Forgetting the last stream also drops the empty project entry.
+        settings.set_stand_in(root, "web-2", None);
+        assert!(!settings.team_stand_ins.contains_key(root));
+    }
 
     #[test]
     fn mcp_lines_and_variables_parse() {

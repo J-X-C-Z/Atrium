@@ -12,7 +12,7 @@ use gpui::Context;
 use super::{Composed, Workspace, waiting_on_user};
 use crate::{
     agents,
-    project::{Project, Role, TaskStatus, Workstream, autopilot::Wake, wake_allowed},
+    project::{ATRIUM, Project, Role, TaskStatus, Workstream, autopilot::Wake, wake_allowed},
 };
 
 const IDLE_RETIRE: Duration = Duration::from_secs(10 * 60);
@@ -356,13 +356,19 @@ impl Workspace {
         let Some(project) = self.projects.iter().find(|p| p.root == *root) else {
             return;
         };
-        let backend = worker_backend(project, lead).to_owned();
+        let wanted = worker_backend(project, lead).to_owned();
         let needed = project.workers_needed(&lead.id);
-        if !self.backend_ready(&backend) {
-            return;
-        }
         for _ in 0..needed {
             if self.running_project_streams(root) >= 12 {
+                break;
+            }
+            // Pool workers are placed like leads: a spent member's pool
+            // starts its stand-in instead, and with nobody free it waits.
+            let Ok(placed) = self.place_task(root, &wanted) else {
+                break;
+            };
+            let backend = placed.agent.clone();
+            if !self.backend_ready(&backend) {
                 break;
             }
             let Some(project) = self.projects.iter().find(|p| p.root == *root) else {
@@ -386,7 +392,25 @@ impl Workspace {
             if !self.scheduler_turn_slot(root) {
                 break;
             }
-            self.start_stream(root, worker, cx);
+            let worker_id = worker.id.clone();
+            let choice = crate::workspace::team::start_choice(&placed);
+            self.start_stream(root, worker, choice, cx);
+            // The badge lives in app state so it survives a restart.
+            let previous = self.settings.stand_in(root, &worker_id).map(str::to_owned);
+            let current = placed.instead_of.as_ref().map(|_| placed.member.clone());
+            if previous != current {
+                self.settings
+                    .set_stand_in(root, &worker_id, current.as_deref());
+                self.settings.save();
+            }
+            if let Some(text) = Self::stand_in_notice(&worker_id, &placed) {
+                if let Some(project) = self.project_mut(root)
+                    && let Err(error) = project.post(ATRIUM, vec![lead.id.clone()], &text)
+                {
+                    log::warn!("could not post a pool stand-in notice: {error:#}");
+                }
+                self.queue_wake(root, lead.id.clone());
+            }
             if !self
                 .project_schedule
                 .task_pool

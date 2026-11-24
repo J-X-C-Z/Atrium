@@ -28,6 +28,7 @@ use crate::i18n::tf;
 use crate::{
     agents,
     project::{self, ATRIUM, Project, Role, Task, TaskStatus, Workstream, wake_allowed},
+    settings::ModelChoice,
 };
 
 #[path = "workspace_autopilot.rs"]
@@ -439,8 +440,6 @@ impl Workspace {
                 let Ok(placed) = self.place_task(&root, wanted) else {
                     continue;
                 };
-                // The pick's model and effort are not passed on: sessions start
-                // with the app's model setting.
                 let backend = placed.agent.clone();
                 let known = self.scheduler_backend_known(&backend);
                 let decision = start_decision(known, self.backend_ready(&backend), running);
@@ -473,11 +472,15 @@ impl Workspace {
                     continue;
                 }
                 let stream_id = stream.id.clone();
-                self.start_stream(&root, stream, cx);
-                if placed.instead_of.is_some() {
-                    self.team
-                        .stand_ins
-                        .insert((root.clone(), stream_id), placed.member.clone());
+                let choice = super::team::start_choice(&placed);
+                self.start_stream(&root, stream, choice, cx);
+                // App state, not `.atrium/`: the badge comes back after a restart.
+                let previous = self.settings.stand_in(&root, &stream_id).map(str::to_owned);
+                let current = placed.instead_of.as_ref().map(|_| placed.member.clone());
+                if previous != current {
+                    self.settings
+                        .set_stand_in(&root, &stream_id, current.as_deref());
+                    self.settings.save();
                 }
                 if let Some(text) = Self::stand_in_notice(&task.id, &placed) {
                     if let Some(project) = self.project_mut(&root)
@@ -1061,11 +1064,27 @@ impl Workspace {
             task: None,
             ..Workstream::default()
         };
-        self.start_stream(&root, stream, cx);
+        self.start_stream(&root, stream, None, cx);
     }
 
-    fn start_stream(&mut self, root: &Path, stream: Workstream, cx: &mut Context<Self>) {
+    fn start_stream(
+        &mut self,
+        root: &Path,
+        stream: Workstream,
+        choice: Option<ModelChoice>,
+        cx: &mut Context<Self>,
+    ) {
         let root = root.to_path_buf();
+        match &choice {
+            Some(choice) => {
+                self.team
+                    .starts
+                    .insert((root.clone(), stream.id.clone()), choice.clone());
+            }
+            None => {
+                self.team.starts.remove(&(root.clone(), stream.id.clone()));
+            }
+        }
         let team_extras = self.team_kickoff_extras(&root, stream.role, &stream.backend);
         let here = if self.settings.device_name.is_empty() {
             "this computer".to_string()
@@ -1125,16 +1144,25 @@ impl Workspace {
                 self.stream_failed(&root, &id, error, cx);
                 return;
             };
-            self.launch_stream(root.clone(), stream, title, kickoff, PathBuf::from(cwd), cx);
+            self.launch_stream(
+                root.clone(),
+                stream,
+                title,
+                kickoff,
+                PathBuf::from(cwd),
+                choice,
+                cx,
+            );
             return;
         }
         if isolated {
-            self.prepare_stream_checkout(root, stream, title, kickoff, cx);
+            self.prepare_stream_checkout(root, stream, title, kickoff, choice, cx);
         } else {
-            self.launch_stream(root.clone(), stream, title, kickoff, root, cx);
+            self.launch_stream(root.clone(), stream, title, kickoff, root, choice, cx);
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn launch_stream(
         &mut self,
         root: PathBuf,
@@ -1142,6 +1170,7 @@ impl Workspace {
         title: String,
         kickoff: String,
         cwd: PathBuf,
+        choice: Option<ModelChoice>,
         cx: &mut Context<Self>,
     ) {
         let backend = stream.backend.clone();
@@ -1172,17 +1201,25 @@ impl Workspace {
         let sink = self.runtime_sink(&backend);
         let codex = agents::is_codex(&backend);
         let mode = self.project_access_mode(unattended);
-        let model = if codex && device.is_none() {
-            self.settings.model.clone()
-        } else {
-            None
-        };
+        // A team member's model and effort win; otherwise this computer's
+        // Codex keeps the app's choice.
+        let model = choice
+            .as_ref()
+            .and_then(|choice| choice.model.clone())
+            .or_else(|| {
+                (codex && device.is_none())
+                    .then(|| self.settings.model.clone())
+                    .flatten()
+            });
         let mut mcp_servers = self.user_mcp(&backend);
         mcp_servers.extend(Self::mcp_servers(&root, &id, &backend));
         let spec = SessionSpec {
             agent: backend.clone(),
             model: model.clone(),
-            effort: codex.then(|| self.settings.effort.clone()).flatten(),
+            effort: choice
+                .as_ref()
+                .and_then(|choice| choice.effort.clone())
+                .or_else(|| codex.then(|| self.settings.effort.clone()).flatten()),
             service_tier: None,
             folder: cwd.clone(),
             worktree: None,
@@ -1893,11 +1930,7 @@ impl Workspace {
                         .and_then(|t| t.usage())
                         .and_then(|u| u.context_share()),
                     task: project.task_of(stream).cloned(),
-                    stand_in: self
-                        .team
-                        .stand_ins
-                        .get(&(root.clone(), stream.id.clone()))
-                        .cloned(),
+                    stand_in: self.settings.stand_in(root, &stream.id).map(str::to_owned),
                     stream: stream.clone(),
                     state,
                     plan,
