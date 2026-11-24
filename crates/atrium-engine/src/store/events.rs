@@ -32,6 +32,10 @@ pub enum StoreError {
     Json(#[from] serde_json::Error),
     #[error("command receipt {0} disappeared during its transaction")]
     ReceiptDisappeared(String),
+    #[error("thread {0} has no projection to snapshot")]
+    ThreadNotProjected(String),
+    #[error("invalid thread history cursor")]
+    InvalidHistoryCursor,
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;

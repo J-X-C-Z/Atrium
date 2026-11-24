@@ -19,9 +19,13 @@
 mod events;
 mod migrations;
 mod projections;
+mod stream;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod stream_tests;
 
 pub use events::{
     ApplyCommand, ApplyResult, CommandReceipt, EventStore, NewEvent, NewProjectEvent, ReadOptions,
@@ -33,4 +37,25 @@ pub use projections::{
     ActivityProjection, MessageProjection, NodeProjection, PendingApprovalProjection,
     ProjectionStore, ProjectionWrite, ProjectorState, ProviderSessionProjection,
     RunAttemptProjection, RunProjection, ThreadProjection, TurnProjection,
+};
+pub use stream::{
+    BoundedProjectionResult, BoundedThreadSnapshot, ContextHandoffRecord, LIVE_STREAM_MAX_ITEMS,
+    LIVE_STREAM_MAX_SERIALIZED_BYTES, LatestLiveStreamBuffer, LiveStreamBudget,
+    LiveStreamBufferError, LiveStreamLimits, LiveStreamUsage, RetainedLiveItem,
+    SelectedTimelinePage, THREAD_HISTORY_INLINE_WORK_ITEM_LIMIT, THREAD_HISTORY_MAX_RAW_TURNS,
+    THREAD_HISTORY_PAGE_POLICY, THREAD_HISTORY_SNAPSHOT_ROW_LIMIT,
+    THREAD_HISTORY_TURN_SNAPSHOT_ROW_LIMIT, THREAD_RESUME_MAX_RAW_PAYLOAD_BYTES,
+    THREAD_RESUME_MAX_REPLAY_ENCODED_BYTES, THREAD_RESUME_MAX_REPLAY_EVENTS,
+    ThreadHistoryCursorPayload, ThreadHistoryPagePolicy, ThreadHistoryPrefix,
+    ThreadProjectionSnapshot, ThreadResumePlan, ThreadStream, ThreadStreamBatch, ThreadStreamEvent,
+    ThreadStreamItem, ThreadStreamRecovery, ThreadStreamResume, bounded_snapshot_projection,
+    bounded_timeline_encoded_bytes, buffer_latest_live_stream, build_bounded_thread_projection,
+    build_bounded_thread_stream_snapshot, compute_latest_local_turn_ordinal, decide_thread_resume,
+    decode_thread_history_cursor, encode_thread_history_cursor, find_cursor_end_index,
+    is_conversation_history_item, is_thread_history_user_turn, is_thread_replay_raw_payload_safe,
+    load_thread_projection, older_history_page_policy, omit_local_visible_turn_items,
+    project_thread_projection_for_wire, projected_row_bounded_snapshot_encoded_bytes,
+    projected_row_encoded_bytes, pruned_through_sequence, restore_local_visible_turn_items,
+    select_history_page_from_cursor, select_recent_timeline_window, thread_replay_encoded_bytes,
+    thread_replay_encoded_bytes_with_limit,
 };
