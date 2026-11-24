@@ -15,5 +15,6 @@ pub mod diff;
 pub mod mcp;
 pub mod orchestration;
 pub mod providers;
+pub mod runtime;
 pub mod store;
 pub mod usage;

@@ -613,6 +613,7 @@ dependencies = [
  "agent-rpc",
  "anyhow",
  "atrium-core",
+ "atrium-engine",
  "atrium-layout",
  "atrium-memory",
  "atrium-node",
@@ -658,6 +659,8 @@ version = "0.1.0"
 dependencies = [
  "atrium-core",
  "atrium-runtime",
+ "codex-client",
+ "futures",
  "jiff 0.2.46",
  "log",
  "rusqlite",

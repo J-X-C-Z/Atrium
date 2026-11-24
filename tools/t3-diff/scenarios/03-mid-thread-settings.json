@@ -1,0 +1,24 @@
+{
+  "name": "03-mid-thread-settings",
+  "kind": "adapter",
+  "provider": "mockcodex",
+  "model": "mock-1",
+  "t3": "skip: T3 Code 0.1.11's CLI has no mid-thread model/effort command; T3 only sends serviceTier from its UI",
+  "actions": [
+    {"op": "settings", "model": "mock-1-pro", "effort": "high", "service_tier": "priority"},
+    {"op": "turn", "text": "say hi"}
+  ],
+  "expect": {
+    "final_status": "completed",
+    "stream_contains": [
+      {
+        "kind": "adapter.settings",
+        "model": "mock-1-pro",
+        "effort": "high",
+        "serviceTier": "priority",
+        "approvalPolicy": "never",
+        "applied": true
+      }
+    ]
+  }
+}

@@ -20,6 +20,24 @@ use crate::{
     translate,
 };
 
+/// A mid-thread settings update. T3 Code 0.1.11 only sends `serviceTier`
+/// (`thread/settings/update`); Atrium's adapter also carries the model,
+/// reasoning effort and approval policy so a loaded thread can change all of
+/// them without waiting for the next turn. The wire names stay T3's.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadSettingsUpdate {
+    pub thread_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_policy: Option<Value>,
+}
+
 /// How to start Codex.
 #[derive(Clone, Debug, Default)]
 pub struct CodexConfig {
@@ -438,6 +456,70 @@ impl CodexClient {
         Ok((meta, turns))
     }
 
+    /// Reads a thread's metadata without its turns and without taking the
+    /// writer lock (`thread/read` with `includeTurns: false`).
+    pub async fn thread_read_meta(&self, thread_id: &str) -> Result<ThreadMeta> {
+        let result = self
+            .connection
+            .request(
+                "thread/read",
+                json!({ "threadId": thread_id, "includeTurns": false }),
+            )
+            .await?;
+        translate::thread_meta(&result["thread"])
+            .ok_or_else(|| anyhow!("thread/read returned no thread"))
+    }
+
+    /// Applies new settings to a thread that is loaded in this process.
+    ///
+    /// T3 Code sends only `serviceTier` here. Atrium also sends `model`,
+    /// `effort` and `approvalPolicy`; a server that does not know those keys
+    /// ignores them.
+    pub async fn thread_settings_update(&self, update: ThreadSettingsUpdate) -> Result<()> {
+        self.connection
+            .request("thread/settings/update", update)
+            .await?;
+        Ok(())
+    }
+
+    /// The skills Codex found under each folder.
+    pub async fn skills_list(&self, cwds: &[String]) -> Result<Value> {
+        Ok(self
+            .connection
+            .request("skills/list", json!({ "cwds": cwds }))
+            .await?)
+    }
+
+    /// Codex's layered configuration, optionally for one folder.
+    pub async fn config_read(&self, cwd: Option<&str>) -> Result<Value> {
+        let mut params = json!({ "includeLayers": false });
+        if let Some(cwd) = cwd {
+            params["cwd"] = json!(cwd);
+        }
+        Ok(self.connection.request("config/read", params).await?)
+    }
+
+    /// Sends a request without a typed wrapper. The engine and the
+    /// differential driver use it for protocol probes.
+    pub async fn request_raw(&self, method: &str, params: Value) -> Result<Value> {
+        Ok(self.connection.request(method, params).await?)
+    }
+
+    /// Answers a server request with a raw result. Used for MCP elicitation
+    /// and user-input answers whose shape is provider-defined.
+    pub fn respond_raw(&self, request_id: Value, result: Value) -> Result<()> {
+        self.connection
+            .respond(request_id, result)
+            .map_err(|error| anyhow!("{error}"))
+    }
+
+    /// Declines a server request with a raw error, so its sender stops waiting.
+    pub fn respond_error_raw(&self, request_id: Value, code: i64, message: &str) -> Result<()> {
+        self.connection
+            .respond_error(request_id, code, message)
+            .map_err(|error| anyhow!("{error}"))
+    }
+
     /// Stored threads, newest first.
     pub async fn thread_list(&self, limit: u32) -> Result<Vec<ThreadMeta>> {
         let result = self
@@ -513,6 +595,20 @@ impl CodexClient {
         }
         let result = self.connection.request("turn/start", params).await?;
         Ok(str_of(&result["turn"], "id"))
+    }
+
+    /// Sends an already-built `turn/start` payload. The engine adapter uses
+    /// this where T3's parameters carry provider-defined JSON (granular
+    /// approval policies) that the typed request cannot express.
+    pub async fn turn_start_with_params(&self, params: Value) -> Result<String> {
+        let result = self.connection.request("turn/start", params).await?;
+        Ok(str_of(&result["turn"], "id"))
+    }
+
+    /// Sends an already-built `turn/steer` payload.
+    pub async fn turn_steer_with_params(&self, params: Value) -> Result<String> {
+        let result = self.connection.request("turn/steer", params).await?;
+        Ok(str_of(&result, "turnId"))
     }
 
     /// Adds the user's message to the running turn, which reads it at its next step.

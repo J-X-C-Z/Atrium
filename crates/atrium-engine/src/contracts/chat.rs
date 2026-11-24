@@ -89,6 +89,7 @@ pub struct ChatUnknownAttachment {
 }
 
 /// T3's `ChatAttachment` union.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChatAttachment {
     Image(ChatImageAttachment),
