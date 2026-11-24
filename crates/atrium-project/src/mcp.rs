@@ -17,6 +17,14 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
+use atrium_engine::{
+    contracts::ThreadId,
+    mcp::{
+        EnvironmentReadResult, McpConfig, McpError, McpService, ProjectListResult, ProjectWire,
+        SystemClock, tools as engine_tools,
+    },
+    store::EventStore,
+};
 use serde_json::{Value, json};
 
 use crate::{Project, Role, agent::NewTask, spread::Spread};
@@ -58,6 +66,39 @@ impl Target {
     }
 }
 
+/// Where the orchestration toolkit's threads and events live.
+///
+/// The merged server offers the orchestration tools only when this is set.
+/// The app passes it in the environment of every agent session it starts
+/// (`ATRIUM_ENGINE_DB` and `ATRIUM_THREAD`); without it, the project tools
+/// behave exactly as before.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EngineConfig {
+    /// The SQLite database the engine stores events and projections in.
+    pub database: PathBuf,
+    /// The engine thread this session serves, when the agent runs in one.
+    pub thread: Option<String>,
+    /// The `ProjectId` the project tools report; derived from the root when absent.
+    pub project_id: Option<String>,
+    pub environment_id: String,
+    pub label: String,
+}
+
+impl EngineConfig {
+    /// Reads the engine settings from the app's environment.
+    pub fn from_env() -> Option<Self> {
+        let database = std::env::var_os("ATRIUM_ENGINE_DB").map(PathBuf::from)?;
+        Some(Self {
+            database,
+            thread: std::env::var("ATRIUM_THREAD").ok(),
+            project_id: std::env::var("ATRIUM_PROJECT_ID").ok(),
+            environment_id: std::env::var("ATRIUM_ENVIRONMENT_ID")
+                .unwrap_or_else(|_| "atrium".into()),
+            label: std::env::var("ATRIUM_ENVIRONMENT_LABEL").unwrap_or_else(|_| "Atrium".into()),
+        })
+    }
+}
+
 /// Answers requests from `input` on `output` until `input` ends.
 pub fn serve(target: &Target, input: impl BufRead, output: impl Write) -> Result<()> {
     serve_with(target, None, input, output)
@@ -90,6 +131,41 @@ pub fn serve_with(
     Ok(())
 }
 
+/// The one server: Atrium's project tools plus T3's orchestration toolkit.
+///
+/// The engine store is opened once for the session. Project task files still
+/// divide a project's work; `delegate_task` is for ad-hoc help outside them.
+pub fn serve_merged(
+    target: &Target,
+    engine: Option<&EngineConfig>,
+    devices: Option<&dyn Devices>,
+    input: impl BufRead,
+    mut output: impl Write,
+) -> Result<()> {
+    let mut store = match engine {
+        Some(config) => Some(EventStore::open(&config.database)?),
+        None => None,
+    };
+    for line in input.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let reply = match serde_json::from_str::<Value>(&line) {
+            Ok(message) => handle_merged_with(target, &message, devices, engine, store.as_mut()),
+            Err(error) => Some(json!({
+                "jsonrpc": "2.0", "id": null,
+                "error": { "code": -32700, "message": format!("parse error: {error}") }
+            })),
+        };
+        if let Some(reply) = reply {
+            writeln!(output, "{reply}")?;
+            output.flush()?;
+        }
+    }
+    Ok(())
+}
+
 /// The reply to one message; none for notifications.
 pub fn handle(target: &Target, message: &Value) -> Option<Value> {
     handle_with(target, message, None)
@@ -100,6 +176,38 @@ pub fn handle_with(
     target: &Target,
     message: &Value,
     devices: Option<&dyn Devices>,
+) -> Option<Value> {
+    handle_inner(target, message, devices, None, None)
+}
+
+/// [`handle`] with the orchestration toolkit; `store` must be the engine
+/// database `engine` names.
+pub fn handle_merged(
+    target: &Target,
+    message: &Value,
+    engine: Option<&EngineConfig>,
+    store: Option<&mut EventStore>,
+) -> Option<Value> {
+    handle_inner(target, message, None, engine, store)
+}
+
+/// [`handle_merged`] with the device tools.
+pub fn handle_merged_with(
+    target: &Target,
+    message: &Value,
+    devices: Option<&dyn Devices>,
+    engine: Option<&EngineConfig>,
+    store: Option<&mut EventStore>,
+) -> Option<Value> {
+    handle_inner(target, message, devices, engine, store)
+}
+
+fn handle_inner(
+    target: &Target,
+    message: &Value,
+    devices: Option<&dyn Devices>,
+    engine: Option<&EngineConfig>,
+    store: Option<&mut EventStore>,
 ) -> Option<Value> {
     let id = message.get("id")?.clone();
     let method = message["method"].as_str().unwrap_or("");
@@ -112,12 +220,16 @@ pub fn handle_with(
             "instructions": INSTRUCTIONS,
         })),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tools(target, devices.is_some()) })),
-        "tools/call" => Ok(call(
+        "tools/list" => Ok(json!({
+            "tools": tools_list(target, devices.is_some(), engine.is_some() && store.is_some()),
+        })),
+        "tools/call" => Ok(call_merged(
             target,
             params["name"].as_str().unwrap_or(""),
             &params["arguments"],
             devices,
+            engine,
+            store,
         )),
         _ => Err(json!({ "code": -32601, "message": format!("no method {method}") })),
     };
@@ -125,6 +237,37 @@ pub fn handle_with(
         Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
         Err(error) => json!({ "jsonrpc": "2.0", "id": id, "error": error }),
     })
+}
+
+/// The reply to one tool call, from whichever half of the merged server owns
+/// the name.
+fn call_merged(
+    target: &Target,
+    name: &str,
+    args: &Value,
+    devices: Option<&dyn Devices>,
+    engine: Option<&EngineConfig>,
+    store: Option<&mut EventStore>,
+) -> Value {
+    if engine_tools::is_orchestration_tool(name) {
+        return match (engine, store) {
+            (Some(config), Some(store)) => engine_call(target, name, args, config, store),
+            _ => tool_error(McpError::new(
+                "capability_denied",
+                format!("No tool {name}."),
+            )),
+        };
+    }
+    if engine_tools::PROJECT_TOOLS.contains(&name) {
+        return match Project::load(&target.root) {
+            Ok(project) => match project_tool(target, &project, name, args, engine) {
+                Ok(value) => structured(value),
+                Err(error) => text_error(error),
+            },
+            Err(error) => text_error(error),
+        };
+    }
+    call(target, name, args, devices)
 }
 
 /// A tool result: text, flagged as an error when the call failed.
@@ -146,6 +289,127 @@ fn call(target: &Target, name: &str, args: &Value, devices: Option<&dyn Devices>
             "content": [{ "type": "text", "text": format!("{error:#}") }],
             "isError": true,
         }),
+    }
+}
+
+fn engine_call(
+    target: &Target,
+    name: &str,
+    args: &Value,
+    config: &EngineConfig,
+    store: &mut EventStore,
+) -> Value {
+    let mut mcp_config = McpConfig::new(
+        project_id(target, Some(config)),
+        config.thread.as_deref().map(ThreadId::new),
+    );
+    mcp_config.environment_id = config.environment_id.clone();
+    mcp_config.label = config.label.clone();
+    let mut service = McpService::new(&mut *store, SystemClock, mcp_config);
+    match service.call(name, args) {
+        Ok(value) => structured(value),
+        Err(error) => tool_error(error),
+    }
+}
+
+/// The T3 wire result: the same object in `structuredContent` and as text.
+fn structured(value: Value) -> Value {
+    let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
+    json!({
+        "content": [{ "type": "text", "text": text }],
+        "structuredContent": value,
+    })
+}
+
+fn tool_error(error: McpError) -> Value {
+    json!({
+        "content": [{ "type": "text", "text": format!("{}: {}", error.code, error.message) }],
+        "structuredContent": { "code": error.code, "message": error.message },
+        "isError": true,
+    })
+}
+
+fn text_error(error: anyhow::Error) -> Value {
+    json!({
+        "content": [{ "type": "text", "text": format!("{error:#}") }],
+        "isError": true,
+    })
+}
+
+/// The id the project tools report. Without an app-supplied id, the root
+/// path hashes to a stable one, so a client can list and then read it.
+fn project_id(target: &Target, engine: Option<&EngineConfig>) -> String {
+    if let Some(id) = engine.and_then(|config| config.project_id.clone()) {
+        return id;
+    }
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(target.root.to_string_lossy().as_bytes());
+    let digest = hasher.finalize();
+    let hex: String = digest
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("atrium-{hex}")
+}
+
+fn project_wire(target: &Target, project: &Project, engine: Option<&EngineConfig>) -> ProjectWire {
+    let now = jiff::Timestamp::now().to_string();
+    let title = if project.file.name.trim().is_empty() {
+        target
+            .root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Atrium project".into())
+    } else {
+        project.file.name.clone()
+    };
+    ProjectWire {
+        id: project_id(target, engine),
+        title,
+        workspace_root: target.root.to_string_lossy().into_owned(),
+        default_model_selection: None,
+        scripts: Vec::new(),
+        created_at: now.clone(),
+        updated_at: now,
+        deleted_at: None,
+    }
+}
+
+fn project_tool(
+    target: &Target,
+    project: &Project,
+    name: &str,
+    args: &Value,
+    engine: Option<&EngineConfig>,
+) -> Result<Value> {
+    match name {
+        "t3_project_list" => Ok(serde_json::to_value(ProjectListResult {
+            projects: vec![project_wire(target, project, engine)],
+            next_cursor: None,
+        })?),
+        "t3_project_read" => {
+            let wire = project_wire(target, project, engine);
+            let wanted = args["projectId"].as_str().unwrap_or("");
+            if wanted != wire.id {
+                return Err(anyhow!("Project {wanted} was not found."));
+            }
+            Ok(serde_json::to_value(wire)?)
+        }
+        "t3_environment_read" => {
+            let environment_id = engine
+                .map(|config| config.environment_id.clone())
+                .unwrap_or_else(|| "atrium".into());
+            let label = engine
+                .map(|config| config.label.clone())
+                .unwrap_or_else(|| "Atrium".into());
+            Ok(serde_json::to_value(EnvironmentReadResult::current(
+                environment_id,
+                label,
+            ))?)
+        }
+        other => Err(anyhow!("No tool {other}.")),
     }
 }
 
@@ -469,7 +733,24 @@ fn tools(target: &Target, with_devices: bool) -> Vec<Value> {
     if with_devices && Project::load(&target.root).is_ok_and(|p| Spread::of(&p).is_spread()) {
         tools.extend(device_tools());
     }
+    // The project half of the merged server. It reads `.atrium/` and needs no
+    // engine, so it is offered even when only the project tools are in use.
+    tools.extend(engine_tools::project_tool_specs());
     tools
+}
+
+/// The tool list for one session: Atrium's project tools, and T3's
+/// orchestration toolkit when an engine is attached.
+fn tools_list(target: &Target, with_devices: bool, with_engine: bool) -> Vec<Value> {
+    let mut list = tools(target, with_devices);
+    if with_engine {
+        list.extend(engine_tools::tool_specs().into_iter().filter(|spec| {
+            spec["name"]
+                .as_str()
+                .is_some_and(engine_tools::is_orchestration_tool)
+        }));
+    }
+    list
 }
 
 /// The tools for reading other computers' files, in a spread project.
@@ -510,7 +791,7 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
     })
 }
 
-const INSTRUCTIONS: &str = "Atrium runs this project as a controller, leads and sub-agents working side by side; these tools are how you take part. Call `whoami` first. Leads: tick each roadmap step with `check_step` as soon as it is done (the user watches progress there), hand self-contained work to sub-agents with `create_task`, and end with `finish_task` when your goal is done. Leads fill a task pool with `create_tasks` and are woken when it runs low. Sub-agents: `claim_next`, do the task, `finish_task` (which hands you the next), and keep going until the pool is empty. The controller: `write_plan`, then `create_task` once per lead with a phased roadmap, then stop until woken. Use `notify` for anything another workstream must know. Everything is also in plain files under .atrium/, which you may read.";
+const INSTRUCTIONS: &str = "Atrium runs this project as a controller, leads and sub-agents working side by side; these tools are how you take part. Call `whoami` first. Leads: tick each roadmap step with `check_step` as soon as it is done (the user watches progress there), hand self-contained work to sub-agents with `create_task`, and end with `finish_task` when your goal is done. Leads fill a task pool with `create_tasks` and are woken when it runs low. Sub-agents: `claim_next`, do the task, `finish_task` (which hands you the next), and keep going until the pool is empty. The controller: `write_plan`, then `create_task` once per lead with a phased roadmap, then stop until woken. Use `notify` for anything another workstream must know. Everything is also in plain files under .atrium/, which you may read. The project task files are how this project divides its work; keep using `create_task`/`create_tasks` for that. The orchestration tools (`t3_thread_*`, `delegate_task`, `task_status`, `task_cancel`, `orchestrator_capabilities`) are for ad-hoc help outside the project plan: a quick side thread, another agent on a separate task, or reading a conversation. Do not use `delegate_task` to stand in for a project task that belongs in a task file, and do not use a project task for a one-off question a child thread can answer.";
 
 #[cfg(test)]
 mod tests {
@@ -632,6 +913,71 @@ mod tests {
         assert_eq!(
             reply["result"]["content"][0]["text"],
             "boss ran device_read on \"win\""
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn one_server_offers_project_tools_and_the_orchestration_toolkit() {
+        let root = std::env::temp_dir().join(format!("atrium-mcp-merged-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let mut project = Project::open(&root).unwrap();
+        project.file.name = "Merged".into();
+        project.file.streams.push(Workstream {
+            id: "boss".into(),
+            role: Role::Controller,
+            ..Default::default()
+        });
+        project.save().unwrap();
+        let target = Target {
+            root: root.clone(),
+            stream: "boss".into(),
+        };
+        let engine = EngineConfig {
+            database: PathBuf::from(":memory:"),
+            thread: None,
+            project_id: Some("project:merged".into()),
+            environment_id: "atrium".into(),
+            label: "Atrium".into(),
+        };
+        let mut store = EventStore::in_memory().unwrap();
+        let list = json!({"jsonrpc":"2.0","id":1,"method":"tools/list"});
+        let reply = handle_merged(&target, &list, Some(&engine), Some(&mut store)).unwrap();
+        let names: Vec<&str> = reply["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"whoami"));
+        assert!(names.contains(&"t3_project_list"));
+        assert!(names.contains(&"t3_environment_read"));
+        assert!(names.contains(&"t3_thread_read"));
+        assert!(names.contains(&"delegate_task"));
+
+        // Without an engine, the project tools stay and the orchestration
+        // toolkit is not offered: there is nothing behind it.
+        let reply = handle_merged(&target, &list, None, None).unwrap();
+        let names: Vec<&str> = reply["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"t3_project_list"));
+        assert!(!names.contains(&"t3_thread_read"));
+
+        let call = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"t3_project_list","arguments":{}}});
+        let reply = handle_merged(&target, &call, Some(&engine), Some(&mut store)).unwrap();
+        assert!(reply["result"]["isError"].is_null(), "{reply}");
+        let projects = &reply["result"]["structuredContent"]["projects"];
+        assert_eq!(projects[0]["id"], "project:merged");
+        assert_eq!(projects[0]["title"], "Merged");
+        assert_eq!(
+            projects[0]["workspaceRoot"],
+            root.to_string_lossy().as_ref()
         );
         let _ = fs::remove_dir_all(&root);
     }

@@ -788,6 +788,7 @@ name = "atrium-project"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "atrium-engine",
  "atrium-process",
  "jiff 0.2.46",
  "serde",

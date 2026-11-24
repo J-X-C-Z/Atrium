@@ -2462,6 +2462,9 @@ fn dispatch_runtime_request_respond(
     resolved.resolved_at = Some(iso(now));
     resolved.decision = command.decision;
     resolved.feedback = command.feedback.clone();
+    // A user-input answer is part of the request's resolved record, as T3's
+    // `runtimeRequest.updated` payload carries it.
+    resolved.answers = command.answers.clone();
     push_event(
         projection,
         decision,

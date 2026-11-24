@@ -42,8 +42,13 @@ fn main() {
             // The device tools of a spread project go through this computer's
             // node, when Atrium said where it is.
             let proxy = workspace::network::Proxy::from_env();
-            project::mcp::serve_with(
+            // The engine settings arrive in the environment when the app
+            // starts an agent that runs in an engine thread; without them the
+            // server is exactly the project tools it was before.
+            let engine = project::mcp::EngineConfig::from_env();
+            project::mcp::serve_merged(
                 &target,
+                engine.as_ref(),
                 proxy.as_ref().map(|p| p as &dyn project::mcp::Devices),
                 std::io::stdin().lock(),
                 std::io::stdout().lock(),

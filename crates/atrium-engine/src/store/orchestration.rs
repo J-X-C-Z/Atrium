@@ -57,6 +57,22 @@ impl Store for EventStore {
         projection
     }
 
+    fn list_thread_ids(&self, project_id: Option<&str>) -> Vec<ThreadId> {
+        let conn = self.connection();
+        let Ok(mut statement) = conn.prepare(
+            "SELECT thread_id FROM orchestration_v2_projection_threads \
+             WHERE deleted_at IS NULL AND (?1 IS NULL OR project_id = ?1) \
+             ORDER BY updated_at DESC, thread_id",
+        ) else {
+            return Vec::new();
+        };
+        let Ok(rows) = statement.query_map(params![project_id], |row| row.get::<_, String>(0))
+        else {
+            return Vec::new();
+        };
+        rows.filter_map(|row| row.ok()).map(ThreadId::new).collect()
+    }
+
     fn latest_sequence(&self, thread_id: Option<&ThreadId>) -> i64 {
         events::latest_sequence(self.connection(), thread_id.map(ThreadId::as_str)).unwrap_or(0)
     }

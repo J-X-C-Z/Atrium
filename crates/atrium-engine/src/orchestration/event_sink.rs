@@ -106,6 +106,13 @@ pub trait Store {
     /// A consistent snapshot of one thread's projection.
     fn projection(&self, thread_id: &ThreadId) -> Option<Projection>;
 
+    /// Every known thread id, optionally only those of one project, newest
+    /// updated first. The default is empty so a store that does not index
+    /// threads still implements the seam; both bundled stores override it.
+    fn list_thread_ids(&self, _project_id: Option<&str>) -> Vec<ThreadId> {
+        Vec::new()
+    }
+
     /// The latest committed sequence, globally or for one thread.
     fn latest_sequence(&self, thread_id: Option<&ThreadId>) -> i64;
 
@@ -193,6 +200,31 @@ impl Store for MemoryStore {
 
     fn projection(&self, thread_id: &ThreadId) -> Option<Projection> {
         self.projections.get(thread_id).cloned()
+    }
+
+    fn list_thread_ids(&self, project_id: Option<&str>) -> Vec<ThreadId> {
+        let mut ids: Vec<ThreadId> = self
+            .projections
+            .iter()
+            .filter(|(_, projection)| {
+                project_id.is_none_or(|project| projection.thread.project_id.as_str() == project)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.sort_by(|left, right| {
+            let left_updated = self
+                .projections
+                .get(left)
+                .map_or("", |projection| projection.thread.updated_at.as_str());
+            let right_updated = self
+                .projections
+                .get(right)
+                .map_or("", |projection| projection.thread.updated_at.as_str());
+            right_updated
+                .cmp(left_updated)
+                .then_with(|| left.as_str().cmp(right.as_str()))
+        });
+        ids
     }
 
     fn latest_sequence(&self, thread_id: Option<&ThreadId>) -> i64 {
@@ -287,6 +319,50 @@ impl Store for MemoryStore {
         };
         self.receipts.insert(input.command_id, receipt.clone());
         Ok(receipt)
+    }
+}
+
+/// A borrowed store is a store, so a handler can hold `&mut EventStore`
+/// without taking ownership for the duration of one tool call.
+impl<S: Store + ?Sized> Store for &mut S {
+    type Error = S::Error;
+
+    fn projection(&self, thread_id: &ThreadId) -> Option<Projection> {
+        (**self).projection(thread_id)
+    }
+
+    fn list_thread_ids(&self, project_id: Option<&str>) -> Vec<ThreadId> {
+        (**self).list_thread_ids(project_id)
+    }
+
+    fn latest_sequence(&self, thread_id: Option<&ThreadId>) -> i64 {
+        (**self).latest_sequence(thread_id)
+    }
+
+    fn read_by_command_id(&self, command_id: &CommandId) -> Vec<StoredEvent> {
+        (**self).read_by_command_id(command_id)
+    }
+
+    fn command_receipt(&self, command_id: &CommandId) -> Option<CommandReceipt> {
+        (**self).command_receipt(command_id)
+    }
+
+    fn write(&mut self, input: WriteInput) -> Result<Vec<StoredEvent>, Self::Error> {
+        (**self).write(input)
+    }
+
+    fn commit_command(
+        &mut self,
+        input: CommitCommandInput,
+    ) -> Result<CommitCommandOutput, Self::Error> {
+        (**self).commit_command(input)
+    }
+
+    fn commit_rejected_command(
+        &mut self,
+        input: RejectedCommandInput,
+    ) -> Result<CommandReceipt, Self::Error> {
+        (**self).commit_rejected_command(input)
     }
 }
 
