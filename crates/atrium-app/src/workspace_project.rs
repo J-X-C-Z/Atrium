@@ -23,7 +23,7 @@ use gpui::Context;
 use super::notice_dispatch::{
     NoticeDispatch, NoticeSendResult, NoticeTarget, automatic_notice_dispatch_allowed,
 };
-use super::{CODEX, Composed, Notice, View, Workspace};
+use super::{CODEX, Composed, Notice, View, Workspace, canonical_path};
 use crate::i18n::tf;
 use crate::{
     agents,
@@ -280,6 +280,19 @@ impl Workspace {
             async {}
         })
         .detach();
+        // One project, one folder: a project saved through a symlink and
+        // the same project saved by its real path would otherwise be two.
+        let roots: Vec<PathBuf> = self
+            .settings
+            .projects
+            .iter()
+            .map(|root| canonical_path(root))
+            .collect();
+        let mut seen = HashSet::new();
+        self.settings.projects = roots
+            .into_iter()
+            .filter(|root| seen.insert(root.to_path_buf()))
+            .collect();
         let roots = self.settings.projects.clone();
         for root in roots {
             match Project::open(&root) {
@@ -302,7 +315,9 @@ impl Workspace {
                     match project.recover_unbound_tasks() {
                         Ok(parents) => {
                             for parent in parents {
-                                self.project_schedule.pending.insert((root.clone(), parent));
+                                self.project_schedule
+                                    .pending
+                                    .insert((root.to_path_buf(), parent));
                             }
                         }
                         Err(e) => log::warn!("could not recover project claims: {e:#}"),
@@ -320,7 +335,11 @@ impl Workspace {
             }
         }
         self.init_autopilot();
-        if let Some(root) = self.settings.active_project.clone()
+        if let Some(root) = self
+            .settings
+            .active_project
+            .as_ref()
+            .map(|root| canonical_path(root))
             && self.projects.iter().any(|p| p.root == root)
         {
             self.enter_project(root, cx);
@@ -339,7 +358,7 @@ impl Workspace {
     /// changed, and open workstream chats whose agent has come up.
     fn tick_project(&mut self, cx: &mut Context<Self>) {
         self.tick_pr_badges(cx);
-        let roots: Vec<_> = self.projects.iter().map(|p| p.root.clone()).collect();
+        let roots: Vec<_> = self.projects.iter().map(|p| p.root.to_path_buf()).collect();
         for root in roots {
             let wants_scheduler = self
                 .projects
@@ -365,14 +384,14 @@ impl Workspace {
             };
             if let Some(approved) = self.settings.preview_commands.get(&root) {
                 self.previews
-                    .entry(root.clone())
+                    .entry(root.to_path_buf())
                     .or_default()
                     .tick(project, approved, cx);
             }
             let seen = self
                 .project_schedule
                 .seen
-                .entry(root.clone())
+                .entry(root.to_path_buf())
                 .or_insert_with(|| {
                     project
                         .controller()
@@ -387,18 +406,20 @@ impl Workspace {
             {
                 self.project_schedule
                     .pending
-                    .insert((root.clone(), controller.id.clone()));
+                    .insert((root.to_path_buf(), controller.id.clone()));
             }
             *seen = project.notices.len();
             for parent in project.pending_report_parents() {
-                self.project_schedule.pending.insert((root.clone(), parent));
+                self.project_schedule
+                    .pending
+                    .insert((root.to_path_buf(), parent));
             }
             for task in &project.tasks {
                 if project.stream(&task.owner).is_none()
                     && self
                         .project_schedule
                         .orphan_logged
-                        .insert((root.clone(), task.key()))
+                        .insert((root.to_path_buf(), task.key()))
                 {
                     log::warn!("ignoring orphan task {} in {}", task.key(), root.display());
                 }
@@ -453,7 +474,7 @@ impl Workspace {
                     }
                     self.project_schedule
                         .pending
-                        .insert((root.clone(), task.owner.clone()));
+                        .insert((root.to_path_buf(), task.owner.clone()));
                     cx.notify();
                     continue;
                 }
@@ -475,7 +496,7 @@ impl Workspace {
                 if placed.instead_of.is_some() {
                     self.team
                         .stand_ins
-                        .insert((root.clone(), stream_id), placed.member.clone());
+                        .insert((root.to_path_buf(), stream_id), placed.member.clone());
                 }
                 if let Some(text) = Self::stand_in_notice(&task.id, &placed) {
                     if let Some(project) = self.project_mut(&root)
@@ -517,12 +538,12 @@ impl Workspace {
                 {
                     if let Some(client) = self.codex_for(&stream.backend) {
                         // The persistent reported flag is written only after cleanup succeeds.
-                        let root = root.clone();
+                        let root = root.to_path_buf();
                         let stream_id = stream.id.clone();
                         if !self
                             .project_schedule
                             .cleaning
-                            .insert((root.clone(), stream_id.clone()))
+                            .insert((root.to_path_buf(), stream_id.clone()))
                         {
                             continue;
                         }
@@ -540,7 +561,7 @@ impl Workspace {
                                     let _ = this.update(cx, |ws, cx| {
                                         ws.project_schedule
                                             .cleaning
-                                            .remove(&(root.clone(), stream_id.clone()));
+                                            .remove(&(root.to_path_buf(), stream_id.clone()));
                                         if let Some(goal) = goal {
                                             ws.goals.insert(thread, goal);
                                         } else {
@@ -554,7 +575,7 @@ impl Workspace {
                                     let _ = this.update(cx, |ws, _| {
                                         ws.project_schedule
                                             .cleaning
-                                            .remove(&(root.clone(), stream_id.clone()));
+                                            .remove(&(root.to_path_buf(), stream_id.clone()));
                                     });
                                 }
                             }
@@ -565,7 +586,9 @@ impl Workspace {
                 }
                 let _ = task;
                 self.report_task(&root, &stream.id, cx);
-                self.project_schedule.pending.insert((root.clone(), parent));
+                self.project_schedule
+                    .pending
+                    .insert((root.to_path_buf(), parent));
             }
             self.tick_autopilot(&root, cx);
             if changed {
@@ -575,7 +598,7 @@ impl Workspace {
         self.update_sleep_request();
         let pending: Vec<_> = self.project_schedule.pending.iter().cloned().collect();
         for (root, stream) in pending {
-            let key = (root.clone(), stream.clone());
+            let key = (root.to_path_buf(), stream.clone());
             if let Some(p) = self
                 .projects
                 .iter()
@@ -636,11 +659,13 @@ impl Workspace {
                     .is_some_and(|d| self.device(d).is_some()))
     }
 
-    fn report_task(&mut self, root: &PathBuf, stream: &str, cx: &mut Context<Self>) {
+    fn report_task(&mut self, root: &Path, stream: &str, cx: &mut Context<Self>) {
         if let Some(project) = self.project_mut(root) {
             match project.report_finished(stream) {
                 Ok(Some(parent)) => {
-                    self.project_schedule.pending.insert((root.clone(), parent));
+                    self.project_schedule
+                        .pending
+                        .insert((root.to_path_buf(), parent));
                     cx.notify();
                 }
                 Ok(None) => {}
@@ -651,7 +676,7 @@ impl Workspace {
 
     pub fn project_root(&self) -> Option<PathBuf> {
         match &self.room {
-            Room::Project { root, .. } => Some(root.clone()),
+            Room::Project { root, .. } => Some(root.to_path_buf()),
             Room::Chats | Room::Workflows { .. } => None,
         }
     }
@@ -661,8 +686,8 @@ impl Workspace {
         self.projects.iter().find(|p| p.root == root)
     }
 
-    fn project_mut(&mut self, root: &PathBuf) -> Option<&mut Project> {
-        self.projects.iter_mut().find(|p| p.root == *root)
+    fn project_mut(&mut self, root: &Path) -> Option<&mut Project> {
+        self.projects.iter_mut().find(|p| p.root.as_path() == root)
     }
 
     /// The `atrium` MCP server for workstream `stream` of the project in
@@ -783,11 +808,12 @@ impl Workspace {
 
     /// Adds the project in `root` (making its atrium the first time) and enters it.
     pub fn add_project(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        let root = canonical_path(&root);
         if !self.projects.iter().any(|p| p.root == root) {
             match Project::open(&root) {
                 Ok(project) => {
                     self.projects.push(project);
-                    self.settings.projects.push(root.clone());
+                    self.settings.projects.push(root.to_path_buf());
                     self.settings.save();
                 }
                 Err(error) => {
@@ -804,6 +830,7 @@ impl Workspace {
 
     /// Forgets a project here. Its folder and atrium stay as they are.
     pub fn remove_project(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        let root = canonical_path(&root);
         self.previews.remove(&root);
         self.settings.preview_commands.remove(&root);
         self.clear_autopilot(&root);
@@ -819,12 +846,13 @@ impl Workspace {
 
     /// Shows a project's overview.
     pub fn enter_project(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        let root = canonical_path(&root);
         self.nav += 1;
         self.room = Room::Project {
-            root: root.clone(),
+            root: root.to_path_buf(),
             stream: None,
         };
-        self.settings.active_project = Some(root.clone());
+        self.settings.active_project = Some(root.to_path_buf());
         self.settings.save();
         if let Some(project) = self.project_mut(&root) {
             project.stamp = None;
@@ -864,8 +892,8 @@ impl Workspace {
 
     /// Opens the transcripts of a project's workstreams in the background,
     /// for those whose agent is up.
-    fn load_streams(&mut self, root: &PathBuf, cx: &mut Context<Self>) {
-        let Some(project) = self.projects.iter().find(|p| p.root == *root) else {
+    fn load_streams(&mut self, root: &Path, cx: &mut Context<Self>) {
+        let Some(project) = self.projects.iter().find(|p| p.root.as_path() == root) else {
             return;
         };
         let threads: Vec<_> = project
@@ -877,7 +905,7 @@ impl Workspace {
                     .project_schedule
                     .task_pool
                     .starting
-                    .contains(&(root.clone(), s.id.clone()))
+                    .contains(&(root.to_path_buf(), s.id.clone()))
             })
             .filter_map(|s| Some((s.thread_id.clone()?, s.backend.clone(), s.id.clone())))
             .collect();
@@ -1116,7 +1144,7 @@ impl Workspace {
             self.project_schedule
                 .task_pool
                 .starting
-                .insert((root.clone(), id.clone()));
+                .insert((root.to_path_buf(), id.clone()));
         }
         cx.notify();
         // On another computer: the project at the same place in its Atrium
@@ -1129,13 +1157,20 @@ impl Workspace {
                 self.stream_failed(&root, &id, error, cx);
                 return;
             };
-            self.launch_stream(root.clone(), stream, title, kickoff, PathBuf::from(cwd), cx);
+            self.launch_stream(
+                root.to_path_buf(),
+                stream,
+                title,
+                kickoff,
+                PathBuf::from(cwd),
+                cx,
+            );
             return;
         }
         if isolated {
             self.prepare_stream_checkout(root, stream, title, kickoff, cx);
         } else {
-            self.launch_stream(root.clone(), stream, title, kickoff, root, cx);
+            self.launch_stream(root.to_path_buf(), stream, title, kickoff, root, cx);
         }
     }
 
@@ -1241,7 +1276,7 @@ impl Workspace {
                     ws.project_schedule
                         .task_pool
                         .starting
-                        .remove(&(root.clone(), id.clone()));
+                        .remove(&(root.to_path_buf(), id.clone()));
                     ws.upsert_thread(ThreadMeta {
                         name: Some(title.clone()),
                         backend: backend.clone(),
@@ -1289,7 +1324,7 @@ impl Workspace {
                     ws.project_schedule
                         .task_pool
                         .starting
-                        .remove(&(root.clone(), id.clone()));
+                        .remove(&(root.to_path_buf(), id.clone()));
                     ws.upsert_thread(ThreadMeta {
                         id: thread.clone(),
                         backend: backend.clone(),
@@ -1317,7 +1352,7 @@ impl Workspace {
         }
     }
 
-    fn attach_thread(&mut self, root: &PathBuf, stream: &str, thread: &str) -> anyhow::Result<()> {
+    fn attach_thread(&mut self, root: &Path, stream: &str, thread: &str) -> anyhow::Result<()> {
         self.project_mut(root)
             .ok_or_else(|| anyhow::anyhow!("project was removed before startup completed"))?
             .bind_thread(stream, thread)
@@ -1325,7 +1360,7 @@ impl Workspace {
 
     fn stream_failed(
         &mut self,
-        root: &PathBuf,
+        root: &Path,
         stream: &str,
         error: anyhow::Error,
         cx: &mut Context<Self>,
@@ -1333,11 +1368,11 @@ impl Workspace {
         self.project_schedule
             .task_pool
             .starting
-            .remove(&(root.clone(), stream.to_owned()));
+            .remove(&(root.to_path_buf(), stream.to_owned()));
         if let Some(parent) = self
             .projects
             .iter()
-            .find(|p| p.root == *root)
+            .find(|p| p.root.as_path() == root)
             .and_then(|p| p.stream(stream))
             .filter(|s| pool::is_pool_worker(s))
             .and_then(|s| s.parent.clone())
@@ -1345,7 +1380,7 @@ impl Workspace {
             self.project_schedule
                 .task_pool
                 .last_start_failure
-                .insert((root.clone(), parent), Instant::now());
+                .insert((root.to_path_buf(), parent), Instant::now());
         }
         let mut wake_parent = None;
         if let Some(project) = self.project_mut(root) {
@@ -1357,7 +1392,9 @@ impl Workspace {
             }
         }
         if let Some(parent) = wake_parent {
-            self.project_schedule.pending.insert((root.clone(), parent));
+            self.project_schedule
+                .pending
+                .insert((root.to_path_buf(), parent));
         }
         cx.emit(Notice::Error(tf(
             "Could not start the workstream: {error}",
@@ -1408,7 +1445,7 @@ impl Workspace {
     ) -> Result<(Composed, Option<NoticeDispatch>), NoticeSendResult> {
         let Some((root, stream)) = self
             .stream_of(thread)
-            .map(|(p, s)| (p.root.clone(), s.id.clone()))
+            .map(|(p, s)| (p.root.to_path_buf(), s.id.clone()))
         else {
             return if target.is_some() {
                 Err(NoticeSendResult::NoDispatch)
@@ -1480,7 +1517,7 @@ impl Workspace {
     /// Requires an explicit user choice. Never replays the original manual text.
     pub fn resolve_stream_notice_delivery(
         &mut self,
-        root: &PathBuf,
+        root: &Path,
         stream: &str,
         retry_notices: bool,
         cx: &mut Context<Self>,
@@ -1497,7 +1534,7 @@ impl Workspace {
         if changed {
             self.project_schedule
                 .pending
-                .insert((root.clone(), stream.to_owned()));
+                .insert((root.to_path_buf(), stream.to_owned()));
             cx.notify();
         }
         Ok(changed)
@@ -1510,8 +1547,8 @@ impl Workspace {
         }
     }
 
-    fn deliver_notices_at(&mut self, root: &PathBuf, stream: &str, cx: &mut Context<Self>) -> bool {
-        let Some(project) = self.projects.iter().find(|p| p.root == *root) else {
+    fn deliver_notices_at(&mut self, root: &Path, stream: &str, cx: &mut Context<Self>) -> bool {
+        let Some(project) = self.projects.iter().find(|p| p.root.as_path() == root) else {
             return true;
         };
         if !automatic_notice_dispatch_allowed(project, stream) {
@@ -1542,7 +1579,7 @@ impl Workspace {
             return false;
         }
         let target = NoticeTarget {
-            root: root.clone(),
+            root: root.to_path_buf(),
             stream: stream.to_owned(),
             thread: thread.clone(),
         };
@@ -1550,7 +1587,7 @@ impl Workspace {
         // dropping their pending wake or spamming an error every two seconds.
         self.project_schedule
             .last_wake
-            .insert((root.clone(), stream.to_owned()), Instant::now());
+            .insert((root.to_path_buf(), stream.to_owned()), Instant::now());
         let state = BackgroundDispatch::enter(&mut self.view, &mut self.editing, thread);
         let result = self.send_for_notice(
             Composed::text("Take these into account and carry on toward your goal.".into()),
@@ -1715,7 +1752,7 @@ impl Workspace {
         };
         let Some((root, stream)) = self
             .stream_of(thread)
-            .map(|(p, s)| (p.root.clone(), s.id.clone()))
+            .map(|(p, s)| (p.root.to_path_buf(), s.id.clone()))
         else {
             return;
         };
@@ -1875,8 +1912,8 @@ impl Workspace {
         }
     }
 
-    fn stream_views_for(&self, root: &PathBuf) -> Vec<StreamView> {
-        let Some(project) = self.projects.iter().find(|p| p.root == *root) else {
+    fn stream_views_for(&self, root: &Path) -> Vec<StreamView> {
+        let Some(project) = self.projects.iter().find(|p| p.root.as_path() == root) else {
             return Vec::new();
         };
         let now = std::time::Instant::now();
@@ -1932,7 +1969,7 @@ impl Workspace {
                     stand_in: self
                         .team
                         .stand_ins
-                        .get(&(root.clone(), stream.id.clone()))
+                        .get(&(root.to_path_buf(), stream.id.clone()))
                         .cloned(),
                     stream: stream.clone(),
                     state,

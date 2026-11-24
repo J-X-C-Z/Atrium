@@ -12,6 +12,18 @@ name: Native node package acceptance
       - 'scripts/node-portable-load.py'
       - 'scripts/test_node_portable_load.py'
       - '.github/workflows/node-package.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/atrium-node/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'scripts/node-package.py'
+      - 'scripts/node-package-windows.ps1'
+      - 'scripts/test_node_package.py'
+      - 'scripts/node-portable-load.py'
+      - 'scripts/test_node_portable_load.py'
+      - '.github/workflows/node-package.yml'
   workflow_dispatch:
     inputs:
       paced-baseline:
