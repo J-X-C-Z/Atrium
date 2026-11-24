@@ -21,7 +21,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use gpui::Context;
 use tokio::sync::{mpsc, oneshot};
 
-use super::{Composed, Notice, View, Workspace};
+use super::{Composed, Notice, View, Workspace, canonical_path};
 
 pub struct SyncRuntime {
     pub state: Arc<SyncState>,
@@ -1118,18 +1118,21 @@ impl Workspace {
     /// The lease is renewed every thirty seconds. Another device's live
     /// lease stops scheduling here; once it has been expired past the grace
     /// window this device takes over and says so.
-    pub(super) fn sync_scheduler_allowed(&mut self, root: &PathBuf) -> bool {
+    pub(super) fn sync_scheduler_allowed(&mut self, root: &Path) -> bool {
         let Some(sync) = &mut self.sync else {
             return true;
         };
+        // One key per project, whether the folder was reached through a
+        // symlink or by its real path.
+        let project_path = canonical_path(root);
         let id = sync
             .project_ids
-            .entry(root.clone())
+            .entry(project_path.clone())
             .or_insert_with(|| {
                 atrium_project::repo::identity(root).unwrap_or_else(|| {
                     use std::hash::{Hash, Hasher};
                     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                    root.hash(&mut hasher);
+                    project_path.hash(&mut hasher);
                     format!("{:016x}", hasher.finish())
                 })
             })
@@ -2355,6 +2358,23 @@ fn write_session_file(home: &Path, relative: &str, bytes: &[u8]) -> Result<(), S
     let temp = target.with_extension("part");
     std::fs::write(&temp, bytes).map_err(|error| error.to_string())?;
     std::fs::rename(temp, target).map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::canonical_path;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_project_reached_through_a_symlink_has_one_sync_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("project");
+        std::fs::create_dir_all(&real).unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        assert_eq!(canonical_path(&alias), canonical_path(&real));
+        assert_eq!(canonical_path(&alias), real.canonicalize().unwrap());
+    }
 }
 
 #[cfg(all(test, unix, feature = "workspace-ticker-test"))]
