@@ -4,6 +4,7 @@
 
 pub mod claude_usage;
 pub mod node;
+pub mod presence;
 pub mod process;
 pub mod rpc;
 

@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+atrium-engine.workspace = true
 atrium-process.workspace = true
 atrium-sync.workspace = true
 agent-rpc.workspace = true
@@ -16,6 +17,8 @@ serde.workspace = true
 serde_json.workspace = true
 futures.workspace = true
 dirs.workspace = true
+jiff.workspace = true
+rusqlite.workspace = true
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws"] }
 toml = "0.8"

@@ -1,11 +1,14 @@
 use crate::{
     auth::Auth,
     config::{Config, find_binary},
+    engine::{EngineError, ThreadEngine},
     fs::{FsError, Roots},
     procs::{InputCapacity, InputReplaced, MAX_LINE_BYTES, Process, ProcessManager},
     sync::{HostError, SyncState},
 };
 use anyhow::Result;
+use atrium_engine::contracts::AppThread;
+use atrium_engine::store::{ThreadStreamBatch, ThreadStreamItem};
 use atrium_sync::{AnswerInput, ApprovalAnswer, Op, ThreadEvent, TurnInput, Vector};
 use axum::{
     Json, Router,
@@ -28,6 +31,8 @@ pub struct State {
     pub path: String,
     pub roots: Arc<Roots>,
     pub procs: ProcessManager,
+    /// The log for threads this device runs.
+    pub engine: Arc<ThreadEngine>,
     info: RwLock<Value>,
     instance_id: String,
     ws_slots: Arc<Semaphore>,
@@ -50,6 +55,10 @@ impl State {
         sync: Option<Arc<SyncState>>,
     ) -> Result<Arc<Self>> {
         let roots = Arc::new(Roots::new(config.roots.clone())?);
+        let engine = match config.engine_db.clone() {
+            Some(path) => ThreadEngine::open(path)?,
+            None => ThreadEngine::in_memory()?,
+        };
         let s = Arc::new(Self {
             procs: ProcessManager::with_total_output_bytes(
                 config.keep_output_lines,
@@ -65,6 +74,7 @@ impl State {
             config,
             path,
             roots,
+            engine: Arc::new(engine),
             info: RwLock::new(Value::Null),
             instance_id: uuid::Uuid::new_v4().to_string(),
             sync,
@@ -168,6 +178,9 @@ pub fn router(s: Arc<State>) -> Router {
         .route("/v1/procs", get(list).post(spawn))
         .route("/v1/procs/{id}", delete(stop))
         .route("/v1/procs/{id}/attach", get(attach))
+        .route("/v1/threads", get(threads_list).post(thread_create))
+        .route("/v1/threads/{id}/attach", get(thread_attach))
+        .route("/v1/threads/{id}/send", post(thread_send))
         .route("/v1/mcp", post(mcp).get(mcp_stream))
         .route("/v1/fs/list", get(fs_list))
         .route("/v1/fs/stat", get(fs_stat))
@@ -746,14 +759,9 @@ async fn stop(
         .map_err(|_| ApiError(StatusCode::NOT_FOUND, "not_found", "unknown process".into()))?;
     Ok(StatusCode::NO_CONTENT)
 }
-async fn attach(
-    AxState(s): AxState<Arc<State>>,
-    Path(id): Path<String>,
-    Query(q): Query<HashMap<String, String>>,
-    headers: HeaderMap,
-    ws: WebSocketUpgrade,
-) -> Result<Response, ApiError> {
-    // Authentication middleware runs first. This is lifecycle identity, not auth.
+/// Lifecycle identity, not authentication: a client pins the node runtime it
+/// first reached and must not send work to a different one by accident.
+fn check_instance(s: &State, headers: &HeaderMap) -> Result<(), ApiError> {
     if let Some(expected) = headers.get("x-atrium-instance-id") {
         let expected = expected
             .to_str()
@@ -774,6 +782,17 @@ async fn attach(
             ));
         }
     }
+    Ok(())
+}
+
+async fn attach(
+    AxState(s): AxState<Arc<State>>,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    check_instance(&s, &headers)?;
     let p =
         s.procs.get(&id).await.ok_or_else(|| {
             ApiError(StatusCode::NOT_FOUND, "not_found", "unknown process".into())
@@ -904,6 +923,242 @@ async fn socket_loop(
     p.detach(generation).await;
     let _ = tokio::time::timeout(Duration::from_secs(2), socket.close()).await;
 }
+fn now_iso() -> String {
+    jiff::Timestamp::now().to_string()
+}
+
+fn engine_error(error: EngineError) -> ApiError {
+    match error {
+        EngineError::ThreadExists(_) => {
+            ApiError(StatusCode::CONFLICT, "bad_request", error.to_string())
+        }
+        EngineError::Store(atrium_engine::store::StoreError::ThreadNotProjected(_)) => {
+            ApiError(StatusCode::NOT_FOUND, "not_found", error.to_string())
+        }
+        other => ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "bad_request",
+            other.to_string(),
+        ),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateThreadRequest {
+    #[serde(default)]
+    command_id: Option<String>,
+    thread: AppThread,
+}
+
+async fn thread_create(
+    AxState(s): AxState<Arc<State>>,
+    Json(request): Json<CreateThreadRequest>,
+) -> Result<(StatusCode, Json<crate::engine::CreatedThread>), ApiError> {
+    let command_id = request
+        .command_id
+        .unwrap_or_else(|| format!("command:{}", uuid::Uuid::new_v4()));
+    let created = s
+        .engine
+        .create_thread(&command_id, request.thread, &now_iso())
+        .map_err(engine_error)?;
+    Ok((StatusCode::CREATED, Json(created)))
+}
+
+async fn threads_list(AxState(s): AxState<Arc<State>>) -> Result<Json<Value>, ApiError> {
+    let threads = s.engine.list_threads().map_err(engine_error)?;
+    Ok(Json(json!({ "threads": threads })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SendMessageRequest {
+    #[serde(default)]
+    command_id: Option<String>,
+    #[serde(default)]
+    message_id: Option<String>,
+    text: String,
+}
+
+async fn thread_send(
+    AxState(s): AxState<Arc<State>>,
+    Path(id): Path<String>,
+    Json(request): Json<SendMessageRequest>,
+) -> Result<(StatusCode, Json<crate::engine::SentMessage>), ApiError> {
+    if request.text.len() > MAX_LINE_BYTES {
+        return Err(ApiError(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "bad_request",
+            "message is too large".into(),
+        ));
+    }
+    let command_id = request
+        .command_id
+        .unwrap_or_else(|| format!("command:{}", uuid::Uuid::new_v4()));
+    let message_id = request
+        .message_id
+        .unwrap_or_else(|| format!("message:{}", uuid::Uuid::new_v4()));
+    let sent = s
+        .engine
+        .send_message(&command_id, &id, &message_id, &request.text, &now_iso())
+        .map_err(engine_error)?;
+    Ok((StatusCode::ACCEPTED, Json(sent)))
+}
+
+async fn thread_attach(
+    AxState(s): AxState<Arc<State>>,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    check_instance(&s, &headers)?;
+    let after = q
+        .get("after")
+        .map(|value| value.parse::<i64>())
+        .transpose()
+        .map_err(|_| {
+            ApiError(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                "invalid after".into(),
+            )
+        })?;
+    if after.is_some_and(|after| after < 0) {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "invalid after".into(),
+        ));
+    }
+    if !s.engine.exists(&id).map_err(engine_error)? {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "unknown thread".into(),
+        ));
+    }
+    let slot = s.ws_slots.clone().try_acquire_owned().map_err(|_| {
+        ApiError(
+            StatusCode::TOO_MANY_REQUESTS,
+            "capacity_exhausted",
+            "node WebSocket capacity exhausted".into(),
+        )
+    })?;
+    let engine = s.engine.clone();
+    let mut response =
+        ws.on_upgrade(move |socket| thread_socket_loop(engine, id, after, socket, slot));
+    response.headers_mut().insert(
+        "x-atrium-instance-id",
+        HeaderValue::from_str(&s.instance_id).expect("UUID header"),
+    );
+    Ok(response)
+}
+
+/// Replay from the client's sequence, or one snapshot when the log cannot
+/// cover the gap, then the live tail. Notices only say "read again": the log
+/// is the source, so a missed or coalesced notice costs nothing.
+async fn thread_socket_loop(
+    engine: Arc<ThreadEngine>,
+    thread_id: String,
+    after: Option<i64>,
+    mut socket: WebSocket,
+    _slot: OwnedSemaphorePermit,
+) {
+    // Subscribe before the first read so an append in between still wakes us.
+    let mut notices = engine.subscribe();
+    let mut last = after.unwrap_or(0);
+    let mut initial = true;
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
+    heartbeat.tick().await;
+    let mut missed = 0;
+    loop {
+        if initial {
+            initial = false;
+            match engine.resume(&thread_id, after) {
+                Ok(resume) => {
+                    last = match &resume.batch {
+                        ThreadStreamBatch::Replay {
+                            through_sequence, ..
+                        } => *through_sequence,
+                        ThreadStreamBatch::Snapshot { snapshot } => {
+                            i64::from(snapshot.snapshot_sequence)
+                        }
+                    };
+                    if !send_thread_items(&mut socket, resume.batch.as_items()).await
+                        || !send(&mut socket, json!({"kind": "synchronized"})).await
+                    {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    log::warn!("thread {thread_id} cannot be attached: {error}");
+                    break;
+                }
+            }
+        }
+        tokio::select! {
+            notice = notices.recv() => {
+                match notice {
+                    Ok(changed) if changed != thread_id => {}
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        match engine.resume(&thread_id, Some(last)) {
+                            Ok(resume) => {
+                                last = match &resume.batch {
+                                    ThreadStreamBatch::Replay { through_sequence, .. } => *through_sequence,
+                                    ThreadStreamBatch::Snapshot { snapshot } => i64::from(snapshot.snapshot_sequence),
+                                };
+                                if !send_thread_items(&mut socket, resume.batch.as_items()).await {
+                                    break;
+                                }
+                            }
+                            Err(error) => {
+                                log::warn!("thread {thread_id} can no longer be read: {error}");
+                                break;
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            _ = heartbeat.tick() => {
+                if missed >= 2 {
+                    break;
+                }
+                missed += 1;
+                if !send_message(&mut socket, Message::Ping(Bytes::new())).await {
+                    break;
+                }
+            }
+            message = socket.recv() => {
+                match message {
+                    Some(Ok(Message::Pong(_))) => missed = 0,
+                    Some(Ok(Message::Ping(payload))) => {
+                        if !send_message(&mut socket, Message::Pong(payload)).await {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                    _ => {}
+                }
+            }
+        }
+    }
+    let _ = tokio::time::timeout(Duration::from_secs(2), socket.close()).await;
+}
+
+async fn send_thread_items(socket: &mut WebSocket, items: Vec<ThreadStreamItem>) -> bool {
+    for item in items {
+        let Ok(value) = serde_json::to_value(item) else {
+            return false;
+        };
+        if !send(socket, value).await {
+            return false;
+        }
+    }
+    true
+}
+
 #[derive(Deserialize)]
 struct FsQuery {
     path: String,

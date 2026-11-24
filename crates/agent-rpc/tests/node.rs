@@ -198,6 +198,133 @@ fn files_inside_the_roots_only() {
     ));
 }
 
+fn app_thread(id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "createdBy": "user",
+        "creationSource": "web",
+        "id": id,
+        "projectId": "project-1",
+        "title": "Thread",
+        "providerInstanceId": "codex",
+        "modelSelection": { "instanceId": "codex", "model": "gpt-5" },
+        "runtimeMode": "full-access",
+        "interactionMode": "default",
+        "branch": null,
+        "worktreePath": null,
+        "activeProviderThreadId": null,
+        "lineage": {
+            "parentThreadId": null,
+            "relationshipToParent": null,
+            "rootThreadId": id,
+        },
+        "forkedFrom": null,
+        "createdAt": "2026-11-24T00:00:00.000Z",
+        "updatedAt": "2026-11-24T00:00:00.000Z",
+        "archivedAt": null,
+        "settledOverride": null,
+        "settledAt": null,
+        "deletedAt": null,
+    })
+}
+
+fn next_item(
+    stream: &agent_rpc::node::ThreadStream,
+    want: impl Fn(&serde_json::Value) -> bool,
+) -> serde_json::Value {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if let Some(item) = stream.recv_timeout(Duration::from_millis(100))
+            && want(&item)
+        {
+            return item;
+        }
+    }
+    panic!("no expected thread item");
+}
+
+#[test]
+fn two_clients_follow_one_thread_and_a_second_device_writes_through_the_owner() {
+    let node = mock_node("threads");
+    let client = NodeClient::new(&node.address, None);
+    let thread_id = "thread-1";
+    assert_eq!(
+        client
+            .create_thread(&app_thread(thread_id), "command:create")
+            .unwrap(),
+        1
+    );
+
+    let first = client.attach_thread(thread_id, None);
+    let snapshot = next_item(&first, |item| item["kind"] == "snapshot");
+    assert_eq!(snapshot["snapshotSequence"], 1);
+    assert_eq!(snapshot["projection"]["thread"]["id"], thread_id);
+    next_item(&first, |item| item["kind"] == "synchronized");
+
+    // A second client asking from the start also gets the snapshot: replaying
+    // a retained `thread.created` is replaced by the current projection.
+    let second = client.attach_thread(thread_id, Some(0));
+    let snapshot = next_item(&second, |item| item["kind"] == "snapshot");
+    assert_eq!(snapshot["snapshotSequence"], 1);
+    next_item(&second, |item| item["kind"] == "synchronized");
+
+    // A different device sends through the owning node.
+    let other = NodeClient::new(&node.address, None);
+    assert_eq!(
+        other
+            .send_message(thread_id, "message-1", "hello from the laptop")
+            .unwrap(),
+        2
+    );
+    for stream in [&first, &second] {
+        let message = next_item(stream, |item| {
+            item["kind"] == "event" && item["sequence"] == 2
+        });
+        assert_eq!(message["event"]["type"], "message.updated");
+        assert_eq!(message["event"]["payload"]["text"], "hello from the laptop");
+    }
+
+    let listed = client.threads().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, thread_id);
+    assert_eq!(listed[0].high_water, 2);
+}
+
+#[test]
+fn a_thread_replays_from_the_cursor_and_a_pruned_gap_becomes_a_snapshot() {
+    let node = mock_node("thread-gap");
+    let client = NodeClient::new(&node.address, None);
+    let thread_id = "thread-2";
+    client
+        .create_thread(&app_thread(thread_id), "command:create")
+        .unwrap();
+    client.send_message(thread_id, "message-1", "one").unwrap();
+    client.send_message(thread_id, "message-2", "two").unwrap();
+
+    let replay = client.attach_thread(thread_id, Some(1));
+    let two = next_item(&replay, |item| item["kind"] == "event");
+    assert_eq!(two["sequence"], 2);
+    let three = next_item(&replay, |item| item["kind"] == "event");
+    assert_eq!(three["sequence"], 3);
+
+    ureq::post(&format!(
+        "http://{}/_mock/threads/{thread_id}/prune?through=2",
+        node.address
+    ))
+    .call()
+    .unwrap();
+
+    let gap = client.attach_thread(thread_id, Some(1));
+    let snapshot = next_item(&gap, |item| item["kind"] == "snapshot");
+    assert_eq!(snapshot["snapshotSequence"], 3);
+    let messages = snapshot["projection"]["messages"].as_array().unwrap();
+    assert_eq!(
+        messages.len(),
+        1,
+        "the pruned message is gone; the snapshot carries what was kept"
+    );
+    assert_eq!(messages[0]["text"], "two");
+}
+
 /// The acceptance check for a real node:
 /// `ATRIUM_TEST_NODE=http://127.0.0.1:7381 cargo test -p agent-rpc --test node -- --ignored`
 #[test]

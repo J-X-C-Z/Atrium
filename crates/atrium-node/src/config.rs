@@ -29,6 +29,9 @@ pub struct Config {
     pub max_ws_connections: usize,
     pub max_ws_connections_per_process: usize,
     pub detached_timeout_secs: u64,
+    /// Where hosted thread logs live. `None` uses
+    /// [`default_engine_db`]; tests use an in-memory engine.
+    pub engine_db: Option<PathBuf>,
     pub agents: BTreeMap<String, Agent>,
     #[serde(skip)]
     pub auto_claude: bool,
@@ -51,10 +54,19 @@ impl Default for Config {
             max_ws_connections: 256,
             max_ws_connections_per_process: 2,
             detached_timeout_secs: 86400,
+            engine_db: None,
             agents: BTreeMap::new(),
             auto_claude: true,
         }
     }
+}
+/// The default location of the hosted thread log. A running node keeps its
+/// threads across restarts; an embedded node uses the same file.
+pub fn default_engine_db() -> PathBuf {
+    dirs::data_local_dir()
+        .or_else(dirs::data_dir)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("atrium-node/threads.sqlite")
 }
 pub fn path() -> PathBuf {
     #[cfg(windows)]

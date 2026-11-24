@@ -454,6 +454,59 @@ impl NodeClient {
         )
     }
 
+    /// Every thread this node owns.
+    pub fn threads(&self) -> Result<Vec<ThreadSummary>> {
+        let value: Value = self.json(self.request("GET", "/v1/threads").call())?;
+        serde_json::from_value(value["threads"].clone())
+            .map_err(|error| NodeError::Unreachable(format!("unexpected thread list: {error}")))
+    }
+
+    /// Create a thread on the node that will run it. `thread` is T3's
+    /// `AppThread` JSON; the node records `thread.created` and returns the
+    /// first sequence.
+    pub fn create_thread(&self, thread: &Value, command_id: &str) -> Result<i64> {
+        let value: Value = self.json(self.request("POST", "/v1/threads").send_json(json!({
+            "commandId": command_id,
+            "thread": thread,
+        })))?;
+        value["sequence"]
+            .as_i64()
+            .ok_or_else(|| NodeError::Unreachable("the node did not return a sequence".into()))
+    }
+
+    /// Send a user message to the thread's owning node, which is the only
+    /// writer. Every attachment sees the message once the node appends it.
+    pub fn send_message(&self, thread_id: &str, message_id: &str, text: &str) -> Result<i64> {
+        let value: Value = self.json(
+            self.request("POST", &format!("/v1/threads/{thread_id}/send"))
+                .send_json(json!({ "messageId": message_id, "text": text })),
+        )?;
+        value["sequence"]
+            .as_i64()
+            .ok_or_else(|| NodeError::Unreachable("the node did not return a sequence".into()))
+    }
+
+    /// Attach to a thread's event stream. `None` starts from a snapshot;
+    /// `Some(seq)` replays from the client's last sequence, or sends one
+    /// snapshot when the node's log cannot cover the gap. The stream
+    /// reconnects from its last sequence by itself.
+    pub fn attach_thread(&self, thread_id: &str, after: Option<i64>) -> ThreadStream {
+        let (sender, items) = mpsc::channel();
+        let state = Arc::new(Mutex::new(LinkState::Connecting));
+        let link = ThreadLink {
+            ws_base: self.base.replacen("http", "ws", 1),
+            id: thread_id.to_string(),
+            token: self.token.clone(),
+            after,
+            state: state.clone(),
+            sender,
+        };
+        let _ = thread::Builder::new()
+            .name(format!("thread-{thread_id}"))
+            .spawn(move || link.run());
+        ThreadStream { items, state }
+    }
+
     fn attach_with_limits(
         &self,
         id: &str,
@@ -522,6 +575,20 @@ fn answer(result: std::result::Result<ureq::Response, ureq::Error>) -> Result<ur
         }
         Err(error) => Err(NodeError::Unreachable(error.to_string())),
     }
+}
+
+/// One thread in a node's list.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadSummary {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub updated_at: String,
+    #[serde(default)]
+    pub archived_at: Option<String>,
+    /// The last sequence present on the owning node.
+    pub high_water: i64,
 }
 
 /// A process on a node, stopped when the last holder lets go of it (Atrium
@@ -696,6 +763,156 @@ impl Write for LineWriter {
             Err(self.refused())
         } else {
             Ok(())
+        }
+    }
+}
+
+/// A thread's stream items, as T3 sends them: `synchronized`, `event` and
+/// `snapshot` objects (see `docs/node-protocol.md`).
+pub struct ThreadStream {
+    items: Receiver<Value>,
+    pub state: Arc<Mutex<LinkState>>,
+}
+
+impl ThreadStream {
+    /// The next item, blocking until the node sends one or the stream ends.
+    pub fn recv(&self) -> Option<Value> {
+        self.items.recv().ok()
+    }
+
+    /// The next item within `timeout`; `None` on timeout or end.
+    pub fn recv_timeout(&self, timeout: Duration) -> Option<Value> {
+        self.items.recv_timeout(timeout).ok()
+    }
+}
+
+/// The sequence an item carries: an event's own sequence, or a snapshot's
+/// `snapshotSequence`. `synchronized` has none.
+pub fn thread_item_sequence(item: &Value) -> Option<i64> {
+    item.get("sequence")
+        .and_then(Value::as_i64)
+        .or_else(|| item.get("snapshotSequence").and_then(Value::as_i64))
+}
+
+struct ThreadLink {
+    ws_base: String,
+    id: String,
+    token: Option<String>,
+    /// `Some` for a replay cursor; `None` for the first snapshot.
+    after: Option<i64>,
+    state: Arc<Mutex<LinkState>>,
+    sender: Sender<Value>,
+}
+
+enum ThreadConnectError {
+    Gone(String),
+    Failed(String),
+}
+
+impl ThreadLink {
+    fn set(&self, state: LinkState) {
+        *self.state.lock().expect("thread link state") = state;
+    }
+
+    fn run(mut self) {
+        let mut attempt = 0u32;
+        loop {
+            match self.connect() {
+                Ok(mut socket) => {
+                    attempt = 0;
+                    self.set(LinkState::Connected);
+                    match self.pump(&mut socket) {
+                        Stop::Done => {
+                            let _ = socket.close(None);
+                            return;
+                        }
+                        Stop::Lost(error) => {
+                            log::info!("thread {} stream lost: {error}", self.id);
+                            attempt += 1;
+                            self.set(LinkState::Reconnecting { attempt, error });
+                        }
+                    }
+                }
+                Err(ThreadConnectError::Gone(why)) => {
+                    self.set(LinkState::Gone(why));
+                    return;
+                }
+                Err(ThreadConnectError::Failed(error)) => {
+                    attempt += 1;
+                    self.set(LinkState::Reconnecting { attempt, error });
+                }
+            }
+            thread::sleep(reconnect_wait(attempt, jitter_unit()));
+        }
+    }
+
+    fn connect(&mut self) -> std::result::Result<Socket, ThreadConnectError> {
+        let query = self
+            .after
+            .map(|after| format!("?after={after}"))
+            .unwrap_or_default();
+        let url = format!("{}/v1/threads/{}/attach{query}", self.ws_base, self.id);
+        let mut request = tungstenite::client::IntoClientRequest::into_client_request(url.as_str())
+            .map_err(|error| ThreadConnectError::Failed(error.to_string()))?;
+        if let Some(token) = &self.token
+            && let Ok(value) = format!("Bearer {token}").parse()
+        {
+            request.headers_mut().insert("Authorization", value);
+        }
+        match tungstenite::connect(request) {
+            Ok((socket, _response)) => {
+                if let MaybeTlsStream::Plain(stream) = socket.get_ref() {
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
+                    let _ = stream.set_nodelay(true);
+                }
+                Ok(socket)
+            }
+            Err(tungstenite::Error::Http(response)) if response.status() == 404 => Err(
+                ThreadConnectError::Gone("the thread is no longer on the node".into()),
+            ),
+            Err(tungstenite::Error::Http(response)) if response.status() == 401 => Err(
+                ThreadConnectError::Gone("the node rejected the access token".into()),
+            ),
+            Err(tungstenite::Error::Http(response)) if response.status() == 403 => Err(
+                ThreadConnectError::Gone("the node does not allow this device".into()),
+            ),
+            Err(error) => Err(ThreadConnectError::Failed(error.to_string())),
+        }
+    }
+
+    fn pump(&mut self, socket: &mut Socket) -> Stop {
+        loop {
+            match socket.read() {
+                Ok(Message::Text(text)) => {
+                    let Ok(item) = serde_json::from_str::<Value>(&text) else {
+                        continue;
+                    };
+                    if let Some(sequence) = thread_item_sequence(&item) {
+                        if self.after.is_some_and(|after| sequence <= after) {
+                            continue;
+                        }
+                        self.after = Some(sequence);
+                    }
+                    if self.sender.send(item).is_err() {
+                        return Stop::Done;
+                    }
+                }
+                Ok(Message::Ping(payload)) => {
+                    if socket.send(Message::Pong(payload)).is_err() {
+                        return Stop::Lost("the node closed the connection".into());
+                    }
+                }
+                Ok(Message::Close(_)) => {
+                    return Stop::Lost("the node closed the thread stream".into());
+                }
+                Ok(_) => {}
+                Err(tungstenite::Error::Io(error))
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) => {}
+                Err(error) => return Stop::Lost(error.to_string()),
+            }
         }
     }
 }

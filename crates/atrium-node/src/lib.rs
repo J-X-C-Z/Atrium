@@ -6,6 +6,7 @@
 
 pub mod auth;
 pub mod config;
+pub mod engine;
 pub mod fs;
 pub mod magpie;
 pub mod procs;
@@ -53,6 +54,9 @@ pub async fn run() -> Result<()> {
     let mut loaded = config::Config::load(&config_path)?;
     let path = config::login_path().await;
     config::apply_fallback(&mut loaded, &path);
+    if loaded.engine_db.is_none() {
+        loaded.engine_db = Some(config::default_engine_db());
+    }
     let config = Arc::new(loaded);
     let state = server::State::new(config.clone(), path.clone()).await?;
     let router = server::router(state.clone());
@@ -141,6 +145,11 @@ impl EmbeddedNode {
         path: String,
         sync: Arc<SyncState>,
     ) -> Result<Self> {
+        let mut config = (*config).clone();
+        if config.engine_db.is_none() {
+            config.engine_db = Some(config::default_engine_db());
+        }
+        let config = Arc::new(config);
         let state = server::State::new_with_sync(config.clone(), path.clone(), Some(sync)).await?;
         let router = server::router(state.clone());
         let loopback: IpAddr = "127.0.0.1".parse()?;

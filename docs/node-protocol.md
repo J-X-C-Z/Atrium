@@ -1,10 +1,13 @@
 # atrium-node protocol, version 1
 
 `atrium-node` is a small daemon on each device of the user's tailnet. It lets
-Atrium, on another device, run the agents installed there: it starts an agent
-process and bridges its stdin and stdout to a WebSocket, so Atrium speaks the
-agent's own protocol (Codex `app-server` JSON-RPC, or the Agent Client
-Protocol) end to end. The node never parses those messages.
+Atrium, on another device, run the agents installed there. The node hosts an
+engine for those agents: a **thread lives on the device that runs it**, with
+an append-only event log per thread and one sequence number per event. Any
+Atrium attaches to that log from its own cursor and sends through the owning
+node, which is the only writer of the agent session. Processes can still be
+bridged directly (stdin/stdout over a WebSocket); the thread routes are what
+new clients use.
 
 It also gives Atrium what it needs around the agents: what the device has,
 its folders, and the files of the projects kept there.
@@ -52,6 +55,7 @@ allow_tags = []                   # device tags allowed, such as "tag:atrium"
 token = ""                        # optional bearer token
 keep_output_lines = 20000         # output kept per process for reattaching
 detached_timeout_secs = 86400     # a process nobody attached to for this long is stopped
+engine_db = "/Users/me/.local/share/atrium-node/threads.sqlite"  # hosted thread logs; the platform data folder when unset
 
 # Agents. Detected on PATH when not listed; listing one overrides detection.
 [agents.codex]
@@ -213,6 +217,105 @@ Rules:
 - A process nobody is attached to keeps running and keeps its output, until
   `detached_timeout_secs` passes with no attachment; then it is stopped as
   `DELETE` does.
+
+## Engine threads
+
+A thread belongs to one node, the device that runs its agent. The node appends
+its events to one log per thread (`engine_db`), numbers them from 1, and is the
+only writer of the agent session. Clients never write the log directly and
+never keep a second copy as the source of truth; they attach, replay from their
+own cursor, and send through the owner. A node that does not own a thread
+answers `404 not_found`.
+
+### `GET /v1/threads`
+
+```json
+{ "threads": [
+  { "id": "thread-1", "projectId": "project-1", "title": "Fix the build",
+    "providerInstanceId": "codex", "modelSelection": { "instanceId": "codex", "model": "gpt-5" },
+    "createdAt": "2026-11-24T00:00:00.000Z", "updatedAt": "2026-11-24T00:05:00.000Z",
+    "archivedAt": null, "highWater": 42, "...": "the rest of the AppThread" }
+] }
+```
+
+The objects are T3 `AppThread` records (item 20 contracts) plus `highWater`,
+the newest sequence in that thread's log. Listing is a local read; the client
+fans out to devices itself (see [Presence](#presence)).
+
+### `POST /v1/threads`
+
+```json
+{ "commandId": "command:…", "thread": { "id": "thread-1", "projectId": "project-1", "…": "AppThread" } }
+```
+
+Records `thread.created` and the thread projection in one transaction. `201`
+with `{ "id": "thread-1", "sequence": 1 }`. A repeated `commandId` returns the
+first sequence; a different command for an existing thread is `409`. The
+thread is then owned by this node.
+
+### `GET /v1/threads/{id}/attach?after=<seq>` — WebSocket
+
+Upgrades to a WebSocket. Every frame is one JSON object, using the engine's
+stream items:
+
+| Frame | Meaning |
+| --- | --- |
+| `{"kind":"event","sequence":7,"event":{"type":"message.updated","payload":{…}}}` | One event. `sequence` never repeats for this thread. |
+| `{"kind":"snapshot","snapshotSequence":42,"projection":{…},"historyCursor":null,"hasMoreHistory":false,"latestLocalTurnOrdinal":null}` | One bounded snapshot: the control state plus the newest slice of the timeline that fits the engine's page policy. |
+| `{"kind":"synchronized"}` | The initial replay or snapshot is complete; live events follow. |
+
+Rules:
+
+- `after` is the last sequence the client applied. The node first sends every
+  event with a larger sequence, in order, then `synchronized`, then live
+  events as they are appended. `after` omitted asks for a snapshot and then
+  the live tail. Unlike a process attachment, several clients may attach to
+  one thread at once; none replaces another.
+- **A snapshot is sent only when the log cannot cover the gap**: the cursor is
+  ahead of the log, the cursor is below the pruned boundary, the replay would
+  exceed the engine's event or byte cap (128 events, 1 MiB), or the replay
+  begins with `thread.created` and a projection exists. Otherwise the node
+  replays exactly the missing events and no snapshot.
+- A client that receives a snapshot sets its cursor to `snapshotSequence`; the
+  server then streams events after it. Clients ignore an event at or below
+  their cursor, so a reconnect overlap never duplicates an event.
+- Send a WebSocket ping every 15 seconds. Two missed pings mean the link is
+  reconnecting; the thread keeps running and the client re-attaches from its
+  last sequence.
+- Send orders events by arrival at the owning node. A client that writes from a
+  second device uses `send`; it never assumes its local order is the thread's.
+- Unknown id → plain `404` before the upgrade. Capacity exhaustion → `429`
+  `capacity_exhausted`, as for process attachments.
+
+### `POST /v1/threads/{id}/send`
+
+```json
+{ "commandId": "command:…", "messageId": "message:…", "text": "Run the tests" }
+```
+
+The owning node records the user message in the thread's log (`message.updated`)
+and answers `202 { "messageId": "message:…", "sequence": 43 }`. The node's
+engine and adapter decide how the turn runs; this route only carries the send
+to the one writer. A repeated `commandId` returns the first sequence instead of
+appending twice. `commandId` and `messageId` may be omitted and are generated.
+
+### Presence
+
+Presence comes from the live link, not from a cached row:
+
+- The 15 s WebSocket ping is the heartbeat. A client treats any frame as
+  evidence; two missed heartbeats change its state to `reconnecting`.
+- When the computer wakes from sleep, probe at once instead of waiting for the
+  next ping. A long suspension also restarts an in-flight retry; a short wake
+  leaves it alone. `agent-rpc::presence` holds these transitions as pure
+  functions taking `now`.
+- The state shown per device is `connecting`, `live`, `reconnecting` or
+  `offline`.
+
+A call that fans out to several devices returns one result per device:
+`ok`, `offline`, `timeout` or `error` (`agent-rpc::presence::DeviceResult`).
+Each call has its own deadline, so one slow or sleeping device never holds up
+the list.
 
 ## Files
 
