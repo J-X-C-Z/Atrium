@@ -60,6 +60,8 @@ pub async fn ts(path: &str, args: &[&str]) -> Option<Value> {
     let binary = crate::config::find_binary("tailscale", path)?;
     let mut cmd = tokio::process::Command::new(binary);
     cmd.args(args).env("PATH", path).kill_on_drop(true);
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000);
     let out = tokio::time::timeout(Duration::from_secs(3), cmd.output())
         .await
         .ok()?

@@ -43,20 +43,24 @@ pub fn newer(current: &str, latest: &str) -> bool {
 
 /// The latest release, when it is newer than this build.
 pub fn check() -> Result<Option<Update>> {
-    let out = Command::new("curl")
-        .args([
-            "-fsSL",
-            "-m",
-            "15",
-            "-H",
-            "Accept: application/vnd.github+json",
-            "-A",
-            "Atrium",
-            RELEASES,
-        ])
-        .stdin(Stdio::null())
-        .output()
-        .context("curl is not available")?;
+    let mut cmd = Command::new("curl");
+    cmd.args([
+        "-fsSL",
+        "-m",
+        "15",
+        "-H",
+        "Accept: application/vnd.github+json",
+        "-A",
+        "Atrium",
+        RELEASES,
+    ])
+    .stdin(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let out = cmd.output().context("curl is not available")?;
     ensure!(out.status.success(), "no release found");
     let json: serde_json::Value = serde_json::from_slice(&out.stdout)?;
     let tag = json["tag_name"].as_str().context("no tag")?;

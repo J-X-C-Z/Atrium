@@ -103,6 +103,11 @@ pub fn open_in(editor: &Editor, path: &Path, line: Option<u32>) -> Result<()> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
     cmd.spawn()
         .with_context(|| format!("could not start {}", editor.name))?;
     Ok(())
@@ -117,6 +122,11 @@ pub fn open_default(path: &Path) -> Result<()> {
     } else if cfg!(windows) {
         let mut cmd = Command::new("cmd");
         cmd.args(["/C", "start", ""]).arg(path);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000);
+        }
         cmd
     } else {
         let mut cmd = Command::new("xdg-open");
