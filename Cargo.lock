@@ -657,8 +657,11 @@ dependencies = [
 name = "atrium-engine"
 version = "0.1.0"
 dependencies = [
+ "acp-client",
+ "agent-rpc",
  "atrium-core",
  "atrium-runtime",
+ "base64 0.22.1",
  "codex-client",
  "futures",
  "jiff 0.2.46",

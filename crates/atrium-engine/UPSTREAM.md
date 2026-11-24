@@ -11,8 +11,11 @@ Keep this table current when a module lands or moves.
 | `src/contracts` | `packages/contracts/src` (base schemas, orchestration V2, model selection) | 20 |
 | `src/store` | `apps/server/src/orchestration-v2/EventStore.ts`, `ProjectionStore.ts`, `apps/server/src/persistence/Migrations/055_OrchestrationV2.ts`, `ThreadStream.ts`, `LiveStreamBudget.ts`, `threadHistoryPaging.ts`, `WireProjection.ts`, `packages/shared/src/orchestrationV2BoundedSnapshot.ts` | 21 |
 | `src/orchestration` | `apps/server/src/orchestration-v2/Orchestrator.ts`, `EventSink.ts`, `EffectWorker.ts`, `runtimeLayer.ts` | 25 |
-| `src/providers` | `packages/provider-core` (`ProviderAdapter.ts`, `selectionTransition.ts`, `driver.ts`, `client.ts`), `apps/server/src/orchestration-v2/ProviderAdapterRegistry.ts`, `apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts`, `apps/server/src/provider/CodexMcpElicitation.ts`, `packages/effect-codex-app-server` (wire names only; the transport is Atrium's `codex-client`) | 22, 23, 24 |
+| `src/providers` | `packages/provider-core` (`ProviderAdapter.ts`, `selectionTransition.ts`, `driver.ts`, `client.ts`), `apps/server/src/orchestration-v2/ProviderAdapterRegistry.ts`, `apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts`, `apps/server/src/provider/CodexMcpElicitation.ts`, `packages/effect-codex-app-server` (wire names only; the transport is Atrium's `codex-client`) | 22, 23 |
+| `src/providers/acp.rs` | `packages/provider-acp/src/server/adapter.ts`, `AcpSessionRuntime.ts`, `sessionConfig.ts`, `clientPolicy.ts`; `packages/provider-acp-registry/src/server/adapter.ts` | 24 |
+| `src/providers/acp_antigravity.rs` | `apps/server/src/provider/acp/AntigravityProtocol.ts`, `AntigravityChildWork.ts`; `apps/server/src/provider/Drivers/AntigravitySkills.ts`, `antigravityUsageReader.ts`, `AntigravityUsage.ts`; `apps/server/src/provider/antigravityAuthSupport.ts`, `AntigravityAuth.ts`; `apps/server/src/provider/acp/AntigravityAcpSupport.ts` (`buildAntigravityPrompt`) | 24 |
 | `src/runtime` | Atrium seam over `ProviderAdapterV2` (`atrium-runtime::AgentRuntime`); no single T3 file | 22 |
+| `src/acp_runtime.rs` | Atrium seam over the ACP adapter (`atrium-runtime::AgentRuntime`); no single T3 file | 24 |
 | `src/usage` | `orchestration-v2/UsageLimitRecoveryWorker.ts`, limit schemas | 26 |
 | `src/checkpoint` | `apps/server/src/checkpointing`, `orchestration-v2/Checkpoint*Service.ts` | 27 |
 | `src/mcp` | `packages/contracts/src/orchestratorMcp.ts`, `apps/server/src/mcp` | 28 |

@@ -16,7 +16,7 @@
 //! its own threads inside the concrete adapter; events arrive through an
 //! [`AdapterEventSink`].
 
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -281,6 +281,9 @@ pub struct AdapterTurnInput {
     pub runtime_policy: RuntimePolicy,
     /// The thread's MCP app notes, as `(key, text)`.
     pub app_context: Vec<(String, String)>,
+    /// Host files the seam already resolved, for runtimes whose `TurnInput`
+    /// carries paths instead of the contract's attachment ids.
+    pub attachment_paths: Vec<PathBuf>,
     pub now: String,
 }
 
@@ -293,6 +296,8 @@ pub struct SteerInput {
     pub provider_turn_id: ProviderTurnId,
     pub message: TurnMessage,
     pub model_selection: Option<ModelSelection>,
+    /// See [`AdapterTurnInput::attachment_paths`].
+    pub attachment_paths: Vec<PathBuf>,
     pub now: String,
 }
 

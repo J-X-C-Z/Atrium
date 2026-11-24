@@ -9,6 +9,7 @@
 //! same trait today's clients implement, so the project, workflow and team
 //! layers do not change when a module moves from track A to the port.
 
+pub mod acp_runtime;
 pub mod checkpoint;
 pub mod contracts;
 pub mod diff;

@@ -121,6 +121,27 @@ usage-limit events). ACP stays as a fallback per agent profile.
 (strict compliance, degrade through capabilities) and the Antigravity
 flavor (sign-in, usage reader, skills, child work) onto `acp-client`.
 
+Built: `providers/acp.rs` (capabilities, sessions, turns, steering,
+interrupt, approvals and native questions, config options by category,
+per-turn usage, commands, pump, contract attachment ids resolved through
+the host's attachments directory, T3's model validation/custom
+models/`alwaysSetModel`/unset defaults/context-window lookup, the
+client-policy dispositions with per-session execute grants, a deferred
+finalize and a prompt-inactivity watchdog), `providers/acp_antigravity.rs`
+(sign-in methods and validation, authorization-URL capture, code login and
+logout state machine, profile environment isolation, skills, typed local
+usage reader, native prompt attachments, child-work launch parsing),
+`acp_runtime.rs` (ACP under `AgentRuntime`; `limits()` reports only what
+the agent streamed, `usage_scan` exposes the typed local records), and the
+app's `ATRIUM_ACP_ENGINE` gate. Scenario 08 matches T3 0.1.11 over the same
+ACP path; 09–13 are engine-only with reasons in the files. Gaps: forwarding
+a pasted loopback redirect to the agent's listener and browser-suppression
+verification (real-machine only), thread snapshots/fork/rollback, deep
+subagent bookkeeping from local session databases, item 26's report (that
+module is not in this slice), post-settle continuation runs (deferred
+finalize is in), MCP-over-ACP and client terminals/fs, and the app settings
+UI for the gate.
+
 **25. Turn orchestration (M).** Queue vs steer per send (user setting, a
 modifier for the other; queued runs stored and editable; slash commands
 wait), interrupt gated on the turn-started signal, selection transitions

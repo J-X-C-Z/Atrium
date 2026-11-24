@@ -304,6 +304,7 @@ impl AgentRuntime for CodexEngineRuntime {
                         model_selection: session.model.lock().expect("engine model").clone(),
                         runtime_policy: session.runtime_policy.clone(),
                         app_context: Vec::new(),
+                        attachment_paths: Vec::new(),
                         now: now_iso(),
                     })
                     .map_err(RuntimeError::failed)?;
@@ -351,6 +352,7 @@ impl AgentRuntime for CodexEngineRuntime {
                 provider_turn_id: turn.id.clone(),
                 message: message(input.text).with_id(MessageId::new(message_id)),
                 model_selection: Some(session.model.lock().expect("engine model").clone()),
+                attachment_paths: Vec::new(),
                 now: now_iso(),
             })
             .map_err(RuntimeError::failed)

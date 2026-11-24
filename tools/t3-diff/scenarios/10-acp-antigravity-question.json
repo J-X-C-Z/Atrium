@@ -1,0 +1,19 @@
+{
+  "name": "10-acp-antigravity-question",
+  "kind": "acp-adapter",
+  "provider": "mockacp",
+  "mock_name": "antigravity",
+  "flavor": "antigravity",
+  "model": "default",
+  "t3": "skip: T3 0.1.11 answers Antigravity's native question through its UI, not the CLI; the engine routes the same permission method to user_input and answers with the native option id",
+  "actions": [
+    {"op": "turn", "text": "ask me a question", "answer": "stable-choice"}
+  ],
+  "expect": {
+    "final_status": "completed",
+    "stream_contains": [
+      {"kind": "adapter.runtimeRequest", "requestKind": "user_input", "status": "pending"},
+      {"kind": "adapter.responded", "decision": "stable-choice"}
+    ]
+  }
+}

@@ -24,6 +24,8 @@ use acp_client::{AcpClient, PromptDelivery};
 use atrium_core::{
     AgentEvent, ApprovalDecision, Capabilities, ConfigOption, RateLimits, RequestId, Transcript,
 };
+use atrium_engine::acp_runtime::AcpEngineRuntime;
+use atrium_engine::providers::{AcpAdapterConfig, AcpFlavor};
 use atrium_engine::runtime::CodexEngineRuntime;
 use atrium_runtime::{
     AgentRuntime, Delivery, EventSink, RuntimeError, SessionId, SessionSpec, SessionSummary,
@@ -47,6 +49,9 @@ struct Inner {
     /// Backends the app runs through the ported engine instead of today's
     /// `CodexClient` path. Selected per backend by `ATRIUM_CODEX_ENGINE`.
     engine_codex: Mutex<HashMap<String, Arc<CodexEngineRuntime>>>,
+    /// ACP backends the app runs through the ported engine. Selected per
+    /// backend by `ATRIUM_ACP_ENGINE` (a comma list of backend ids or `1`/`all`).
+    engine_acp: Mutex<HashMap<String, Arc<AcpEngineRuntime>>>,
     sessions: Mutex<HashMap<SessionId, Session>>,
     /// Paired with `sessions`: `wait` sleeps here until a turn completes.
     turn_ended: Condvar,
@@ -84,8 +89,10 @@ struct Session {
     updated_at_ms: i64,
     /// ACP's per-session settings, for the app to show.
     acp_options: Vec<ConfigOption>,
-    /// Set when the session runs through the ported engine.
+    /// Set when the session runs through the ported Codex engine.
     engine: Option<Arc<CodexEngineRuntime>>,
+    /// Set when the session runs through the ported ACP engine.
+    acp_engine: Option<Arc<AcpEngineRuntime>>,
 }
 
 impl Inner {
@@ -153,6 +160,7 @@ impl RuntimeAdapters {
                 codex: Mutex::new(HashMap::new()),
                 acp: Mutex::new(HashMap::new()),
                 engine_codex: Mutex::new(HashMap::new()),
+                engine_acp: Mutex::new(HashMap::new()),
                 sessions: Mutex::new(HashMap::new()),
                 turn_ended: Condvar::new(),
                 caps: Mutex::new(HashMap::new()),
@@ -195,7 +203,68 @@ impl RuntimeAdapters {
             );
     }
 
-    /// Whether `backend` runs on the ported engine.
+    /// Run this ACP backend's sessions through the ported engine. `register_acp`
+    /// calls this when `ATRIUM_ACP_ENGINE` names the backend; tests and a
+    /// settings UI can call it directly.
+    pub fn register_acp_engine(&self, backend: &str, config: AcpAdapterConfig) {
+        self.inner
+            .engine_acp
+            .lock()
+            .expect("runtime engine acp")
+            .insert(backend.to_string(), Arc::new(AcpEngineRuntime::new(config)));
+    }
+
+    /// The engine config for an ACP backend, from the same detection the
+    /// client path uses (`ATRIUM_<ID>_ACP`, then `PATH`).
+    fn acp_engine_config(backend: &str) -> Option<AcpAdapterConfig> {
+        let (agent, device) = agents::split_backend(backend);
+        if device.is_some() {
+            // A device's agent is reached through the node's pipes; the
+            // engine spawns locally.
+            return None;
+        }
+        let profiles = agents::detect(&HashMap::new());
+        let profile = profiles.into_iter().find(|profile| profile.id == agent)?;
+        let (program, args) = profile.command?;
+        let mut config = AcpAdapterConfig::for_command(backend, program, args);
+        if profile.id == "antigravity" {
+            config.flavor = AcpFlavor::Antigravity;
+            config.display_name = Some(profile.name);
+            config.profile_directory =
+                std::env::var_os("ATRIUM_ANTIGRAVITY_HOME").map(PathBuf::from);
+            // Isolate the agent in its profile: `GEMINI_HOME`, its own
+            // settings file and temp directory, without inherited Google
+            // credentials. The method defaults to personal OAuth; a settings
+            // UI can supply another method and its fields.
+            if let Some(directory) = config.profile_directory.clone() {
+                let auth = atrium_engine::providers::AntigravityAuthConfig {
+                    auth_method: "oauth-personal".into(),
+                    ..Default::default()
+                };
+                match atrium_engine::providers::prepare_antigravity_profile(&directory, &auth) {
+                    Ok(prepared) => {
+                        let base_env: Vec<(String, String)> = std::env::vars().collect();
+                        config.acp.env = atrium_engine::providers::antigravity_environment(
+                            &prepared, &base_env, &auth,
+                        );
+                    }
+                    Err(error) => log::warn!(
+                        "Antigravity profile {} is not isolated: {error}",
+                        directory.display()
+                    ),
+                }
+            }
+        }
+        if let Some(ms) = std::env::var("ATRIUM_ACP_INACTIVITY_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            config.prompt_inactivity_timeout = Some(Duration::from_millis(ms));
+        }
+        Some(config)
+    }
+
+    /// Whether `backend` runs on a ported engine.
     #[allow(dead_code)]
     pub fn uses_engine(&self, backend: &str) -> bool {
         self.inner
@@ -203,6 +272,12 @@ impl RuntimeAdapters {
             .lock()
             .expect("runtime engine codex")
             .contains_key(backend)
+            || self
+                .inner
+                .engine_acp
+                .lock()
+                .expect("runtime engine acp")
+                .contains_key(backend)
     }
 
     fn engine_for(&self, backend: &str) -> Option<Arc<CodexEngineRuntime>> {
@@ -210,6 +285,15 @@ impl RuntimeAdapters {
             .engine_codex
             .lock()
             .expect("runtime engine codex")
+            .get(backend)
+            .cloned()
+    }
+
+    fn acp_engine_for(&self, backend: &str) -> Option<Arc<AcpEngineRuntime>> {
+        self.inner
+            .engine_acp
+            .lock()
+            .expect("runtime engine acp")
             .get(backend)
             .cloned()
     }
@@ -227,6 +311,44 @@ impl RuntimeAdapters {
             .ok_or_else(|| RuntimeError::UnknownSession(session.clone()))?
             .engine
             .clone())
+    }
+
+    fn session_acp_engine(
+        &self,
+        session: &SessionId,
+    ) -> Result<Option<Arc<AcpEngineRuntime>>, RuntimeError> {
+        Ok(self
+            .inner
+            .sessions
+            .lock()
+            .expect("runtime sessions")
+            .get(session)
+            .ok_or_else(|| RuntimeError::UnknownSession(session.clone()))?
+            .acp_engine
+            .clone())
+    }
+
+    fn start_engine_acp(
+        &self,
+        engine: Arc<AcpEngineRuntime>,
+        spec: SessionSpec,
+        sink: EventSink,
+    ) -> Result<SessionId, RuntimeError> {
+        let inner = self.inner.clone();
+        let observe = sink.clone();
+        let wrapped: EventSink = Arc::new(move |event| {
+            inner.observe(&event);
+            observe(event);
+        });
+        let id = engine.start(spec.clone(), wrapped)?;
+        let mut session = session_from_spec(&spec, sink, None, Vec::new());
+        session.title = spec
+            .first_message
+            .as_ref()
+            .map(|input| input.text.chars().take(60).collect());
+        session.acp_engine = Some(engine);
+        self.insert_session(id.clone(), session);
+        Ok(id)
     }
 
     fn start_engine_codex(
@@ -269,6 +391,11 @@ impl RuntimeAdapters {
             .lock()
             .expect("runtime caps")
             .insert(backend.to_string(), caps);
+        if acp_engine_requested(backend)
+            && let Some(config) = Self::acp_engine_config(backend)
+        {
+            self.register_acp_engine(backend, config);
+        }
     }
 
     /// Forgets a backend that disconnected; its sessions stay for the app to
@@ -280,6 +407,11 @@ impl RuntimeAdapters {
             .expect("runtime codex")
             .remove(backend);
         self.inner.acp.lock().expect("runtime acp").remove(backend);
+        self.inner
+            .engine_acp
+            .lock()
+            .expect("runtime engine acp")
+            .remove(backend);
         self.inner
             .caps
             .lock()
@@ -543,6 +675,9 @@ impl AgentRuntime for RuntimeAdapters {
         if let Some(engine) = self.engine_for(agent) {
             return engine.capabilities(agent);
         }
+        if let Some(engine) = self.acp_engine_for(agent) {
+            return engine.capabilities(agent);
+        }
         if let Some(caps) = self
             .inner
             .caps
@@ -563,6 +698,8 @@ impl AgentRuntime for RuntimeAdapters {
             } else {
                 self.start_codex(spec, sink)
             }
+        } else if let Some(engine) = self.acp_engine_for(&spec.agent) {
+            self.start_engine_acp(engine, spec, sink)
         } else {
             self.start_acp(spec, sink)
         }
@@ -586,6 +723,10 @@ impl AgentRuntime for RuntimeAdapters {
             } else {
                 self.send_codex(session, input, delivery)
             }
+        } else if let Some(engine) = self.session_acp_engine(session)? {
+            let turn = engine.send(session, input, delivery)?;
+            self.record_started_turn(session, &turn);
+            Ok(turn)
         } else {
             self.send_acp(session, input, delivery)
         }
@@ -614,6 +755,8 @@ impl AgentRuntime for RuntimeAdapters {
             futures::executor::block_on(registered.client.turn_steer(session, &turn, request))
                 .map_err(RuntimeError::failed)?;
             Ok(())
+        } else if let Some(engine) = self.session_acp_engine(session)? {
+            engine.steer(session, input)
         } else {
             let client = self.acp_client(&agent)?;
             if !client.info.steering {
@@ -643,6 +786,8 @@ impl AgentRuntime for RuntimeAdapters {
             let registered = self.codex_client(&agent)?;
             futures::executor::block_on(registered.client.turn_interrupt(session, &turn))
                 .map_err(RuntimeError::failed)
+        } else if let Some(engine) = self.session_acp_engine(session)? {
+            engine.interrupt(session)
         } else {
             let client = self.acp_client(&agent)?;
             client.cancel(session).map_err(RuntimeError::failed)
@@ -665,6 +810,8 @@ impl AgentRuntime for RuntimeAdapters {
                 .client
                 .answer_approval(request, decision)
                 .map_err(RuntimeError::failed)
+        } else if let Some(engine) = self.session_acp_engine(session)? {
+            engine.answer_approval(session, request, decision)
         } else {
             let client = self.acp_client(&agent)?;
             client
@@ -680,6 +827,9 @@ impl AgentRuntime for RuntimeAdapters {
         timeout_ms: u64,
     ) -> Result<TurnOutcome, RuntimeError> {
         if let Some(engine) = self.session_engine(session)? {
+            return engine.wait(session, turn, timeout_ms);
+        }
+        if let Some(engine) = self.session_acp_engine(session)? {
             return engine.wait(session, turn, timeout_ms);
         }
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
@@ -714,6 +864,9 @@ impl AgentRuntime for RuntimeAdapters {
         if let Some(engine) = self.session_engine(session)? {
             return engine.transcript(session);
         }
+        if let Some(engine) = self.session_acp_engine(session)? {
+            return engine.transcript(session);
+        }
         self.inner
             .sessions
             .lock()
@@ -740,6 +893,9 @@ impl AgentRuntime for RuntimeAdapters {
     }
 
     fn limits(&self, agent: &str) -> Result<Option<RateLimits>, RuntimeError> {
+        if let Some(engine) = self.acp_engine_for(agent) {
+            return engine.limits(agent);
+        }
         if !agents::is_codex(agent) {
             return Ok(None);
         }
@@ -781,6 +937,25 @@ fn session_from_spec(
         updated_at_ms: now_ms(),
         acp_options,
         engine: None,
+        acp_engine: None,
+    }
+}
+
+/// Whether the app should route this ACP backend through the ported engine.
+/// Off by default. `ATRIUM_ACP_ENGINE=1`/`all` selects every ACP backend;
+/// a comma list (`ATRIUM_ACP_ENGINE=claude,antigravity`) selects some.
+fn acp_engine_requested(backend: &str) -> bool {
+    let Ok(value) = std::env::var("ATRIUM_ACP_ENGINE") else {
+        return false;
+    };
+    let value = value.trim().to_ascii_lowercase();
+    match value.as_str() {
+        "" | "0" | "false" => false,
+        "1" | "true" | "all" => true,
+        _ => value
+            .split(',')
+            .map(str::trim)
+            .any(|candidate| candidate == backend.to_ascii_lowercase()),
     }
 }
 

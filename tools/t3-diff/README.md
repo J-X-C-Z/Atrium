@@ -31,6 +31,18 @@ Scenario kinds:
   `{"op":"turn","text":"...","answer":"accept","runtime_mode":"approval-required"}`.
   Adapter scenarios carry `"t3": "skip: <reason>"`; the runner records the
   reason in `diff.txt` instead of pretending a T3 comparison happened.
+* `"kind": "acp-engine"` runs turns through
+  `atrium_engine::acp_runtime::AcpEngineRuntime` over `mock-acp`; the same
+  `AgentRuntime` seam the app selects for an ACP backend behind
+  `ATRIUM_ACP_ENGINE`. `mock_name` picks the mock's handshake (`claude`,
+  `antigravity`), and `flavor` (`generic` or `antigravity`) picks the
+  capabilities and usage rules.
+* `"kind": "acp-adapter"` drives `AcpSessionRuntime` directly. Its actions
+  are `{"op":"settings","model":"flash","effort":"low"}`, `{"op":"skills"}`,
+  `{"op":"config"}`, `{"op":"sign_in","text":"oauth-personal"}` and
+  `{"op":"turn","text":"...","answer":"stable-choice"}`. The answer is an
+  approval decision (`accept`, `decline`, `cancel`) or, for Antigravity's
+  native questions, the option id.
 
 `expect` may also carry:
 
@@ -53,6 +65,12 @@ Scenarios:
 | `05-elicitation` | MCP elicitation becomes a runtime request and is answered |
 | `06-read-vs-write` | `thread/read` works while the writer lock is held; `thread/resume` reports in use |
 | `07-provider-probe` | both sides call `initialize`, `model/list`, `skills/list`, `config/read`, `thread/start`, `turn/start` |
+| `08-acp-thread-lifecycle` | the ACP engine: two turns, messages and final status over `mock-acp` |
+| `09-acp-antigravity-settings` | Antigravity's session options, skills, config and sign-in method (engine-only) |
+| `10-acp-antigravity-question` | a native question sharing `session/request_permission` becomes `user_input` and is answered by option id (engine-only) |
+| `11-acp-antigravity-usage` | Antigravity's per-turn usage folds cache reads into input and thoughts into output (engine-only) |
+| `12-acp-subagent-tool` | an `invoke_subagent` tool call marks the turn's usage `hasSubagents` (engine-only) |
+| `13-acp-engine-limits` | the engine's `limits()` returns the windows the agent streamed in `_meta`, never a synthesized number (engine-only) |
 
 ## Build
 
@@ -61,12 +79,20 @@ export NO_PROXY='*'
 export CARGO_TARGET_DIR="/path/to/target"   # optional; target/ in the repo also works
 
 cargo build -p codex-client --bin mock-codex
+cargo build -p acp-client --bin mock-acp
 cargo build -p atrium-engine --bin atrium-engine-driver
 ```
 
-`run.py` finds both binaries in `$CARGO_TARGET_DIR/{debug,release}` first,
+`run.py` finds the binaries in `$CARGO_TARGET_DIR/{debug,release}` first,
 then `<repo>/target/{debug,release}`, then `PATH`. Override with
-`--mock-codex-bin`, `--engine-bin`, or `MOCK_CODEX_BIN`, `ENGINE_BIN`.
+`--mock-codex-bin`, `--engine-bin`, `MOCK_CODEX_BIN`, `ENGINE_BIN` or
+`MOCK_ACP_BIN`. ACP scenarios also start a provider on the T3 side
+(`driver: "acpRegistry"`, local `commandPath`); scenarios T3's CLI cannot
+reach carry an explicit `"t3": "skip: ..."`.
+
+For a real agent on this machine, run `tools/t3-diff/real-acp.sh <agent>` or
+set `ATRIUM_ACP` to its command. It handshakes, opens a session and lists the
+agent's options; it never prints or stores a credential.
 
 T3 is looked up as `--t3-bin`, then `$T3_BIN`, then
 `~/.t3/runtime/versions/0.1.11/t3`, then the newest installed version, then

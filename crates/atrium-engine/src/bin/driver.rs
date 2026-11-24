@@ -48,6 +48,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use atrium_core::{AgentEvent, Item, TurnStatus};
+use atrium_engine::acp_runtime::AcpEngineRuntime;
 use atrium_engine::contracts::{ModelSelection, ProviderThread};
 use atrium_engine::diff::{NormalLine, Role, T3_SENDER_NOTE, normalize_status};
 use atrium_engine::providers::adapter::{
@@ -56,6 +57,9 @@ use atrium_engine::providers::adapter::{
 };
 use atrium_engine::providers::build_thread_settings_update;
 use atrium_engine::providers::codex::{CodexAdapter, CodexAdapterConfig};
+use atrium_engine::providers::{
+    AcpAdapter, AcpAdapterConfig, AcpFlavor, ProviderAdapter, ProviderConfig, SkillGroup,
+};
 use atrium_engine::runtime::CodexEngineRuntime;
 use atrium_runtime::{AgentRuntime, Delivery, EventSink, SessionSpec, TurnInput};
 use codex_client::{CodexClient, CodexConfig};
@@ -146,6 +150,15 @@ struct Scenario {
     timeout_ms: Option<u64>,
     #[serde(default)]
     expect: Option<Expect>,
+    /// The mock ACP agent whose handshake to mimic (`claude`, `antigravity`).
+    #[serde(default)]
+    mock_name: Option<String>,
+    /// `generic` (default) or `antigravity`.
+    #[serde(default)]
+    flavor: Option<String>,
+    /// Ask the mock to report rate limits and trace what the engine returns.
+    #[serde(default)]
+    report_limits: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -206,7 +219,6 @@ fn run(args: &Args) -> Result<(), String> {
     let scenario: Scenario =
         serde_json::from_str(&input).map_err(|error| format!("parsing scenario: {error}"))?;
 
-    let mock = find_mock_codex()?;
     let scratch = Scratch::new(scenario.project.as_str(), args)?;
     let timeout = scenario
         .timeout_ms
@@ -217,10 +229,23 @@ fn run(args: &Args) -> Result<(), String> {
         .clone()
         .unwrap_or_else(|| DEFAULT_MODEL.into());
 
-    let lines = if scenario.kind.as_deref() == Some("adapter") {
-        run_adapter(&scenario, &mock, scratch.path(), &model, timeout)?
-    } else {
-        run_engine(&scenario, &mock, scratch.path(), &model, timeout)?
+    let lines = match scenario.kind.as_deref() {
+        Some("adapter") => {
+            let mock = find_mock_codex()?;
+            run_adapter(&scenario, &mock, scratch.path(), &model, timeout)?
+        }
+        Some("acp-engine") => {
+            let mock = find_mock_acp()?;
+            run_acp_engine(&scenario, &mock, scratch.path(), &model, timeout)?
+        }
+        Some("acp-adapter") => {
+            let mock = find_mock_acp()?;
+            run_acp_adapter(&scenario, &mock, scratch.path(), &model, timeout)?
+        }
+        _ => {
+            let mock = find_mock_codex()?;
+            run_engine(&scenario, &mock, scratch.path(), &model, timeout)?
+        }
     };
     let final_status = last_status(&lines).unwrap_or_else(|| "completed".into());
 
@@ -399,6 +424,500 @@ fn run_engine(
 enum TurnEnd {
     Finished(String),
     Waiting,
+}
+
+// --------------------------------------------------------------------------
+// ACP scenarios
+
+fn find_mock_acp() -> Result<PathBuf, String> {
+    if let Some(path) = env::var_os("MOCK_ACP_BIN") {
+        return Ok(PathBuf::from(path));
+    }
+    if let Ok(exe) = env::current_exe()
+        && let Some(directory) = exe.parent()
+    {
+        let candidate = directory.join(if cfg!(windows) {
+            "mock-acp.exe"
+        } else {
+            "mock-acp"
+        });
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err("mock-acp not found; build it or set MOCK_ACP_BIN".into())
+}
+
+fn acp_config(mock: &Path, scenario: &Scenario) -> AcpAdapterConfig {
+    let name = scenario
+        .mock_name
+        .clone()
+        .unwrap_or_else(|| "claude".into());
+    let flavor = match scenario.flavor.as_deref() {
+        Some("antigravity") => AcpFlavor::Antigravity,
+        _ if name == "antigravity" => AcpFlavor::Antigravity,
+        _ => AcpFlavor::Generic,
+    };
+    let backend = if flavor == AcpFlavor::Antigravity {
+        "antigravity"
+    } else {
+        "acp"
+    };
+    let mut config =
+        AcpAdapterConfig::for_command(backend, mock.to_path_buf(), vec!["--name".into(), name]);
+    config.flavor = flavor;
+    if scenario.report_limits {
+        config
+            .acp
+            .env
+            .push(("ATRIUM_MOCK_ACP_RATE_LIMITS".into(), "1".into()));
+    }
+    config
+}
+
+struct AcpEngineSession {
+    runtime: AcpEngineRuntime,
+    id: String,
+    events: Receiver<AgentEvent>,
+}
+
+fn run_acp_engine(
+    scenario: &Scenario,
+    mock: &Path,
+    scratch: &Path,
+    model: &str,
+    timeout: Duration,
+) -> Result<Vec<String>, String> {
+    let runtime = AcpEngineRuntime::new(acp_config(mock, scenario));
+    let (tx, rx) = mpsc::channel();
+    let sink: EventSink = Arc::new(move |event| {
+        let _ = tx.send(event);
+    });
+    let agent = scenario.flavor.clone().unwrap_or_else(|| "claude".into());
+    let spec = SessionSpec {
+        agent: agent.clone(),
+        model: Some(model.into()),
+        effort: None,
+        service_tier: None,
+        folder: scratch.to_path_buf(),
+        worktree: None,
+        device: None,
+        mcp_servers: Vec::new(),
+        first_message: None,
+        access_mode: Some("full-access".into()),
+    };
+    let id = runtime
+        .start(spec, sink)
+        .map_err(|error| format!("acp engine start: {error}"))?;
+    let session = AcpEngineSession {
+        runtime,
+        id,
+        events: rx,
+    };
+    let mut lines = Vec::new();
+    push(&mut lines, NormalLine::thread_created());
+    let mut final_status = "completed".to_string();
+    for (ix, turn) in scenario.turns.iter().enumerate() {
+        let ordinal = u32::try_from(ix + 1).unwrap_or(u32::MAX);
+        match acp_engine_turn_lines(&session, ordinal, turn.text(), timeout, &mut lines)? {
+            TurnEnd::Finished(status) => {
+                final_status = status.clone();
+                if status != "completed" {
+                    break;
+                }
+            }
+            TurnEnd::Waiting => {
+                final_status = "waiting".into();
+                break;
+            }
+        }
+    }
+    if scenario.report_limits {
+        let limits = session
+            .runtime
+            .limits(&agent)
+            .map_err(|error| format!("acp engine limits: {error}"))?;
+        push_trace(
+            &mut lines,
+            json!({
+                "kind": "engine.limits",
+                "present": limits.is_some(),
+                "primary": limits.as_ref().and_then(|limits| limits.primary).map(|window| window.used_percent),
+                "secondary": limits.as_ref().and_then(|limits| limits.secondary).map(|window| window.used_percent),
+                "reached": limits.as_ref().is_some_and(|limits| limits.reached),
+            }),
+        );
+        if let Some(scan) = session.runtime.usage_scan(0) {
+            push_trace(
+                &mut lines,
+                json!({
+                    "kind": "engine.usageScan",
+                    "files": scan.files.len(),
+                    "records": scan.files.iter().map(|file| file.records.len()).sum::<usize>(),
+                    "errors": scan.errors.len(),
+                }),
+            );
+        }
+    }
+    push(&mut lines, NormalLine::thread_finished(&final_status));
+    Ok(lines)
+}
+
+fn acp_engine_turn_lines(
+    session: &AcpEngineSession,
+    ordinal: u32,
+    text: &str,
+    timeout: Duration,
+    lines: &mut Vec<String>,
+) -> Result<TurnEnd, String> {
+    push(lines, NormalLine::run_started(ordinal));
+    // ACP ignores the live user chunk (the app shows the sent message
+    // itself), so the normalized stream records it here.
+    push(
+        lines,
+        NormalLine::item(ordinal, Role::User, text.to_string()),
+    );
+    session
+        .runtime
+        .send(
+            &session.id,
+            TurnInput::text(with_sender_note(text)),
+            Delivery::Start,
+        )
+        .map_err(|error| format!("acp engine send: {error}"))?;
+    loop {
+        match session.events.recv_timeout(timeout) {
+            Ok(AgentEvent::ItemCompleted { item, .. }) => match item {
+                Item::User { text, .. } => push(lines, NormalLine::item(ordinal, Role::User, text)),
+                Item::Agent { text, .. } => {
+                    push(lines, NormalLine::item(ordinal, Role::Assistant, text))
+                }
+                _ => {}
+            },
+            Ok(AgentEvent::ApprovalRequested(_)) | Ok(AgentEvent::UserInputRequested(_)) => {
+                push(lines, NormalLine::approval_requested(ordinal));
+                push(lines, NormalLine::run_finished(ordinal, "waiting"));
+                return Ok(TurnEnd::Waiting);
+            }
+            Ok(AgentEvent::TurnCompleted { status, error, .. }) => {
+                let status = match status {
+                    TurnStatus::Completed => "completed",
+                    TurnStatus::Interrupted => "interrupted",
+                    TurnStatus::Failed => "failed",
+                    TurnStatus::InProgress => "running",
+                };
+                if let Some(error) = error {
+                    eprintln!("atrium-engine-driver: turn failed: {error}");
+                }
+                push(lines, NormalLine::run_finished(ordinal, status));
+                return Ok(TurnEnd::Finished(normalize_status(status)));
+            }
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout) => {
+                return Err(format!(
+                    "acp engine produced no turn event for {} ms",
+                    timeout.as_millis()
+                ));
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err("acp engine event channel closed".into());
+            }
+        }
+    }
+}
+
+fn run_acp_adapter(
+    scenario: &Scenario,
+    mock: &Path,
+    scratch: &Path,
+    model: &str,
+    timeout: Duration,
+) -> Result<Vec<String>, String> {
+    let adapter = AcpAdapter::new("acp-adapter", acp_config(mock, scenario));
+    let (tx, events) = mpsc::channel();
+    let sink: AdapterEventSink = Arc::new(move |event| {
+        let _ = tx.send(event);
+    });
+    let policy = full_access_policy(scratch);
+    let mut selection = selection(model, None, None);
+    selection.instance_id = "acp-adapter".into();
+    let session = adapter
+        .open_session(
+            OpenSessionInput {
+                thread_id: "acp-adapter-app-thread".into(),
+                provider_session_id: "acp-adapter-session".into(),
+                model_selection: selection.clone(),
+                runtime_policy: policy.clone(),
+                resume_from_session: None,
+                initial_native_thread_id: None,
+                now: now_iso(),
+            },
+            sink,
+        )
+        .map_err(|error| format!("acp adapter open: {error}"))?;
+    let mut provider_thread = session
+        .ensure_thread(EnsureThreadInput {
+            thread_id: "acp-adapter-app-thread".into(),
+            title: None,
+            model_selection: selection.clone(),
+            runtime_policy: policy.clone(),
+            provider_session_id: None,
+            existing_provider_thread: None,
+            force_new_native_thread: false,
+            now: now_iso(),
+        })
+        .map_err(|error| format!("acp adapter ensure_thread: {error}"))?;
+    let mut lines = Vec::new();
+    push(&mut lines, NormalLine::thread_created());
+    let mut final_status = "completed".to_string();
+    let mut ordinal = 0u32;
+    for action in &scenario.actions {
+        match action.op.as_str() {
+            "settings" => {
+                if let Some(model) = &action.model {
+                    selection.model = model.clone();
+                }
+                if let Some(effort) = &action.effort {
+                    selection.options =
+                        Some(atrium_engine::contracts::ProviderOptionSelections(vec![
+                            atrium_engine::contracts::ProviderOptionSelection {
+                                id: "reasoningEffort".into(),
+                                value: atrium_engine::contracts::ProviderOptionValue::String(
+                                    effort.clone(),
+                                ),
+                            },
+                        ]));
+                }
+                session
+                    .apply_model_selection(&provider_thread, &selection, Some(&policy))
+                    .map_err(|error| format!("acp adapter settings: {error}"))?;
+                let config = session.config(None).map_err(|error| error.to_string())?;
+                push_trace(
+                    &mut lines,
+                    json!({
+                        "kind": "adapter.settings",
+                        "model": selection.model,
+                        "options": config.config["configOptions"],
+                    }),
+                );
+            }
+            "skills" => {
+                let groups: Vec<SkillGroup> = session
+                    .skills(&[scratch.display().to_string()])
+                    .map_err(|error| format!("acp adapter skills: {error}"))?;
+                push_trace(
+                    &mut lines,
+                    json!({
+                        "kind": "adapter.skills",
+                        "groups": groups.len(),
+                        "skills": groups.iter().map(|group| group.skills.len()).sum::<usize>(),
+                        "errors": groups.iter().map(|group| group.errors.len()).sum::<usize>(),
+                    }),
+                );
+            }
+            "config" => {
+                let config: ProviderConfig =
+                    session
+                        .config(Some(&scratch.display().to_string()))
+                        .map_err(|error| format!("acp adapter config: {error}"))?;
+                push_trace(
+                    &mut lines,
+                    json!({
+                        "kind": "adapter.config",
+                        "configIsObject": config.config.is_object(),
+                        "originsIsObject": config.origins.is_object(),
+                    }),
+                );
+            }
+            "sign_in" => {
+                // The mock accepts every method; the trace records which
+                // method an Antigravity instance would use.
+                push_trace(
+                    &mut lines,
+                    json!({
+                        "kind": "adapter.signIn",
+                        "method": action.text.clone().unwrap_or_else(|| "oauth-personal".into()),
+                        "methods": adapter.config().flavor.auth_methods().len(),
+                    }),
+                );
+            }
+            "turn" => {
+                ordinal += 1;
+                let end = acp_adapter_turn(
+                    session.as_ref(),
+                    &mut provider_thread,
+                    ordinal,
+                    action.text.as_deref().unwrap_or_default(),
+                    action.answer.as_deref(),
+                    &selection,
+                    &policy,
+                    &events,
+                    timeout,
+                    &mut lines,
+                )?;
+                match end {
+                    TurnEnd::Finished(status) => {
+                        final_status = status.clone();
+                        if status != "completed" {
+                            break;
+                        }
+                    }
+                    TurnEnd::Waiting => {
+                        final_status = "waiting".into();
+                        break;
+                    }
+                }
+            }
+            other => return Err(format!("unknown acp adapter action {other}")),
+        }
+    }
+    push(&mut lines, NormalLine::thread_finished(&final_status));
+    session.close();
+    Ok(lines)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn acp_adapter_turn(
+    session: &dyn ProviderSessionRuntime,
+    provider_thread: &mut ProviderThread,
+    ordinal: u32,
+    text: &str,
+    answer: Option<&str>,
+    selection: &ModelSelection,
+    policy: &RuntimePolicy,
+    events: &Receiver<AdapterEvent>,
+    timeout: Duration,
+    lines: &mut Vec<String>,
+) -> Result<TurnEnd, String> {
+    push(lines, NormalLine::run_started(ordinal));
+    let turn = session
+        .start_turn(AdapterTurnInput {
+            thread_id: provider_thread
+                .app_thread_id
+                .clone()
+                .unwrap_or_else(|| "acp-adapter-app-thread".into()),
+            run_id: format!("acp-adapter-run-{ordinal}").into(),
+            run_ordinal: ordinal,
+            provider_turn_ordinal: ordinal,
+            attempt_id: format!("acp-adapter-attempt-{ordinal}").into(),
+            root_node_id: format!("acp-adapter-node-{ordinal}").into(),
+            provider_thread: provider_thread.clone(),
+            message: TurnMessage::user(format!("acp-adapter-message-{ordinal}"), text),
+            model_selection: selection.clone(),
+            runtime_policy: policy.clone(),
+            app_context: Vec::new(),
+            attachment_paths: Vec::new(),
+            now: now_iso(),
+        })
+        .map_err(|error| format!("acp adapter start_turn: {error}"))?;
+    let mut answered = false;
+    loop {
+        match events.recv_timeout(timeout) {
+            Ok(AdapterEvent::Agent(AgentEvent::ItemCompleted { item, .. })) => match item {
+                Item::User { text, .. } => push(lines, NormalLine::item(ordinal, Role::User, text)),
+                Item::Agent { text, .. } => {
+                    push(lines, NormalLine::item(ordinal, Role::Assistant, text))
+                }
+                _ => {}
+            },
+            Ok(AdapterEvent::RuntimeRequestUpdated {
+                runtime_request, ..
+            }) => {
+                push(lines, NormalLine::approval_requested(ordinal));
+                push_trace(
+                    lines,
+                    json!({
+                        "kind": "adapter.runtimeRequest",
+                        "requestKind": runtime_request.kind.as_wire(),
+                        "status": "pending",
+                    }),
+                );
+                let Some(answer) = answer else {
+                    push(lines, NormalLine::run_finished(ordinal, "waiting"));
+                    return Ok(TurnEnd::Waiting);
+                };
+                if !answered {
+                    if runtime_request.kind
+                        == atrium_engine::contracts::RuntimeRequestKind::UserInput
+                    {
+                        let mut answers = atrium_engine::contracts::ProviderUserInputAnswers::new();
+                        answers.insert(
+                            runtime_request
+                                .native_request_ref
+                                .as_ref()
+                                .and_then(|native| native.native_id.clone())
+                                .unwrap_or_default(),
+                            json!(answer),
+                        );
+                        session
+                            .respond_to_runtime_request(RuntimeRequestResponse {
+                                request_id: runtime_request.id.to_string(),
+                                decision: None,
+                                feedback: None,
+                                answers: Some(answers),
+                            })
+                            .map_err(|error| format!("acp adapter answer: {error}"))?;
+                    } else {
+                        let decision = match answer {
+                            "decline" => {
+                                atrium_engine::contracts::ProviderApprovalDecision::Decline
+                            }
+                            "cancel" => atrium_engine::contracts::ProviderApprovalDecision::Cancel,
+                            _ => atrium_engine::contracts::ProviderApprovalDecision::Accept,
+                        };
+                        session
+                            .respond_to_runtime_request(RuntimeRequestResponse {
+                                request_id: runtime_request.id.to_string(),
+                                decision: Some(decision),
+                                feedback: None,
+                                answers: None,
+                            })
+                            .map_err(|error| format!("acp adapter respond: {error}"))?;
+                    }
+                    answered = true;
+                    push_trace(
+                        lines,
+                        json!({"kind": "adapter.responded", "decision": answer}),
+                    );
+                }
+            }
+            Ok(AdapterEvent::ProviderTurnUpdated { provider_turn, .. })
+                if provider_turn.id == turn.id
+                    && provider_turn.status
+                        != atrium_engine::contracts::ProviderTurnStatus::Running =>
+            {
+                if let Some(usage) = &provider_turn.turn_token_usage {
+                    let mut trace = json!({"kind": "adapter.usage"});
+                    if let (Some(trace), Some(usage)) = (trace.as_object_mut(), usage.as_object()) {
+                        trace.extend(usage.clone());
+                    }
+                    push_trace(lines, trace);
+                }
+                // The agent's TurnCompleted follows and ends the scenario
+                // turn; this record only carries the per-turn usage.
+            }
+            Ok(AdapterEvent::Agent(AgentEvent::TurnCompleted { status, .. })) => {
+                let status = match status {
+                    TurnStatus::Completed => "completed",
+                    TurnStatus::Interrupted => "interrupted",
+                    TurnStatus::Failed => "failed",
+                    TurnStatus::InProgress => "running",
+                };
+                push(lines, NormalLine::run_finished(ordinal, status));
+                return Ok(TurnEnd::Finished(normalize_status(status)));
+            }
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout) => {
+                return Err(format!(
+                    "acp adapter produced no turn event for {} ms",
+                    timeout.as_millis()
+                ));
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err("acp adapter event channel closed".into());
+            }
+        }
+    }
 }
 
 fn engine_turn_lines(
@@ -718,6 +1237,7 @@ fn adapter_turn(
             model_selection: selection("mock-1", None, None),
             runtime_policy: policy.clone(),
             app_context: Vec::new(),
+            attachment_paths: Vec::new(),
             now: now_iso(),
         })
         .map_err(|error| format!("adapter start_turn: {error}"))?;

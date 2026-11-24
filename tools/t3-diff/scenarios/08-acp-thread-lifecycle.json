@@ -1,0 +1,13 @@
+{
+  "name": "08-acp-thread-lifecycle",
+  "kind": "acp-engine",
+  "provider": "mockacp",
+  "mock_name": "claude",
+  "flavor": "generic",
+  "model": "default",
+  "turns": [
+    {"text": "say hi"},
+    {"text": "now say bye"}
+  ],
+  "expect": {"final_status": "completed"}
+}

@@ -278,6 +278,236 @@ fn settings_change_and_a_long_turn_can_be_cancelled() {
     });
 }
 
+#[test]
+fn antigravity_advertises_sign_in_and_answers_native_questions() {
+    block_on(async {
+        let (client, mut events) = start("antigravity").await;
+        assert!(client.info.load_session && client.info.resume_session);
+        assert_eq!(client.info.auth_methods.len(), 4);
+        assert_eq!(client.info.auth_methods[0].0, "oauth-personal");
+        client.authenticate("oauth-personal").await.unwrap();
+        let session = client.new_session(&std::env::temp_dir()).await.unwrap();
+
+        let (_, started) = client.begin_turn(&session.session_id);
+        assert!(matches!(
+            started.last(),
+            Some(AgentEvent::TurnStarted { .. })
+        ));
+        let parts_future = client.prompt_parts(&session.session_id, "ask me a question", &[], &[]);
+        futures::pin_mut!(parts_future);
+        let parts = loop {
+            let next = events.next();
+            futures::pin_mut!(next);
+            match future::select(parts_future, next).await {
+                future::Either::Left((parts, _)) => break parts,
+                future::Either::Right((incoming, rest)) => {
+                    parts_future = rest;
+                    let Some(incoming) = incoming else {
+                        panic!("agent closed")
+                    };
+                    for event in client.translate(incoming) {
+                        if let AgentEvent::ApprovalRequested(request) = event {
+                            // A native question is answered with its option id.
+                            client
+                                .answer_permission_option(
+                                    request.request_id.clone(),
+                                    "stable-choice",
+                                )
+                                .unwrap();
+                        }
+                    }
+                }
+            }
+        };
+        assert_eq!(parts.result.as_deref(), Ok("end_turn"));
+        // agy reports thoughts separately; the prompt's usage keeps them.
+        assert_eq!(
+            parts
+                .usage
+                .as_ref()
+                .and_then(|usage| usage["thoughtTokens"].as_u64()),
+            Some(300)
+        );
+        let closing = client.finish_prompt(&session.session_id, parts.result, parts.usage.as_ref());
+        assert!(matches!(
+            closing.last(),
+            Some(AgentEvent::TurnCompleted {
+                status: atrium_core::TurnStatus::Completed,
+                ..
+            })
+        ));
+    });
+}
+
+#[test]
+fn attachments_become_text_and_image_blocks_the_agent_sees() {
+    block_on(async {
+        let (client, mut events) = start("claude").await;
+        let session = client.new_session(&std::env::temp_dir()).await.unwrap();
+        let dir = std::env::temp_dir().join(format!("acp-attach-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = dir.join("shot.png");
+        std::fs::write(&image, b"\x89PNG\r\n\x1a\nmock").unwrap();
+        let notes = dir.join("notes.txt");
+        std::fs::write(&notes, "hello").unwrap();
+
+        let blocks = client
+            .prompt_blocks_for(
+                "describe the attachments",
+                &[
+                    acp_client::PromptAttachment {
+                        path: image.clone(),
+                        name: "shot.png".into(),
+                        mime_type: "image/png".into(),
+                        image: true,
+                    },
+                    acp_client::PromptAttachment {
+                        path: notes.clone(),
+                        name: "notes.txt".into(),
+                        mime_type: "text/plain".into(),
+                        image: false,
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(blocks[0]["type"], "text");
+        assert!(blocks[0]["text"].as_str().unwrap().contains("notes.txt"));
+        assert_eq!(blocks[1]["type"], "image");
+        assert_eq!(blocks[1]["mimeType"], "image/png");
+        assert!(!blocks[1]["data"].as_str().unwrap().is_empty());
+
+        let mut transcript = Transcript::new();
+        let images = [image];
+        let mentions = [notes];
+        let prompt = client.prompt(
+            &session.session_id,
+            "describe the attachments",
+            &images,
+            &mentions,
+        );
+        futures::pin_mut!(prompt);
+        loop {
+            let next = events.next();
+            futures::pin_mut!(next);
+            match future::select(prompt, next).await {
+                future::Either::Left((ended, _)) => {
+                    while let Ok(incoming) = events.try_recv() {
+                        for event in client.translate(incoming) {
+                            transcript.apply(&event);
+                        }
+                    }
+                    for event in ended {
+                        transcript.apply(&event);
+                    }
+                    break;
+                }
+                future::Either::Right((incoming, rest)) => {
+                    prompt = rest;
+                    let Some(incoming) = incoming else {
+                        panic!("agent closed")
+                    };
+                    for event in client.translate(incoming) {
+                        transcript.apply(&event);
+                    }
+                }
+            }
+        }
+        let reasoning = transcript
+            .entries()
+            .iter()
+            .find_map(|entry| match &entry.kind {
+                EntryKind::Item(Item::Reasoning { text, .. }) => Some(text.clone()),
+                _ => None,
+            })
+            .expect("the mock reports what it received");
+        assert!(reasoning.contains("image:image/png"), "{reasoning}");
+        // The text file rides on its saved-path note, as the generic ACP
+        // adapter (and T3's `providerMessageTextWithAttachmentPaths`) does.
+        assert!(reasoning.contains("1 attachment(s)"), "{reasoning}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    });
+}
+
+#[test]
+fn antigravity_sign_in_url_is_captured_and_logout_clears_it() {
+    block_on(async {
+        let (client, _events) = start("antigravity").await;
+        client.authenticate("oauth-personal").await.unwrap();
+        let mut urls = Vec::new();
+        for _ in 0..40 {
+            urls.extend(client.take_auth_urls());
+            if !urls.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert_eq!(urls.len(), 1);
+        assert!(
+            urls[0].starts_with("https://accounts.google.com/o/oauth2/v2/auth?"),
+            "{urls:?}"
+        );
+        assert!(urls[0].contains("state=mock-state"), "{urls:?}");
+        assert!(
+            urls[0].contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A4567%2F"),
+            "{urls:?}"
+        );
+        client.logout().await.unwrap();
+
+        // An agent that did not advertise `auth.logout` refuses.
+        let (claude, _events) = start("claude").await;
+        assert!(claude.logout().await.is_err());
+    });
+}
+
+#[test]
+fn config_options_flatten_groups_categories_and_booleans() {
+    block_on(async {
+        let (client, _events) = start("antigravity").await;
+        let session = client.new_session(&std::env::temp_dir()).await.unwrap();
+        let model = session
+            .options
+            .iter()
+            .find(|option| option.category.as_deref() == Some("model"))
+            .unwrap();
+        // Grouped choices are flattened and keep their group name.
+        assert!(model.choices.iter().any(|choice| {
+            choice.value == "flash" && choice.group.as_deref() == Some("Gemini")
+        }));
+        assert!(
+            model
+                .choices
+                .iter()
+                .any(|choice| choice.value == "gemini-3.8-flash-high")
+        );
+        assert!(
+            session
+                .options
+                .iter()
+                .any(|option| option.category.as_deref() == Some("thought_level"))
+        );
+        let window = session
+            .options
+            .iter()
+            .find(|option| option.id == "contextWindow")
+            .unwrap();
+        assert_eq!(window.current, "200k");
+        let boolean = session
+            .options
+            .iter()
+            .find(|option| option.id == "autoCompact")
+            .unwrap();
+        assert_eq!(boolean.current, "true");
+        assert_eq!(
+            boolean
+                .choices
+                .iter()
+                .map(|choice| choice.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["true", "false"]
+        );
+    });
+}
+
 /// Handshake with a real agent, without sending a prompt:
 /// `ATRIUM_ACP="dsh --profile acp" cargo test -p acp-client -- --ignored real_agent`
 #[test]

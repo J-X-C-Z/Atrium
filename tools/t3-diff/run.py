@@ -376,6 +376,10 @@ def run_engine(
     scratch = outdir / "scratch-engine"
     env = os.environ.copy()
     env["MOCK_CODEX_BIN"] = str(wrapper)
+    if str(scenario.get("kind", "")).startswith("acp"):
+        env["MOCK_ACP_BIN"] = str(
+            find_tool("mock-acp", None, "MOCK_ACP_BIN", profiles=("debug", "release"))
+        )
     env["MOCK_REAL"] = str(mock)
     env["MOCK_LOG"] = str(mock_log)
     env.setdefault("NO_PROXY", "*")
@@ -580,18 +584,37 @@ def run_t3(
         if not project.is_dir():
             raise SetupError(f"scenario project is not a directory: {project}")
 
-    settings = {
-        "providerInstances": {
-            provider: {
-                "driver": "codex",
-                "displayName": "Mock Codex",
-                "config": {
-                    "binaryPath": str(wrapper),
-                    "homePath": str(codex_home),
-                },
+    if str(scenario.get("kind", "")).startswith("acp"):
+        mock_acp = find_tool("mock-acp", None, "MOCK_ACP_BIN", profiles=("debug", "release"))
+        settings = {
+            "providerInstances": {
+                provider: {
+                    "driver": "acpRegistry",
+                    "displayName": "Mock ACP",
+                    "config": {
+                        "source": "local",
+                        "commandPath": str(mock_acp),
+                        "commandArgs": [
+                            "--name",
+                            scenario.get("mock_name") or "claude",
+                        ],
+                    },
+                }
             }
         }
-    }
+    else:
+        settings = {
+            "providerInstances": {
+                provider: {
+                    "driver": "codex",
+                    "displayName": "Mock Codex",
+                    "config": {
+                        "binaryPath": str(wrapper),
+                        "homePath": str(codex_home),
+                    },
+                }
+            }
+        }
     (t3_home / "userdata" / "settings.json").write_text(
         json.dumps(settings, indent=2) + "\n", encoding="utf-8"
     )

@@ -1,0 +1,19 @@
+{
+  "name": "13-acp-engine-limits",
+  "kind": "acp-engine",
+  "provider": "mockacp",
+  "mock_name": "claude",
+  "flavor": "claude",
+  "model": "default",
+  "report_limits": true,
+  "t3": "skip: T3's CLI has no engine query for a session's streamed rate limits; the engine returns only what the agent reported in `_meta`",
+  "turns": [
+    {"text": "say hi"}
+  ],
+  "expect": {
+    "final_status": "completed",
+    "stream_contains": [
+      {"kind": "engine.limits", "present": true, "primary": 42.0, "secondary": 17.0, "reached": false}
+    ]
+  }
+}
