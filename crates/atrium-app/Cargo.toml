@@ -39,9 +39,14 @@ tokio = { version = "1", features = ["sync", "time", "rt-multi-thread"] }
 gpui.workspace = true
 gpui-kit.workspace = true
 ely-gpui-component.workspace = true
+# Only for screenshot runs: the window's own renderer needs the platform's
+# test-support feature to expose `render_to_image`.
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", optional = true }
 
 [features]
 workspace-ticker-test = ["gpui/test-support", "atrium-phone/test-support"]
+# Renders the window to a PNG for screenshot runs (script/screenshot-chat-list.sh).
+screenshots = ["gpui/test-support", "gpui_platform/test-support"]
 
 [dev-dependencies]
 tempfile = "3"

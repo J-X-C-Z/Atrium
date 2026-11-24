@@ -44,6 +44,12 @@ pub struct Settings {
     pub theme: ThemePref,
     /// Chats pinned to the top of the sidebar.
     pub pinned: Vec<String>,
+    /// Chats the user archived. They stay in the list under Archived, folded,
+    /// and can be brought back.
+    pub archived: Vec<String>,
+    /// The user's own name for a conversation (a remark), by thread id. The
+    /// thread's title is used when this is absent or blank.
+    pub chat_names: std::collections::HashMap<String, String>,
     /// Whether the sidebar is folded to its icon rail.
     pub sidebar_collapsed: bool,
     /// Ask for the Fast service tier (about twice the speed, more usage).
@@ -261,6 +267,37 @@ impl Settings {
         }
     }
 
+    pub fn is_archived(&self, thread_id: &str) -> bool {
+        self.archived.iter().any(|id| id == thread_id)
+    }
+
+    /// Archives or unarchives `thread_id`.
+    pub fn set_archived(&mut self, thread_id: &str, archived: bool) {
+        self.archived.retain(|id| id != thread_id);
+        if archived {
+            self.archived.insert(0, thread_id.to_string());
+        }
+    }
+
+    /// The user's name for `thread_id`, when it is not blank.
+    pub fn chat_nickname(&self, thread_id: &str) -> Option<&str> {
+        self.chat_names
+            .get(thread_id)
+            .map(|name| name.trim())
+            .filter(|name| !name.is_empty())
+    }
+
+    /// Names a conversation; a blank name clears the nickname.
+    pub fn set_chat_nickname(&mut self, thread_id: &str, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            self.chat_names.remove(thread_id);
+        } else {
+            self.chat_names
+                .insert(thread_id.to_string(), name.to_string());
+        }
+    }
+
     pub fn sync_enabled(&self) -> bool {
         self.sync_enabled.unwrap_or(true)
     }
@@ -297,6 +334,22 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn archived_and_nicknamed_chats_stay_in_settings() {
+        let mut settings = Settings::default();
+        assert!(!settings.is_archived("t1"));
+        settings.set_archived("t1", true);
+        assert!(settings.is_archived("t1"));
+        settings.set_archived("t1", false);
+        assert!(!settings.is_archived("t1"));
+
+        assert_eq!(settings.chat_nickname("t1"), None);
+        settings.set_chat_nickname("t1", "  Daily driver ");
+        assert_eq!(settings.chat_nickname("t1"), Some("Daily driver"));
+        settings.set_chat_nickname("t1", "   ");
+        assert_eq!(settings.chat_nickname("t1"), None);
     }
 
     #[test]

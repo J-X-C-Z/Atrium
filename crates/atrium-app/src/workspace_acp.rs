@@ -826,11 +826,10 @@ impl Workspace {
     }
 
     /// Hides an agent session and lets the agent close it.
-    pub(super) fn acp_archive(&mut self, session: String, cx: &mut Context<Self>) {
-        let backend = self.backend_of(&session).to_string();
+    pub(super) fn acp_archive(&mut self, session: String, backend: &str, cx: &mut Context<Self>) {
         self.settings.hidden_sessions.push(session.clone());
-        self.settings.save();
-        if let Some(client) = self.acp(&backend) {
+        self.persist_settings();
+        if let Some(client) = self.acp(backend) {
             cx.background_spawn(async move {
                 let _ = client.close_session(&session).await;
             })

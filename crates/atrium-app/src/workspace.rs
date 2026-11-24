@@ -20,6 +20,7 @@ use codex_client::{
 use futures::StreamExt;
 use gpui::{AppContext, Context, EventEmitter, Task};
 
+use crate::chat_list_model::{ChatAction, ChatChange, ChatScope};
 use crate::runtime_adapters::RuntimeAdapters;
 
 use crate::i18n::{t, t_any, tf};
@@ -170,12 +171,28 @@ pub fn is_image(path: &std::path::Path) -> bool {
     )
 }
 
+/// How long an archive or delete can be undone. The toast counts it down,
+/// and a delete reaches the backend only when it runs out.
+pub const CHAT_UNDO_WINDOW: Duration = Duration::from_secs(8);
+
 /// Something worth a toast.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Notice {
     Info(String),
     Success(String),
     Error(String),
+    /// A change the user can still undo; `token` says which.
+    Undo {
+        text: String,
+        token: u64,
+    },
+}
+
+/// The last archive or delete, kept until its undo window ends.
+struct PendingChatChange {
+    change: ChatChange,
+    thread: ThreadMeta,
+    token: u64,
 }
 
 /// A turn another Atrium sent while this owner was still resuming the thread.
@@ -247,6 +264,12 @@ pub struct Workspace {
     pub step_folds: HashMap<String, bool>,
     /// Which device's chats the list shows.
     pub device_filter: DeviceFilter,
+    /// Whether the list's Archived section is open.
+    pub archived_open: bool,
+    /// The last archive or delete while it can still be undone.
+    pending_chat_change: Option<PendingChatChange>,
+    /// Names the undo toast of the latest chat change.
+    chat_change_token: u64,
     /// The pairing code shown in Settings, and when it was made.
     pub pairing: Option<(String, Instant)>,
     /// Workflow runs as last read from their folders.
@@ -371,7 +394,7 @@ impl Workspace {
 
     fn with_settings(settings: Settings) -> Self {
         let (runtime_events_tx, runtime_events) = futures::channel::mpsc::unbounded();
-        Self {
+        let mut workspace = Self {
             status: Status::Connecting,
             client: None,
             runtime: std::sync::Arc::new(RuntimeAdapters::new()),
@@ -404,6 +427,9 @@ impl Workspace {
             step_folds: HashMap::new(),
             unread: HashMap::new(),
             device_filter: DeviceFilter::default(),
+            archived_open: false,
+            pending_chat_change: None,
+            chat_change_token: 0,
             pairing: None,
             workflow_runs: Vec::new(),
             pick_template: None,
@@ -455,7 +481,18 @@ impl Workspace {
             _sync_poll: None,
             _sync_commands: None,
             _sync_init: None,
+        };
+        // Screenshot runs ask the list to show a running turn. Debug builds
+        // only; nothing in the app sets this.
+        #[cfg(debug_assertions)]
+        if let Ok(id) = std::env::var("ATRIUM_SCREENSHOT_WORKING_THREAD")
+            && !id.trim().is_empty()
+        {
+            workspace
+                .turn_started
+                .insert(id.trim().to_string(), Instant::now());
         }
+        workspace
     }
 
     /// Starts (or restarts) the Codex server and pumps its events into the state.
@@ -1121,10 +1158,19 @@ impl Workspace {
 
     pub fn open_thread(&mut self, thread_id: String, cx: &mut Context<Self>) {
         self.nav += 1;
+        if self.settings.is_archived(&thread_id) {
+            self.archived_open = true;
+        }
         self.view = View::Thread(thread_id.clone());
         self.unread.remove(&thread_id);
         cx.notify();
         self.load_thread(thread_id, cx);
+    }
+
+    /// The list's name for a conversation: the user's nickname when there is
+    /// one, else the thread's own title.
+    pub fn chat_title(&self, thread_id: &str, title: &str) -> String {
+        crate::chat_list_model::display_title(self.settings.chat_nickname(thread_id), title)
     }
 
     /// Reads a thread's history into its transcript, without showing it.
@@ -2250,47 +2296,222 @@ impl Workspace {
         }
     }
 
+    /// Puts a conversation under Archived. It stays in the list, folded, and
+    /// the toast can bring it back for a few seconds. Another device's
+    /// conversation is a request through the replicated overlay, never a
+    /// local archive.
     pub fn archive(&mut self, thread_id: String, cx: &mut Context<Self>) {
-        if !crate::agents::is_codex(self.backend_of(&thread_id)) {
-            self.acp_archive(thread_id.clone(), cx);
-            self.threads.retain(|t| t.id != thread_id);
-            self.transcripts.remove(&thread_id);
-            self.loaded_threads.remove(&thread_id);
-            self.settings.pinned.retain(|id| *id != thread_id);
-            if self.view == View::Thread(thread_id) {
-                self.view = View::Draft;
-                self.draft = Transcript::new();
+        let Some(thread) = self
+            .threads
+            .iter()
+            .find(|thread| thread.id == thread_id)
+            .cloned()
+        else {
+            return;
+        };
+        let was_archived = self.settings.is_archived(&thread_id);
+        let remote = self.sync_is_remote(&thread_id);
+        let change = ChatChange::new(
+            thread_id.clone(),
+            ChatAction::Archive,
+            ChatScope::of(remote),
+            was_archived,
+        );
+        let text = if remote {
+            let device = self.chat_device(&thread_id).unwrap_or_default();
+            let device = self.device_label(&device);
+            self.sync_set_thread_field(&thread_id, change.remote_field(), serde_json::json!(true));
+            tf(
+                "Asked {device} to archive this conversation.",
+                &[("device", &device)],
+            )
+        } else {
+            self.settings.set_archived(&thread_id, true);
+            self.persist_settings();
+            if self.sync.is_some() {
+                self.sync_set_thread_field(&thread_id, "archived", serde_json::json!(true));
             }
-            cx.emit(Notice::Info(t("Chat archived").into()));
+            t("Chat archived").to_string()
+        };
+        if matches!(&self.view, View::Thread(id) if *id == thread_id) {
+            // Do not fold the section over the chat the user is reading.
+            self.archived_open = true;
+        }
+        self.begin_chat_change(change, thread, text, cx);
+        cx.notify();
+    }
+
+    /// Takes a conversation out of Archived.
+    pub fn unarchive(&mut self, thread_id: String, cx: &mut Context<Self>) {
+        self.settings.set_archived(&thread_id, false);
+        self.persist_settings();
+        if self.sync.is_some() {
+            self.sync_set_thread_field(&thread_id, "archived", serde_json::json!(false));
+        }
+        cx.notify();
+    }
+
+    /// Removes a conversation from the list. The backend hears about it only
+    /// after the undo window; another device's conversation is a request that
+    /// leaves the local copy where it is.
+    pub fn delete_chat(&mut self, thread_id: String, cx: &mut Context<Self>) {
+        let Some(thread) = self
+            .threads
+            .iter()
+            .find(|thread| thread.id == thread_id)
+            .cloned()
+        else {
+            return;
+        };
+        let was_archived = self.settings.is_archived(&thread_id);
+        let remote = self.sync_is_remote(&thread_id);
+        let change = ChatChange::new(
+            thread_id.clone(),
+            ChatAction::Delete,
+            ChatScope::of(remote),
+            was_archived,
+        );
+        if remote {
+            let device = self.chat_device(&thread_id).unwrap_or_default();
+            let device = self.device_label(&device);
+            self.sync_set_thread_field(&thread_id, change.remote_field(), serde_json::json!(true));
+            let text = tf(
+                "Asked {device} to delete this conversation.",
+                &[("device", &device)],
+            );
+            self.begin_chat_change(change, thread, text, cx);
             cx.notify();
             return;
         }
-        let Some(client) = self.thread_codex(&thread_id) else {
-            return;
-        };
+        // The row leaves the list at once, but the thread is stashed for the
+        // undo window; nothing irreversible happens until it ends.
         self.threads.retain(|t| t.id != thread_id);
         self.transcripts.remove(&thread_id);
         self.loaded_threads.remove(&thread_id);
-        self.settings.pinned.retain(|id| *id != thread_id);
+        self.unread.remove(&thread_id);
         if self.view == View::Thread(thread_id.clone()) {
             self.view = View::Draft;
             self.draft = Transcript::new();
         }
-        cx.emit(Notice::Info(t("Chat archived").into()));
+        self.begin_chat_change(change, thread, t("Chat deleted").to_string(), cx);
         cx.notify();
-        cx.spawn(async move |this, cx| {
-            if let Err(error) = client.thread_archive(&thread_id).await {
-                log::warn!("thread/archive failed: {error:#}");
-                let _ = this.update(cx, |ws, cx| {
-                    cx.emit(Notice::Error(tf(
-                        "Could not archive: {error}",
-                        &[("error", &format!("{error:#}"))],
-                    )));
-                    ws.refresh(cx);
-                });
+    }
+
+    /// Undoes the latest archive or delete, when `token` is still current.
+    pub fn undo_chat_action(&mut self, token: u64, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_chat_change.take() else {
+            return;
+        };
+        if pending.token != token {
+            self.pending_chat_change = Some(pending);
+            return;
+        }
+        let PendingChatChange { change, thread, .. } = pending;
+        if let Some(archived) = change.undo_archived() {
+            self.settings.set_archived(&change.key, archived);
+            self.persist_settings();
+            if self.sync.is_some() {
+                self.sync_set_thread_field(&change.key, "archived", serde_json::json!(archived));
             }
+        } else if change.undo_restores_thread() && !self.threads.iter().any(|t| t.id == change.key)
+        {
+            self.threads.push(thread);
+            self.threads
+                .sort_by_key(|t| std::cmp::Reverse(t.updated_at));
+        }
+        if let Some(field) = change.undo_remote_field() {
+            self.sync_set_thread_field(&change.key, field, serde_json::json!(false));
+        }
+        cx.notify();
+    }
+
+    /// Opens or folds the list's Archived section.
+    pub fn toggle_archived(&mut self, cx: &mut Context<Self>) {
+        self.archived_open = !self.archived_open;
+        cx.notify();
+    }
+
+    /// Gives a conversation a name of the user's own; a blank name clears it.
+    pub fn set_chat_nickname(&mut self, thread_id: String, name: String, cx: &mut Context<Self>) {
+        self.settings.set_chat_nickname(&thread_id, &name);
+        self.persist_settings();
+        cx.notify();
+    }
+
+    /// Starts the toast's countdown for `change`; when it runs out the change
+    /// is committed. Starting another change commits this one first.
+    fn begin_chat_change(
+        &mut self,
+        change: ChatChange,
+        thread: ThreadMeta,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.commit_pending_chat(cx);
+        self.chat_change_token += 1;
+        let token = self.chat_change_token;
+        self.pending_chat_change = Some(PendingChatChange {
+            change,
+            thread,
+            token,
+        });
+        cx.emit(Notice::Undo { text, token });
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(CHAT_UNDO_WINDOW).await;
+            let _ = this.update(cx, |ws, cx| {
+                if ws
+                    .pending_chat_change
+                    .as_ref()
+                    .is_some_and(|pending| pending.token == token)
+                {
+                    ws.commit_pending_chat(cx);
+                    cx.notify();
+                }
+            });
         })
         .detach();
+    }
+
+    /// Ends the undo window: a locally deleted conversation now goes for good.
+    fn commit_pending_chat(&mut self, cx: &mut Context<Self>) {
+        let Some(PendingChatChange { change, thread, .. }) = self.pending_chat_change.take() else {
+            return;
+        };
+        if !change.removes_locally() {
+            return;
+        }
+        let thread_id = change.key.clone();
+        self.settings.archived.retain(|id| *id != thread_id);
+        self.settings.pinned.retain(|id| *id != thread_id);
+        let backend = crate::agents::split_backend(&thread.backend).0.to_string();
+        if crate::agents::is_codex(&thread.backend) {
+            if let Some(client) = self.codex_for(&thread.backend) {
+                cx.spawn(async move |this, cx| {
+                    if let Err(error) = client.thread_archive(&thread_id).await {
+                        log::warn!("thread/archive failed: {error:#}");
+                        let _ = this.update(cx, |ws, cx| {
+                            cx.emit(Notice::Error(tf(
+                                "Could not delete: {error}",
+                                &[("error", &format!("{error:#}"))],
+                            )));
+                            ws.refresh(cx);
+                        });
+                    }
+                })
+                .detach();
+            }
+        } else {
+            self.acp_archive(thread_id.clone(), &backend, cx);
+        }
+        self.persist_settings();
+    }
+
+    /// Saves settings outside tests, where the user's real settings file is
+    /// not ours to touch.
+    fn persist_settings(&self) {
+        if !cfg!(test) {
+            self.settings.save();
+        }
     }
 
     pub fn rename(&mut self, thread_id: String, name: String, cx: &mut Context<Self>) {
@@ -2725,6 +2946,10 @@ mod tests {
 #[cfg(all(test, unix, feature = "workspace-ticker-test"))]
 #[path = "workspace_ticker_test.rs"]
 mod ticker_test;
+
+#[cfg(all(test, unix, feature = "workspace-ticker-test"))]
+#[path = "workspace_chat_list_test.rs"]
+mod chat_list_test;
 
 /// The follow-ups an answer proposes: the list under a "Next steps" (or
 /// "Follow-ups", "Suggested next", "下一步", "后续") line, at most five.

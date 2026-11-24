@@ -53,7 +53,7 @@ use gpui_kit::component::theme::{Theme as KitTheme, ThemeMode};
 use crate::i18n::{t, tf};
 use crate::{
     settings::ThemePref,
-    workspace::{Fill, Notice, Workspace},
+    workspace::{CHAT_UNDO_WINDOW, Fill, Notice, Workspace},
 };
 pub use composer::AcceptPrediction;
 use composer::Composer;
@@ -181,6 +181,10 @@ enum Overlay {
         team_notes: Vec<(String, Entity<TextInput>)>,
     },
     Rename {
+        thread_id: String,
+        field: Entity<TextInput>,
+    },
+    Nickname {
         thread_id: String,
         field: Entity<TextInput>,
     },
@@ -333,6 +337,15 @@ impl RootView {
             Notice::Info(text) => Toast::new(text.clone()),
             Notice::Success(text) => Toast::new(text.clone()).severity(Severity::Success),
             Notice::Error(text) => Toast::new(text.clone()).severity(Severity::Danger),
+            Notice::Undo { text, token } => {
+                let workspace = self.workspace.clone();
+                let token = *token;
+                Toast::new(text.clone())
+                    .action(t("Undo"), move |_, cx| {
+                        workspace.update(cx, |ws, cx| ws.undo_chat_action(token, cx));
+                    })
+                    .stay(Some(CHAT_UNDO_WINDOW))
+            }
         };
         self.toaster.update(cx, |toaster, cx| {
             toaster.push(toast, cx);
@@ -391,6 +404,36 @@ impl RootView {
         let field = cx.new(|cx| TextInput::new(window, cx).placeholder(t("Chat name")));
         field.update(cx, |input, cx| input.set_text(title, cx));
         self.overlay = Some(Overlay::Rename { thread_id, field });
+        cx.notify();
+    }
+
+    /// Asks for the user's own name for a conversation (a remark). The title
+    /// is what the list shows when it is blank.
+    pub fn start_nickname(
+        &mut self,
+        thread_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title = self
+            .workspace
+            .read(cx)
+            .threads
+            .iter()
+            .find(|t| t.id == thread_id)
+            .map(|t| t.title())
+            .unwrap_or_default();
+        let current = self
+            .workspace
+            .read(cx)
+            .settings
+            .chat_nickname(&thread_id)
+            .map(str::to_string);
+        let field = cx.new(|cx| TextInput::new(window, cx).placeholder(title));
+        field.update(cx, |input, cx| {
+            input.set_text(current.unwrap_or_default(), cx)
+        });
+        self.overlay = Some(Overlay::Nickname { thread_id, field });
         cx.notify();
     }
 
@@ -1448,6 +1491,22 @@ impl Render for RootView {
                     .on_submit(move |text, window, cx| {
                         let (id, name) = (thread_id.clone(), text.to_string());
                         workspace.update(cx, |ws, cx| ws.rename(id, name, cx));
+                        submit.update(cx, |this, cx| this.close_overlay(window, cx));
+                    })
+                    .into_any_element(),
+                )
+            }
+            Some(Overlay::Nickname { thread_id, field }) => {
+                let (close, submit) = (cx.entity(), cx.entity());
+                let (thread_id, workspace) = (thread_id.clone(), self.workspace.clone());
+                Some(
+                    PromptDialog::new("nickname", t("Nickname"), field, move |window, cx| {
+                        close.update(cx, |this, cx| this.close_overlay(window, cx))
+                    })
+                    .submit(t("Save"))
+                    .on_submit(move |text, window, cx| {
+                        let (id, name) = (thread_id.clone(), text.to_string());
+                        workspace.update(cx, |ws, cx| ws.set_chat_nickname(id, name, cx));
                         submit.update(cx, |this, cx| this.close_overlay(window, cx));
                     })
                     .into_any_element(),

@@ -1021,6 +1021,11 @@ impl Workspace {
         let mut hidden = HashSet::new();
         let mut titles = HashMap::new();
         let mut moved = HashMap::new();
+        let mut archived_add = HashSet::new();
+        let mut archived_remove = HashSet::new();
+        // A delete request only removes the conversation on the device that
+        // owns it; everywhere else it stays, waiting for that device.
+        let mut deleted = HashSet::new();
         for (key, register) in sync.state.store().registers() {
             let Some((device, backend, thread, field)) = atrium_sync::parse_thread_key(key) else {
                 continue;
@@ -1039,6 +1044,20 @@ impl Workspace {
                 }
                 "hidden" if visible == Some(true) => {
                     hidden.insert(thread.to_string());
+                }
+                "archived" => match visible {
+                    Some(true) => {
+                        archived_add.insert(thread.to_string());
+                    }
+                    Some(false) => {
+                        archived_remove.insert(thread.to_string());
+                    }
+                    None => {}
+                },
+                "deleted"
+                    if visible == Some(true) && device == self.settings.install_id.as_str() =>
+                {
+                    deleted.insert(thread.to_string());
                 }
                 "moved_to" => {
                     if let Some(target) = register.value.as_ref().and_then(|value| value.as_str()) {
@@ -1076,6 +1095,26 @@ impl Workspace {
             let before = self.threads.len();
             self.threads.retain(|thread| !hidden.contains(&thread.id));
             changed |= before != self.threads.len();
+        }
+        if !deleted.is_empty() {
+            let before = self.threads.len();
+            self.threads.retain(|thread| !deleted.contains(&thread.id));
+            changed |= before != self.threads.len();
+        }
+        if !archived_add.is_empty() || !archived_remove.is_empty() {
+            let mut archived = self.settings.archived.clone();
+            archived.retain(|id| !archived_remove.contains(id));
+            for id in archived_add {
+                if !archived.contains(&id) {
+                    archived.insert(0, id);
+                }
+            }
+            archived.sort();
+            archived.dedup();
+            if self.settings.archived != archived {
+                self.settings.archived = archived;
+                changed = true;
+            }
         }
         let mut pinned: Vec<String> = pinned.into_iter().collect();
         pinned.sort();

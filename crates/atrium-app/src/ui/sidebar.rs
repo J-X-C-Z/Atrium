@@ -17,9 +17,8 @@ use gpui::{
     AnyElement, App, Entity, IntoElement, ParentElement, SharedString, Styled, Window, div,
     prelude::*, px,
 };
-use jiff::{Timestamp, tz::TimeZone};
 
-use super::chat_list::{ChatList, ChatRow};
+use super::chat_list::{ChatCallbacks, ChatList, ChatRow};
 use super::{NewChat, OpenPalette, OpenSettings, RootView, TITLE_BAR_HEIGHT, ToggleSidebar};
 use crate::i18n::{t, tf};
 use crate::workspace::{Status, View, Workspace};
@@ -114,7 +113,6 @@ pub fn render(
             .into_any_element();
     }
 
-    let now = Timestamp::now();
     let in_project = ws.project_root().is_some();
     let in_workflows = matches!(ws.room, crate::workspace::Room::Workflows { .. });
     // Workstreams' sessions live in their project, not among the chats.
@@ -125,9 +123,10 @@ pub fn render(
         .filter(|thread| !project_threads.contains(&thread.id) && ws.chat_shown(&thread.id))
         .map(|thread| ChatRow {
             key: thread.id.clone().into(),
-            title: thread.title(),
-            at: Timestamp::from_second(thread.updated_at).unwrap_or(now),
+            title: ws.chat_title(&thread.id, &thread.title()),
+            at: thread.updated_at,
             pinned: ws.settings.is_pinned(&thread.id),
+            archived: ws.settings.is_archived(&thread.id),
             status: ws.chat_status(&thread.id),
             agent: crate::agents::split_backend(&thread.backend).0.to_string(),
             // Chats on other devices carry the device's name.
@@ -141,9 +140,7 @@ pub fn render(
         View::Draft => None,
     };
     let empty = conversations.is_empty();
-    let today = now
-        .to_zoned(TimeZone::try_system().unwrap_or(TimeZone::UTC))
-        .date();
+    let archived_open = ws.archived_open;
     let query = search.read(cx).text().to_string();
 
     let open = workspace.clone();
@@ -152,14 +149,20 @@ pub fn render(
     let hits: Vec<(String, String, String)> = match &ws.search {
         Some((searched, hits)) if searched.trim() == query.trim() => hits
             .iter()
-            .map(|(meta, snippet)| (meta.id.clone(), meta.title(), snippet.clone()))
+            .map(|(meta, snippet)| {
+                (
+                    meta.id.clone(),
+                    ws.chat_title(&meta.id, &meta.title()),
+                    snippet.clone(),
+                )
+            })
             .collect(),
         _ => Vec::new(),
     };
     // Whether any title matches, as the list filters: every word, any case.
     let titles_match = query.trim().is_empty()
         || ws.threads.iter().any(|thread| {
-            let title = thread.title().to_lowercase();
+            let title = ws.chat_title(&thread.id, &thread.title()).to_lowercase();
             query
                 .split_whitespace()
                 .all(|word| title.contains(&word.to_lowercase()))
@@ -170,6 +173,10 @@ pub fn render(
     let retry = workspace.clone();
     let pin = workspace.clone();
     let archive = workspace.clone();
+    let unarchive = workspace.clone();
+    let delete = workspace.clone();
+    let toggle_archived = workspace.clone();
+    let nickname = root.clone();
     let extra = {
         // A conversation another device owns can be moved here.
         let remote: std::collections::HashSet<String> = ws
@@ -194,32 +201,44 @@ pub fn render(
             )]
         }
     };
-    let list = ChatList::new(
-        conversations,
-        active,
-        query,
-        today,
-        move |key, _, cx| {
+    let callbacks = ChatCallbacks {
+        select: std::rc::Rc::new(move |key, _, cx| {
             let id = key.to_string();
             open.update(cx, |ws, cx| ws.open_thread(id, cx));
-        },
-        {
+        }),
+        rename: {
             let root = root.clone();
-            move |key, window, cx| {
+            std::rc::Rc::new(move |key, window, cx| {
                 let id = key.to_string();
                 root.update(cx, |root, cx| root.start_rename(id, window, cx));
-            }
+            })
         },
-        move |key, _, cx| {
+        nickname: std::rc::Rc::new(move |key, window, cx| {
+            let id = key.to_string();
+            nickname.update(cx, |root, cx| root.start_nickname(id, window, cx));
+        }),
+        pin: std::rc::Rc::new(move |key, _, cx| {
             let id = key.to_string();
             pin.update(cx, |ws, cx| ws.toggle_pin(&id, cx));
-        },
-        move |key, _, cx| {
+        }),
+        archive: std::rc::Rc::new(move |key, _, cx| {
             let id = key.to_string();
             archive.update(cx, |ws, cx| ws.archive(id, cx));
-        },
-        extra,
-    );
+        }),
+        unarchive: std::rc::Rc::new(move |key, _, cx| {
+            let id = key.to_string();
+            unarchive.update(cx, |ws, cx| ws.unarchive(id, cx));
+        }),
+        delete: std::rc::Rc::new(move |key, _, cx| {
+            let id = key.to_string();
+            delete.update(cx, |ws, cx| ws.delete_chat(id, cx));
+        }),
+        toggle_archived: std::rc::Rc::new(move |_, cx| {
+            toggle_archived.update(cx, |ws, cx| ws.toggle_archived(cx));
+        }),
+        extra: std::rc::Rc::new(extra),
+    };
+    let list = ChatList::new(conversations, active, query, archived_open, callbacks);
 
     Sidebar::new("sidebar", false)
         .child(
