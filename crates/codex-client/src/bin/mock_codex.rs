@@ -247,22 +247,62 @@ fn main() {
         steered: Mutex::new(HashMap::new()),
         resumed: Mutex::new(HashSet::new()),
     });
-    // Two stored threads so the sidebar has history.
+    // Two stored threads so the sidebar has history. Screenshot runs ask for
+    // a few more with stable ids, so their settings can pin and archive them.
     {
         let mut threads = state.threads.lock().unwrap();
-        for (ago, text, answer) in [
+        let mut seeds: Vec<(i64, &str, &str, Option<&str>)> = vec![
             (
                 3600 * 26,
                 "How is the workspace laid out?",
                 "Three crates: **core**, **codex-client** and **app**.",
+                None,
             ),
             (
                 600,
                 "Explain the transcript reducer",
                 "It folds events into a flat list of rows.",
+                None,
             ),
-        ] {
-            let id = next_id("thread");
+        ];
+        if std::env::var_os("ATRIUM_MOCK_CHAT_LIST").is_some() {
+            seeds.extend([
+                (
+                    300,
+                    "Ship 0.4 — the release checklist",
+                    "The checklist is in the release issue.",
+                    Some("demo-pinned"),
+                ),
+                (
+                    180,
+                    "Where does the sentence splitter live?",
+                    "In **atrium-layout**, beside the line breaker.",
+                    Some("demo-recent-a"),
+                ),
+                (
+                    240,
+                    "Soak the scheduler for an hour",
+                    "The soak started; the scheduler is ticking.",
+                    Some("demo-working"),
+                ),
+                (
+                    3600 * 30,
+                    "How does the worktree merge work?",
+                    "A lead's branch is merged into its base on request.",
+                    Some("demo-recent-b"),
+                ),
+                (
+                    3600 * 72,
+                    "Old spike: command palette search",
+                    "The spike kept a tiny index per project.",
+                    Some("demo-archived"),
+                ),
+            ]);
+        }
+        for (ago, text, answer, fixed) in seeds {
+            let id = fixed
+                .map(str::to_string)
+                .unwrap_or_else(|| next_id("thread"));
             let thread = Thread {
                 id: id.clone(),
                 preview: text.into(),

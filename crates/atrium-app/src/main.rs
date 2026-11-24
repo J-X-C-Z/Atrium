@@ -6,6 +6,7 @@
 mod agents;
 mod alerts;
 mod capabilities;
+mod chat_list_model;
 mod i18n;
 use atrium_project as project;
 mod docmap;
@@ -154,6 +155,39 @@ fn main() {
         })
         .expect("open the main window");
         cx.activate(true);
+        // A screenshot run renders the window to a PNG itself: screen capture
+        // permissions are not needed, and CI can use the same path where the
+        // platform renderer supports it. Built with `--features screenshots`.
+        #[cfg(feature = "screenshots")]
+        if let Ok(path) = std::env::var("ATRIUM_SCREENSHOT_TO")
+            && !path.trim().is_empty()
+        {
+            let shot = window;
+            let path = std::path::PathBuf::from(path);
+            cx.spawn(async move |cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(20))
+                    .await;
+                let _ = shot.update(cx, |_, window, cx| {
+                    // Draw the current tree now; the window may never have
+                    // been presented in a headless session.
+                    let _ = window.draw(cx);
+                    match window.render_to_image() {
+                        Ok(image) => {
+                            if let Err(error) = image.save(&path) {
+                                eprintln!(
+                                    "screenshot: could not write {}: {error}",
+                                    path.display()
+                                );
+                            }
+                        }
+                        Err(error) => eprintln!("screenshot: did not render: {error:#}"),
+                    }
+                    cx.quit();
+                });
+            })
+            .detach();
+        }
         cx.spawn(async move |cx| {
             use futures::StreamExt;
             while let Some(url) = incoming.next().await {
