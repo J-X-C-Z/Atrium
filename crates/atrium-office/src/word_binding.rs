@@ -2561,7 +2561,7 @@ mod tests {
             r#"<w:styles xmlns:w="{W}"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:eastAsia="等线"/><w:sz w:val="21"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:styleId="Body"><w:name w:val="Body"/><w:pPr><w:spacing w:before="60"/></w:pPr><w:rPr><w:rFonts w:asciiTheme="minorHAnsi" w:eastAsiaTheme="minorEastAsia"/><w:sz w:val="24"/><w:color w:val="333333"/></w:rPr></w:style></w:styles>"#
         );
         let numbering = format!(
-            r#"<w:numbering xmlns:w="{W}"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="3"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:suff w:val="space"/><w:rPr><w:b/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="7"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#
+            r#"<w:numbering xmlns:w="{W}"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="3"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:suff w:val="space"/><w:rPr><w:b/></w:rPr></w:lvl></w:abstractNum><w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/><w:rPr><w:rFonts w:ascii="Symbol"/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="7"><w:abstractNumId w:val="0"/></w:num><w:num w:numId="8"><w:abstractNumId w:val="1"/></w:num></w:numbering>"#
         );
         let theme = format!(
             r#"<a:theme xmlns:a="{A_NS}" name="T"><a:themeElements><a:clrScheme name="C"><a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1><a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="44546A"/></a:dk2><a:lt2><a:srgbClr val="E7E6E6"/></a:lt2><a:accent1><a:srgbClr val="4472C4"/></a:accent1><a:accent2><a:srgbClr val="ED7D31"/></a:accent2><a:accent3><a:srgbClr val="A5A5A5"/></a:accent3><a:accent4><a:srgbClr val="FFC000"/></a:accent4><a:accent5><a:srgbClr val="5B9BD5"/></a:accent5><a:accent6><a:srgbClr val="70AD47"/></a:accent6><a:hlink><a:srgbClr val="0563C1"/></a:hlink><a:folHlink><a:srgbClr val="954F72"/></a:folHlink></a:clrScheme><a:fontScheme name="F"><a:majorFont><a:latin typeface="Aptos Display"/><a:ea typeface="宋体"/></a:majorFont><a:minorFont><a:latin typeface="Aptos"/><a:ea typeface="等线"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>"#
@@ -2649,6 +2649,28 @@ mod tests {
             panic!("header paragraph")
         };
         assert_eq!(p.text(), "页眉");
+    }
+
+    /// A bullet level's mark comes from `lvlText`; an empty mark made the
+    /// layout draw no bullet at all.
+    #[test]
+    fn a_bullet_level_keeps_its_lvl_text() {
+        let body = r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="8"/></w:numPr></w:pPr><w:r><w:t>项目</w:t></w:r></w:p>"#;
+        let (_dir, path) = look_fixture(body);
+        let doc = crate::open(&path).unwrap();
+        let Office::Word(word) = &doc.office else {
+            panic!("not Word")
+        };
+        let Block::Paragraph(p) = &word.blocks()[0] else {
+            panic!("not paragraph")
+        };
+        let list = p.look.list.as_ref().expect("list");
+        assert_eq!(list.pattern, "•");
+        assert!(
+            matches!(&list.formats[0], crate::look::NumFormat::Bullet(mark) if mark == "•"),
+            "formats: {:?}",
+            list.formats
+        );
     }
 
     #[test]

@@ -453,7 +453,17 @@ impl<'a> Looks<'a> {
         let mut starts = Vec::new();
         for id in 0..=level {
             let n = level_node(id).unwrap_or(effective);
-            formats.push(num_format(val(n, ns, "numFmt").unwrap_or("decimal")));
+            let mut format = num_format(val(n, ns, "numFmt").unwrap_or("decimal"));
+            // A bullet level's mark is its `lvlText`; `numFmt` alone only says
+            // "bullet". Without this the label is empty and the list shows no
+            // bullet at all.
+            if let NumFormat::Bullet(mark) = &mut format {
+                *mark = val(n, ns, "lvlText")
+                    .filter(|text| !text.is_empty())
+                    .unwrap_or("•")
+                    .to_string();
+            }
+            formats.push(format);
             starts.push(num(val(n, ns, "start")).unwrap_or(1).max(0) as u32);
         }
         let pattern = val(effective, ns, "lvlText").unwrap_or("%1.").to_string();

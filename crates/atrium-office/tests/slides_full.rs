@@ -62,7 +62,7 @@ fn fixture_deck_reads_shapes_groups_tables_and_charts() {
         .expect("flipped shape");
     assert!(matches!(
         flipped.look.path.first(),
-        Some(PathCmd::Move(x, _)) if *x == flipped.frame[2]
+        Some(PathCmd::Move(x, _)) if *x == flipped.frame[2] * 20
     ));
     assert!(
         shapes.iter().any(|s| s
@@ -269,6 +269,94 @@ fn run_size_and_colour_round_trip() {
     };
     assert_eq!(marks.size, Some(480));
     assert_eq!(marks.color, Some(atrium_office::look::Rgb(0x112233)));
+}
+
+/// `ShapeLook::path` is in twips inside the frame; a preset outline must
+/// therefore reach the frame's width and height in twips, not points.
+#[test]
+fn preset_outlines_are_in_twips_inside_their_frames() {
+    let doc = open(&fixture()).unwrap();
+    let Office::Slides(deck) = &doc.office else {
+        panic!("not a deck");
+    };
+    let shapes = &deck.slides()[0].shapes;
+    let rect = shapes
+        .iter()
+        .find(|s| {
+            matches!(
+                s.look.path.as_slice(),
+                [
+                    PathCmd::Move(0, 0),
+                    PathCmd::Line(..),
+                    PathCmd::Line(..),
+                    PathCmd::Line(..),
+                    PathCmd::Close
+                ]
+            )
+        })
+        .expect("a rectangle preset");
+    let (mut max_x, mut max_y) = (0, 0);
+    for cmd in &rect.look.path {
+        if let PathCmd::Move(x, y) | PathCmd::Line(x, y) = cmd {
+            max_x = max_x.max(*x);
+            max_y = max_y.max(*y);
+        }
+    }
+    assert_eq!(max_x, rect.frame[2] * 20, "path: {:?}", rect.look.path);
+    assert_eq!(max_y, rect.frame[3] * 20, "path: {:?}", rect.look.path);
+}
+
+/// A group's children are moved by the group's own offset and scale; the
+/// resolved frame must be in slide points, not inside-group points.
+#[test]
+fn group_members_are_placed_in_slide_coordinates() {
+    let doc = open(&fixture()).unwrap();
+    let Office::Slides(deck) = &doc.office else {
+        panic!("not a deck");
+    };
+    let grouped = deck.slides()[0]
+        .shapes
+        .iter()
+        .find(|s| s.text_paras().any(|p| p.text().contains("Grouped")))
+        .expect("the grouped shape");
+    assert!(
+        grouped.frame[0] >= 440 && grouped.frame[1] >= 39,
+        "grouped frame is still inside the group: {:?}",
+        grouped.frame
+    );
+}
+
+/// Every slide's pictures are files in one temporary folder owned by the
+/// binding. A per-slide folder dropped the pictures of all but the last.
+#[test]
+fn pictures_on_every_slide_stay_on_disk() {
+    let doc = open(&fixture()).unwrap();
+    let Office::Slides(deck) = &doc.office else {
+        panic!("not a deck");
+    };
+    let mut seen = 0;
+    for (index, slide) in deck.slides().iter().enumerate() {
+        for shape in &slide.shapes {
+            if let atrium_office::look::Fill::Picture { path, .. } = &shape.look.fill {
+                assert!(
+                    path.exists(),
+                    "slide {} picture {} was removed",
+                    index + 1,
+                    path.display()
+                );
+                seen += 1;
+            }
+            if let ShapeKind::Fallback(Some(path)) = &shape.kind {
+                assert!(
+                    path.exists(),
+                    "slide {} fallback {} was removed",
+                    index + 1,
+                    path.display()
+                );
+            }
+        }
+    }
+    assert!(seen >= 2, "expected pictures on both slides, found {seen}");
 }
 
 fn slide_xml(path: &Path, n: usize) -> String {

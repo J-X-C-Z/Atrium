@@ -328,6 +328,9 @@ impl SlidesBinding {
         let mut slides = Vec::new();
         let mut next = 1;
         let mut seen = HashSet::new();
+        // One folder for every slide's pictures. It must outlive each slide,
+        // otherwise all but the last slide's picture paths dangle.
+        let mut media = Media::new();
         let table_styles_part = rels
             .values()
             .find(|r| !r.external && r.kind("tableStyles"))
@@ -378,7 +381,6 @@ impl SlidesBinding {
                     r,
                     styles,
                 };
-                let mut media = Media::new();
                 let mut shapes = Vec::new();
                 let mut background = None;
                 let slide_bg = read_background(slide_root, p, &loader, &part, &mut media);
@@ -474,9 +476,6 @@ impl SlidesBinding {
                         &mut shapes,
                     );
                 }
-                if media.dir.is_some() {
-                    bind.media = media.dir.take().or(bind.media.take());
-                }
                 slides.push(Slide {
                     hidden,
                     size,
@@ -485,6 +484,7 @@ impl SlidesBinding {
                 });
             }
         }
+        bind.media = media.dir;
         Ok((Deck::from_slides(slides), bind))
     }
 }
@@ -729,6 +729,11 @@ fn collect_slide(
             {
                 frame = frame_of(found, p, loader);
             }
+            // The overwrite below replaces the frame `read_sp_with_style`
+            // computed, so apply the group transform here too.
+            if let Some(map) = group {
+                frame = map.map(frame);
+            }
             let text_style = ph.as_ref().map_or(
                 TextStyle {
                     tx: None,
@@ -918,19 +923,22 @@ fn read_look(
             }
         }
         let frame = loader.frame(xfrm);
+        // `ShapeLook::path` is in twips inside the frame; the frame is in
+        // points, so scale it before building the preset or custom outline.
+        let (w, h) = (frame[2].saturating_mul(20), frame[3].saturating_mul(20));
         look.path = style::path(
             sp.children
                 .iter()
                 .find(|c| c.local_name == "prstGeom" || c.local_name == "custGeom"),
-            frame[2],
-            frame[3],
+            w,
+            h,
         );
         let (_, flip_h, flip_v) = style::rotation(xfrm);
         if flip_h || flip_v {
             look.path = look
                 .path
                 .into_iter()
-                .map(|cmd| flip_path(cmd, frame[2], frame[3], flip_h, flip_v))
+                .map(|cmd| flip_path(cmd, w, h, flip_h, flip_v))
                 .collect();
         }
         look.shadow = style::shadow(sp, &loader.theme, &loader.cmap);

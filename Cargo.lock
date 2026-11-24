@@ -6667,6 +6667,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "office-diff"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "atrium-layout",
+ "atrium-office",
+ "atrium-preview",
+ "fontdb",
+ "hayro 0.9.0",
+ "jiff 0.2.46",
+ "png 0.18.1",
+ "rustybuzz",
+ "serde",
+ "serde_json",
+ "tiny-skia 0.12.0",
+ "ttf-parser",
+]
+
+[[package]]
 name = "office2pdf"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
