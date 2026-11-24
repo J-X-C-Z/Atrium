@@ -15,7 +15,7 @@ Keep this table current when a module lands or moves.
 | `src/runtime` | Atrium seam over `ProviderAdapterV2` (`atrium-runtime::AgentRuntime`); no single T3 file | 22 |
 | `src/usage` | `orchestration-v2/UsageLimitRecoveryWorker.ts`, limit schemas | 26 |
 | `src/checkpoint` | `apps/server/src/checkpointing`, `orchestration-v2/Checkpoint*Service.ts` | 27 |
-| `src/mcp` | `packages/contracts/src/orchestratorMcp.ts`, `apps/server/src/mcp` | 28 |
+| `src/mcp` | `packages/contracts/src/orchestratorMcp.ts`, `packages/contracts/src/project.ts`, `packages/contracts/src/environment.ts`; `apps/server/src/mcp/OrchestratorMcpService.ts`, `McpInvocationContext.ts`, `linkOrigin.ts`, `toolkits/orchestrator/{tools,handlers}.ts`, `toolkits/thread/tools.ts`, `toolkits/project/{tools,handlers}.ts`, `toolkits/environment/{tools,handlers}.ts` | 28 |
 
 `boundedSnapshotTransport.ts` has no module of its own in v0.1.11; only its
 HTTP-level test exists, backed by `threadHistoryPaging.ts` and the shared
