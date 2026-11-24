@@ -28,6 +28,7 @@ use crate::i18n::tf;
 use crate::{
     agents,
     project::{self, ATRIUM, Project, Role, Task, TaskStatus, Workstream, wake_allowed},
+    settings::ModelChoice,
 };
 
 #[path = "workspace_autopilot.rs"]
@@ -437,8 +438,6 @@ impl Workspace {
                 let Ok(placed) = self.place_task(&root, wanted) else {
                     continue;
                 };
-                // The pick's model and effort are not passed on: sessions start
-                // with the app's model setting.
                 let backend = placed.agent.clone();
                 let known = self.scheduler_backend_known(&backend);
                 let decision = start_decision(known, self.backend_ready(&backend), running);
@@ -471,11 +470,15 @@ impl Workspace {
                     continue;
                 }
                 let stream_id = stream.id.clone();
-                self.start_stream(&root, stream, cx);
-                if placed.instead_of.is_some() {
-                    self.team
-                        .stand_ins
-                        .insert((root.clone(), stream_id), placed.member.clone());
+                let choice = super::team::start_choice(&placed);
+                self.start_stream(&root, stream, choice, cx);
+                // App state, not `.atrium/`: the badge comes back after a restart.
+                let previous = self.settings.stand_in(&root, &stream_id).map(str::to_owned);
+                let current = placed.instead_of.as_ref().map(|_| placed.member.clone());
+                if previous != current {
+                    self.settings
+                        .set_stand_in(&root, &stream_id, current.as_deref());
+                    self.settings.save();
                 }
                 if let Some(text) = Self::stand_in_notice(&task.id, &placed) {
                     if let Some(project) = self.project_mut(&root)
@@ -1065,11 +1068,27 @@ impl Workspace {
             task: None,
             ..Workstream::default()
         };
-        self.start_stream(&root, stream, cx);
+        self.start_stream(&root, stream, None, cx);
     }
 
-    fn start_stream(&mut self, root: &Path, stream: Workstream, cx: &mut Context<Self>) {
+    fn start_stream(
+        &mut self,
+        root: &Path,
+        stream: Workstream,
+        choice: Option<ModelChoice>,
+        cx: &mut Context<Self>,
+    ) {
         let root = root.to_path_buf();
+        match &choice {
+            Some(choice) => {
+                self.team
+                    .starts
+                    .insert((root.clone(), stream.id.clone()), choice.clone());
+            }
+            None => {
+                self.team.starts.remove(&(root.clone(), stream.id.clone()));
+            }
+        }
         let team_extras = self.team_kickoff_extras(&root, stream.role, &stream.backend);
         let here = if self.settings.device_name.is_empty() {
             "this computer".to_string()
@@ -1129,16 +1148,25 @@ impl Workspace {
                 self.stream_failed(&root, &id, error, cx);
                 return;
             };
-            self.launch_stream(root.clone(), stream, title, kickoff, PathBuf::from(cwd), cx);
+            self.launch_stream(
+                root.clone(),
+                stream,
+                title,
+                kickoff,
+                PathBuf::from(cwd),
+                choice,
+                cx,
+            );
             return;
         }
         if isolated {
-            self.prepare_stream_checkout(root, stream, title, kickoff, cx);
+            self.prepare_stream_checkout(root, stream, title, kickoff, choice, cx);
         } else {
-            self.launch_stream(root.clone(), stream, title, kickoff, root, cx);
+            self.launch_stream(root.clone(), stream, title, kickoff, root, choice, cx);
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn launch_stream(
         &mut self,
         root: PathBuf,
@@ -1146,6 +1174,7 @@ impl Workspace {
         title: String,
         kickoff: String,
         cwd: PathBuf,
+        choice: Option<ModelChoice>,
         cx: &mut Context<Self>,
     ) {
         let backend = stream.backend.clone();
@@ -1181,13 +1210,18 @@ impl Workspace {
                 return;
             };
             let mode = self.project_access_mode(unattended);
+            // A team member's model wins; otherwise this computer's Codex
+            // keeps the app's choice. The effort rides on the turn.
+            let chosen_model = choice.as_ref().and_then(|choice| choice.model.clone());
             let options = StartThread {
                 cwd: Some(cwd.display().to_string()),
-                model: if agents::split_backend(&backend).1.is_some() {
-                    None
-                } else {
-                    self.settings.model.clone()
-                },
+                model: chosen_model.or_else(|| {
+                    if agents::split_backend(&backend).1.is_some() {
+                        None
+                    } else {
+                        self.settings.model.clone()
+                    }
+                }),
                 approval_policy: Some(mode.approval_policy().into()),
                 sandbox: Some(mode.sandbox_mode().into()),
                 mcp_servers: {
@@ -1275,14 +1309,32 @@ impl Workspace {
             };
             let mut mcp = self.user_mcp(&backend);
             mcp.extend(Self::mcp_servers(&root, &id, &backend));
+            let chosen = choice.clone();
             cx.spawn(async move |this, cx| {
-                let start = match client.new_session_with(&cwd, &mcp).await {
+                let mut start = match client.new_session_with(&cwd, &mcp).await {
                     Ok(start) => start,
                     Err(error) => {
                         let _ = this.update(cx, |ws, cx| ws.stream_failed(&root, &id, error, cx));
                         return;
                     }
                 };
+                // ACP names settings by category: `model` and `thought_level`.
+                if let Some(choice) = &chosen {
+                    for (option, value) in super::team::option_updates(
+                        &start.options,
+                        choice.model.as_deref(),
+                        choice.effort.as_deref(),
+                    ) {
+                        match client.set_option(&start.session_id, &option, &value).await {
+                            Ok(Some(options)) => start.options = options,
+                            Ok(None) => {}
+                            Err(error) => {
+                                log::warn!("could not set {option}={value} on {backend}: {error:#}")
+                            }
+                        }
+                    }
+                }
+                let thread_model = chosen.as_ref().and_then(|choice| choice.model.clone());
                 let _ = this.update(cx, |ws, cx| {
                     let now = jiff::Timestamp::now().as_second();
                     let thread = start.session_id.clone();
@@ -1296,7 +1348,7 @@ impl Workspace {
                         name: Some(title.clone()),
                         preview: title.clone(),
                         cwd: cwd.display().to_string(),
-                        model: None,
+                        model: thread_model.clone(),
                         created_at: now,
                         updated_at: now,
                     });
@@ -1929,11 +1981,7 @@ impl Workspace {
                         .and_then(|t| t.usage())
                         .and_then(|u| u.context_share()),
                     task: project.task_of(stream).cloned(),
-                    stand_in: self
-                        .team
-                        .stand_ins
-                        .get(&(root.clone(), stream.id.clone()))
-                        .cloned(),
+                    stand_in: self.settings.stand_in(root, &stream.id).map(str::to_owned),
                     stream: stream.clone(),
                     state,
                     plan,

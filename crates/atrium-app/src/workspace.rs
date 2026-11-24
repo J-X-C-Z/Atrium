@@ -1134,9 +1134,9 @@ impl Workspace {
             .is_some_and(|(p, _)| p.file.autopilot.on);
         let mode = self.project_access_mode(unattended);
         // A device's Codex: the model chosen from that device's list.
-        if self.is_remote_view() {
+        let mut request = if self.is_remote_view() {
             let choice = self.model_choice();
-            return TurnRequest {
+            TurnRequest {
                 text: composed.text.clone(),
                 images: composed.images.clone(),
                 mentions: composed.mentions.clone(),
@@ -1145,23 +1145,39 @@ impl Workspace {
                 mode: Some(mode),
                 service_tier: None,
                 plan_mode: false,
+            }
+        } else {
+            // Plan mode names its model, so resolve the default when none is chosen.
+            let model = match self.settings.plan_mode {
+                true => self.model_id(),
+                false => self.settings.model.clone(),
             };
-        }
-        // Plan mode names its model, so resolve the default when none is chosen.
-        let model = match self.settings.plan_mode {
-            true => self.model_id(),
-            false => self.settings.model.clone(),
+            TurnRequest {
+                text: composed.text.clone(),
+                images: composed.images.clone(),
+                mentions: composed.mentions.clone(),
+                model,
+                effort: self.settings.effort.clone(),
+                mode: Some(mode),
+                service_tier: self.settings.fast.then(|| self.fast_tier()).flatten(),
+                plan_mode: self.settings.plan_mode,
+            }
         };
-        TurnRequest {
-            text: composed.text.clone(),
-            images: composed.images.clone(),
-            mentions: composed.mentions.clone(),
-            model,
-            effort: self.settings.effort.clone(),
-            mode: Some(mode),
-            service_tier: self.settings.fast.then(|| self.fast_tier()).flatten(),
-            plan_mode: self.settings.plan_mode,
+        // A project session started for a team member keeps that member's
+        // model and effort on its turns; each field alone when it names one.
+        if let Some(choice) = self
+            .active_thread_id()
+            .and_then(|id| self.stream_of(id))
+            .and_then(|(p, s)| self.team.starts.get(&(p.root.clone(), s.id.clone())))
+        {
+            if choice.model.is_some() {
+                request.model.clone_from(&choice.model);
+            }
+            if choice.effort.is_some() {
+                request.effort.clone_from(&choice.effort);
+            }
         }
+        request
     }
 
     /// The Fast tier the current model offers, if any.
