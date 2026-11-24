@@ -12,22 +12,39 @@ types are `PullRequest { number, url, state, checks }` and
 
 **To build:**
 
-- Every 2 minutes, for each lead with a branch (`Project::branch_of(id)`
-  when worktrees are on, else none), run `gh pr view <branch> --json
-  number,url,state,isDraft,statusCheckRollup` in the project root.
+- Read each lead with a branch (`Project::branch_of(id)` when worktrees are
+  on, else none) with `gh pr view <branch> --json
+  number,url,state,isDraft,statusCheckRollup,headRefOid,baseRefName,mergeable,mergeStateStatus,updatedAt,closedAt,mergedAt,author,comments,reviews`
+  in the project root.
 - Map the result:
   - `state`: `draft` if `isDraft`, else `open`, `merged` or `closed`, lowercased.
   - `checks`: `Failing` if any check concluded `FAILURE`, `CANCELLED` or
     `TIMED_OUT`; else `Pending` if any is still running; else `Passing` if
     there are any; else `None`.
 - Store the result on the stream and save, but only when it changed. With
-  no PR, set `pr = None`. When `gh` is missing or not logged in, log it once
-  and stop polling.
-- **Auto-fix (autopilot on only):** when checks turn `Failing`, wake the
-  lead with the failing jobs' last 60 log lines (`gh run view <id>
-  --log-failed`). Use the autopilot brief's `wake()` and its debounce, at
-  most once per failing commit.
-- Tests: the JSON-to-`PullRequest` mapping, from fixtures of `gh` output.
+  no PR, set `pr = None` and check again every two minutes. When `gh` is
+  missing or not logged in, log it once and retry on the slow cadence
+  (15 minutes) instead of stopping forever.
+- **Cadence and backoff (item 31, ported from T3's `PullRequestSyncReactor`):**
+  one sweep a minute; an open PR read every sweep, a quiet one (no host
+  update for 30 minutes) every 5 minutes, a recently closed one every 15
+  minutes, and a merged or day-old-closed one not at all. A failed read
+  backs off 1, 2, 4 … minutes up to 15. See `atrium_project::pr_watch`.
+- **Watch (item 31, ported from T3's `evaluatePullRequestWatch`):** the
+  first good read baselines what is already there (failures, conflicts,
+  passed checks); afterwards a new failing check, all required checks
+  passing, checks awaiting approval, a missing check report, a merge
+  conflict, a required rebase, or a new/edited comment or review is news.
+  Deduplicated by head SHA, check names and the comment watermark, so each
+  failing commit wakes once. A comment-only loop stops after 10 wakes.
+- **Auto-fix (autopilot on only):** news goes through the autopilot brief's
+  `queue_autopilot_wake`/`wake()` path and its debounce, naming the failed
+  checks and their run URLs; the lead can fetch logs itself with
+  `gh run view <id> --log-failed`. A merge or close wakes the lead once and
+  the poll stops.
+- Tests: the JSON-to-`PullRequest` mapping from fixtures of `gh` output; the
+  ported T3 watch cases; the cadence/backoff decisions; and end-to-end polls
+  with a fake `gh`.
 
 ## 2. Previews of UI work
 
