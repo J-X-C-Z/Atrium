@@ -380,7 +380,10 @@ impl<'a> Looks<'a> {
         look.page_break_before = on(get("pageBreakBefore"), ns);
         look.widow_control = !off(get("widowControl"), ns);
         look.contextual = on(get("contextualSpacing"), ns);
-        look.snap_to_grid = on(get("snapToGrid"), ns);
+        // OOXML's `snapToGrid` defaults to true: when a section has a
+        // `docGrid`, Word and LibreOffice put each line on whole grid lines
+        // unless the paragraph turns it off explicitly.
+        look.snap_to_grid = !off(get("snapToGrid"), ns);
         look.tabs = get("tabs")
             .map(|n| {
                 n.children

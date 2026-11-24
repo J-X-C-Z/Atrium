@@ -345,7 +345,13 @@ pub(crate) fn table(cx: &mut Ctx<'_>, t: &Table, width: f32) -> (Vec<Row>, Vec<I
                 look.padding.map(pt)
             };
             let inner = (width - cell_pad[1] - cell_pad[3]).max(1.0);
+            // Rows grow with their content. LibreOffice (and Word's compact
+            // table rows) do not stretch every cell line to the section's
+            // document grid, which would make a 15.6 pt grid give 31.2 pt
+            // rows whenever the CJK face is slightly taller than the pitch.
+            let line_pitch = cx.line_pitch.take();
             let (placed, extra, content_h) = lines::stack(cx, &row[c], inner);
+            cx.line_pitch = line_pitch;
             let index = specs.len();
             for row in &mut cover[r..(r + vspan).min(rows_n)] {
                 for cell in &mut row[c..(c + colspan).min(grid)] {

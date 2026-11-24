@@ -640,9 +640,12 @@ def ser(name, cats, vals, color, idx=0):
     return (
         f'<c:ser><c:idx val="{idx}"/><c:order val="{idx}"/>'
         f'<c:spPr><a:solidFill><a:srgbClr val="{color}"/></a:solidFill></c:spPr>'
-        f'<c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>{esc(name)}</c:v></c:pt></c:strCache></c:strRef></c:tx>'
-        f'<c:cat><c:strRef><c:strCache><c:ptCount val="{len(cats)}"/>{cpts}</c:strCache></c:strRef></c:cat>'
-        f'<c:val><c:numRef><c:numCache><c:formatCode>General</c:formatCode>'
+        f'<c:tx><c:strRef><c:f>Sheet1!$A$1</c:f><c:strCache><c:ptCount val="1"/>'
+        f'<c:pt idx="0"><c:v>{esc(name)}</c:v></c:pt></c:strCache></c:strRef></c:tx>'
+        f'<c:cat><c:strRef><c:f>Sheet1!$A$2:$A${len(cats) + 1}</c:f><c:strCache>'
+        f'<c:ptCount val="{len(cats)}"/>{cpts}</c:strCache></c:strRef></c:cat>'
+        f'<c:val><c:numRef><c:f>Sheet1!$B$2:$B${len(vals) + 1}</c:f><c:numCache>'
+        f'<c:formatCode>General</c:formatCode>'
         f'<c:ptCount val="{len(vals)}"/>{vpts}</c:numCache></c:numRef></c:val></c:ser>'
     )
 
@@ -655,6 +658,18 @@ def chart_xml(kind, series, title, bar_dir=None, grouping=None, labels=False):
         head += f'<c:grouping val="{grouping}"/>'
     if labels:
         head += '<c:dLbls><c:showVal val="1"/><c:showCatName val="0"/></c:dLbls>'
+    # Pie and doughnut charts take no axes; bar/line/area charts need both.
+    axes = (
+        ""
+        if kind in ("pieChart", "doughnutChart", "pie3DChart")
+        else (
+            '<c:catAx><c:axId val="1"/><c:scaling><c:orientation val="minMax"/></c:scaling>'
+            '<c:delete val="0"/><c:axPos val="b"/><c:crossAx val="2"/></c:catAx>'
+            '<c:valAx><c:axId val="2"/><c:scaling><c:orientation val="minMax"/></c:scaling>'
+            '<c:delete val="0"/><c:axPos val="l"/><c:majorGridlines/><c:crossAx val="1"/>'
+            "</c:valAx>"
+        )
+    )
     return (
         f'<c:chartSpace xmlns:c="{C}" xmlns:a="{A}" xmlns:r="{R}"><c:chart>'
         f'<c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>{esc(title)}</a:t></a:r></a:p>'
@@ -665,11 +680,8 @@ def chart_xml(kind, series, title, bar_dir=None, grouping=None, labels=False):
         + "</c:"
         + kind
         + ">"
-        '<c:catAx><c:axId val="1"/><c:scaling><c:orientation val="minMax"/></c:scaling>'
-        '<c:delete val="0"/><c:axPos val="b"/><c:crossAx val="2"/></c:catAx>'
-        '<c:valAx><c:axId val="2"/><c:scaling><c:orientation val="minMax"/></c:scaling>'
-        '<c:delete val="0"/><c:axPos val="l"/><c:majorGridlines/><c:crossAx val="1"/></c:valAx>'
-        "</c:plotArea>"
+        + axes
+        + "</c:plotArea>"
         '<c:legend><c:legendPos val="r"/><c:overlay val="0"/></c:legend>'
         "</c:chart></c:chartSpace>"
     )
@@ -794,6 +806,8 @@ def slide_master():
         '<p:txBody><a:bodyPr anchor="ctr"/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US"/><a:t>Master title</a:t></a:r></a:p></p:txBody></p:sp>'
         + pic(3, 7800000, 150000, 900000, 600000, "rIdLogo")
         + "</p:spTree></p:cSld>"
+        '<p:sldLayoutIdLst><p:sldLayoutId id="2147483649" r:id="rId1"/>'
+        "</p:sldLayoutIdLst>"
         '<p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" '
         'accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" '
         'hlink="hlink" folHlink="folHlink"/>'

@@ -2,8 +2,8 @@
 //! authority for formatting, unknown content, and any later save.
 use crate::word_looks::Looks;
 use crate::{
-    Align, Atom, AtomKind, Block, Inline, Marks, NodeId, OpenError, Package, Para, ParaStyle,
-    Table, WordDoc,
+    Align, Atom, AtomKind, Block, Footnote, Inline, Marks, NodeId, OpenError, Package, Para,
+    ParaStyle, Table, WordDoc,
     xml::{XmlNode, XmlPart},
 };
 use std::collections::{HashMap, HashSet};
@@ -17,6 +17,7 @@ const OPC_REL_STRICT: &str = "http://purl.oclc.org/ooxml/package/relationships";
 const M: &str = "http://schemas.openxmlformats.org/officeDocument/2006/math";
 const MS: &str = "http://purl.oclc.org/ooxml/officeDocument/math";
 
+#[allow(clippy::too_many_arguments)]
 fn project(
     document: &XmlPart,
     styles: Option<&XmlPart>,
@@ -24,6 +25,7 @@ fn project(
     theme: Option<&XmlPart>,
     relationships: Option<&XmlPart>,
     images: &HashMap<String, std::path::PathBuf>,
+    footnotes: Option<&XmlPart>,
 ) -> Result<WordDoc, OpenError> {
     let root = document.root();
     let ns = root
@@ -83,7 +85,122 @@ fn project(
         }
         blocks.push(block);
     }
-    Ok(WordDoc::from_blocks(blocks).with_look(sections, defaults))
+    let footnotes = footnotes
+        .map(|part| load_footnotes(part, ns, styles, numbering, theme, body))
+        .unwrap_or_default();
+    Ok(WordDoc::from_blocks(blocks)
+        .with_look(sections, defaults)
+        .with_footnotes(footnotes))
+}
+
+/// The footnote body is joined to the reference atom by the same byte-offset
+/// id scheme the rest of the document uses. `WordDoc::footnotes()` keeps the
+/// blocks keyed by the atom that refers to them.
+fn load_footnotes(
+    part: &XmlPart,
+    ns: &str,
+    styles: Option<&XmlNode>,
+    numbering: Option<&XmlNode>,
+    theme: Option<&XmlPart>,
+    body: &XmlNode,
+) -> Vec<Footnote> {
+    let root = part.root();
+    if !root.is(ns, "footnotes") && !root.is(ns, "endnotes") {
+        return Vec::new();
+    }
+    let mut references = Vec::new();
+    collect_note_references(body, ns, &mut references);
+    if references.is_empty() {
+        return Vec::new();
+    }
+    // The layout numbers notes in document order, not by their part id.
+    references.sort_by_key(|(atom, _)| *atom);
+    let mut labels = HashMap::new();
+    for (index, (_, note)) in references.iter().enumerate() {
+        labels.entry(note.clone()).or_insert(index as u32 + 1);
+    }
+    let wanted: HashSet<&str> = references.iter().map(|(_, note)| note.as_str()).collect();
+    let mut bodies = HashMap::new();
+    for note in &root.children {
+        if !(note.is(ns, "footnote") || note.is(ns, "endnote")) {
+            continue;
+        }
+        let Some(id) = note.attr(Some(ns), "id") else {
+            continue;
+        };
+        if id.starts_with('-') || !wanted.contains(id) {
+            continue;
+        }
+        let mut cx = Context::new(ns, styles, numbering, theme);
+        cx.id_base = (1u64 << 40) + note.range.start as u64;
+        let mut blocks: Vec<Block> = note
+            .children
+            .iter()
+            .filter(|child| child.is(ns, "p") || child.is(ns, "tbl"))
+            .map(|child| cx.block(child))
+            .collect();
+        for block in &mut blocks {
+            strip_note_marks(block);
+        }
+        let label = labels.get(id).copied().unwrap_or(1);
+        prepend_note_label(&mut blocks, label);
+        bodies.insert(id.to_owned(), blocks);
+    }
+    let mut out = Vec::new();
+    for (atom, note) in references {
+        if let Some(blocks) = bodies.get(&note) {
+            out.push(Footnote {
+                id: atom,
+                blocks: blocks.clone(),
+            });
+        }
+    }
+    out
+}
+
+fn collect_note_references(node: &XmlNode, ns: &str, out: &mut Vec<(NodeId, String)>) {
+    if node.is(ns, "footnoteReference") || node.is(ns, "endnoteReference") {
+        if let Some(id) = node.attr(Some(ns), "id") {
+            out.push((node.range.start as NodeId, id.to_owned()));
+        }
+    }
+    for child in &node.children {
+        collect_note_references(child, ns, out);
+    }
+}
+
+fn strip_note_marks(block: &mut Block) {
+    match block {
+        Block::Paragraph(para) => para.inlines.retain(|inline| {
+            !matches!(inline, Inline::Atom(atom) if matches!(atom.kind, AtomKind::Footnote))
+        }),
+        Block::Table(table) => {
+            for row in &mut table.rows {
+                for cell in row {
+                    for block in cell {
+                        strip_note_marks(block);
+                    }
+                }
+            }
+        }
+        Block::Opaque { .. } => {}
+    }
+}
+
+fn prepend_note_label(blocks: &mut [Block], label: u32) {
+    let Some(Block::Paragraph(para)) = blocks.first_mut() else {
+        return;
+    };
+    para.inlines.insert(
+        0,
+        Inline::Text {
+            text: format!("{label} "),
+            marks: Marks {
+                baseline: crate::look::Baseline::Superscript,
+                ..Marks::default()
+            },
+        },
+    );
 }
 
 type WordParts = (String, Option<String>, Option<String>);
@@ -559,6 +676,8 @@ impl<'a> Context<'a> {
 
 const DRAWING: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
 const DRAWING_STRICT: &str = "http://purl.oclc.org/ooxml/drawingml/main";
+const DRAWING_WORD: &str = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
+const DRAWING_WORD_STRICT: &str = "http://purl.oclc.org/ooxml/drawingml/wordprocessingDrawing";
 const VML: &str = "urn:schemas-microsoft-com:vml";
 
 fn image_ids(node: &XmlNode) -> impl Iterator<Item = &str> {
@@ -731,7 +850,15 @@ fn drawing_look(node: &XmlNode) -> crate::look::AtomLook {
     let mut pending = vec![node];
     while let Some(n) = pending.pop() {
         pending.extend(n.children.iter().rev());
-        if (n.is(DRAWING, "extent") || n.is(DRAWING_STRICT, "extent")) && look.size.is_none() {
+        // `wp:extent` is in the wordprocessingDrawing namespace, not the
+        // DrawingML one. Looking only for `a:extent` missed every picture
+        // size Word writes, so pictures were laid out 3 lines tall.
+        if (n.is(DRAWING, "extent")
+            || n.is(DRAWING_STRICT, "extent")
+            || n.is(DRAWING_WORD, "extent")
+            || n.is(DRAWING_WORD_STRICT, "extent"))
+            && look.size.is_none()
+        {
             let cx = n.attr(None, "cx").and_then(|v| v.parse::<i64>().ok());
             let cy = n.attr(None, "cy").and_then(|v| v.parse::<i64>().ok());
             if let (Some(cx), Some(cy)) = (cx, cy) {
@@ -750,6 +877,10 @@ fn drawing_look(node: &XmlNode) -> crate::look::AtomLook {
                 wrap: crate::look::Wrap::TopAndBottom,
                 clear: [0; 4],
             };
+            // The clearance distances are attributes of `wp:anchor` (and
+            // some producers repeat them on `wp:wrapSquare`), not child
+            // elements.
+            read_clears(&n.attributes, &mut float.clear);
             for c in &n.children {
                 let origin = |s: Option<&str>| match s {
                     Some("page") => crate::look::Origin::Page,
@@ -781,7 +912,10 @@ fn drawing_look(node: &XmlNode) -> crate::look::AtomLook {
                                 (v / 635).clamp(i32::MIN as i64, i32::MAX as i64) as i32
                             });
                     }
-                    "wrapSquare" => float.wrap = crate::look::Wrap::Square,
+                    "wrapSquare" => {
+                        float.wrap = crate::look::Wrap::Square;
+                        read_clears(&c.attributes, &mut float.clear);
+                    }
                     "wrapTopAndBottom" => float.wrap = crate::look::Wrap::TopAndBottom,
                     "wrapNone" => {
                         float.wrap = if c.attr(None, "behindDoc") == Some("1") {
@@ -811,6 +945,21 @@ fn drawing_look(node: &XmlNode) -> crate::look::AtomLook {
         }
     }
     look
+}
+
+fn read_clears(attributes: &[crate::xml::XmlAttribute], clear: &mut [i32; 4]) {
+    for attribute in attributes {
+        let slot = match attribute.local_name.as_str() {
+            "distT" => 0,
+            "distR" => 1,
+            "distB" => 2,
+            "distL" => 3,
+            _ => continue,
+        };
+        if let Ok(value) = attribute.value.trim().parse::<i64>() {
+            clear[slot] = (value / 635).clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+        }
+    }
 }
 
 fn field_result(node: &XmlNode) -> Option<String> {
@@ -1239,6 +1388,18 @@ impl WordBinding {
         let relationships = optional(Some(&relations_name))?;
         let theme_name = package.related_part(&document_name, "theme")?;
         let theme = optional(theme_name.as_deref())?;
+        let conventional_footnotes = document_name.rsplit_once('/').map_or_else(
+            || "footnotes.xml".into(),
+            |(dir, _)| format!("{dir}/footnotes.xml"),
+        );
+        let footnotes_name = package
+            .related_part(&document_name, "footnotes")?
+            .or_else(|| {
+                package
+                    .has_part(&conventional_footnotes)
+                    .then_some(conventional_footnotes)
+            });
+        let footnotes = optional(footnotes_name.as_deref())?;
         let (image_dir, images) = extract_images(package, &document);
         let images = Arc::new(images);
         let mut model = project(
@@ -1248,6 +1409,7 @@ impl WordBinding {
             theme.as_deref(),
             relationships.as_deref(),
             &images,
+            footnotes.as_deref(),
         )?;
         attach_headers(
             package,
@@ -1516,6 +1678,7 @@ impl WordBinding {
             None,
             auxiliary.relationships.as_deref(),
             &self.images,
+            None,
         )
         .map_err(|_| invalid())?;
         let mut ids = shift_ids(&self.state.ids, range.clone(), rewritten.len());
@@ -3027,5 +3190,136 @@ mod tests {
             panic!()
         };
         assert_eq!(p.text(), "新");
+    }
+
+    const PIC_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/picture";
+    const WP_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
+
+    fn raw_package(
+        name: &str,
+        document: String,
+        document_rels: String,
+        footnotes: Option<String>,
+    ) -> (tempfile::TempDir, std::path::PathBuf) {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(name);
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        let footnote_override = if footnotes.is_some() {
+            r#"<Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>"#
+        } else {
+            ""
+        };
+        let types = format!(
+            r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>{footnote_override}</Types>"#
+        );
+        let root_rels = format!(
+            r#"<Relationships xmlns="{OPC_REL}"><Relationship Id="rId1" Type="{R}/officeDocument" Target="word/document.xml"/></Relationships>"#
+        );
+        let mut parts = vec![
+            ("[Content_Types].xml".to_owned(), types),
+            ("_rels/.rels".to_owned(), root_rels),
+            ("word/document.xml".to_owned(), document),
+            ("word/_rels/document.xml.rels".to_owned(), document_rels),
+        ];
+        if let Some(footnotes) = footnotes {
+            parts.push(("word/footnotes.xml".to_owned(), footnotes));
+        }
+        for (name, data) in parts {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(data.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+        (dir, path)
+    }
+
+    fn empty_rels() -> String {
+        format!(r#"<Relationships xmlns="{OPC_REL}"></Relationships>"#)
+    }
+
+    #[test]
+    fn snap_to_grid_defaults_on_and_can_be_turned_off() {
+        let document = format!(
+            r#"<w:document xmlns:w="{W}" xmlns:r="{R}"><w:body><w:p><w:r><w:t>one</w:t></w:r></w:p><w:p><w:pPr><w:snapToGrid w:val="0"/></w:pPr><w:r><w:t>two</w:t></w:r></w:p><w:sectPr><w:docGrid w:type="lines" w:linePitch="312"/></w:sectPr></w:body></w:document>"#
+        );
+        let (_dir, path) = raw_package("grid.docx", document, empty_rels(), None);
+        let document = crate::open(&path).unwrap();
+        let Office::Word(word) = document.office else {
+            panic!("not a Word document")
+        };
+        let looks: Vec<bool> = word
+            .blocks()
+            .iter()
+            .filter_map(|block| match block {
+                Block::Paragraph(p) => Some(p.look.snap_to_grid),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(looks, vec![true, false]);
+    }
+
+    #[test]
+    fn reads_picture_extent_and_square_wrap_clearance() {
+        let body = format!(
+            r#"<w:p><w:r><w:drawing><wp:inline><wp:extent cx="1828800" cy="1371600"/><wp:docPr id="1" name="inline"/><a:graphic><a:graphicData uri="{PIC_NS}"><pic:pic><pic:blipFill><a:blip r:embed="rIdImg"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p><w:p><w:r><w:drawing><wp:anchor distT="127000" distR="190500" distB="254000" distL="317500" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:extent cx="914400" cy="457200"/><wp:wrapSquare wrapText="bothSides"/><wp:docPr id="2" name="float"/><a:graphic><a:graphicData uri="{PIC_NS}"><pic:pic><pic:blipFill><a:blip r:embed="rIdImg"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p>"#
+        );
+        let document = format!(
+            r#"<w:document xmlns:w="{W}" xmlns:r="{R}" xmlns:wp="{WP_NS}" xmlns:a="{A_NS}" xmlns:pic="{PIC_NS}"><w:body>{body}</w:body></w:document>"#
+        );
+        let (_dir, path) = raw_package("drawing.docx", document, empty_rels(), None);
+        let document = crate::open(&path).unwrap();
+        let Office::Word(word) = document.office else {
+            panic!("not a Word document")
+        };
+        let atoms: Vec<_> = word
+            .blocks()
+            .iter()
+            .filter_map(|block| match block {
+                Block::Paragraph(p) => p.inlines.iter().find_map(|inline| match inline {
+                    Inline::Atom(atom) if matches!(atom.kind, AtomKind::Image(_)) => Some(atom),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(atoms.len(), 2);
+        // EMU to twips: 635 EMU per twip.
+        assert_eq!(atoms[0].look.size, Some((2880, 2160)));
+        assert_eq!(atoms[1].look.size, Some((1440, 720)));
+        let float = atoms[1].look.float.expect("floating picture");
+        assert_eq!(float.wrap, crate::look::Wrap::Square);
+        assert_eq!(float.clear, [200, 300, 400, 500]);
+    }
+
+    #[test]
+    fn joins_footnote_part_to_its_reference_atom() {
+        let document = format!(
+            r#"<w:document xmlns:w="{W}" xmlns:r="{R}"><w:body><w:p><w:r><w:t>Body</w:t></w:r><w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:footnoteReference w:id="1"/></w:r></w:p></w:body></w:document>"#
+        );
+        let footnotes = format!(
+            r#"<w:footnotes xmlns:w="{W}"><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:id="1"><w:p><w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:footnoteRef/></w:r><w:r><w:t>note body</w:t></w:r></w:p></w:footnote></w:footnotes>"#
+        );
+        let rels = format!(
+            r#"<Relationships xmlns="{OPC_REL}"><Relationship Id="rId1" Type="{R}/footnotes" Target="footnotes.xml"/></Relationships>"#
+        );
+        let (_dir, path) = raw_package("footnote.docx", document, rels, Some(footnotes));
+        let document = crate::open(&path).unwrap();
+        let Office::Word(word) = document.office else {
+            panic!("not a Word document")
+        };
+        assert_eq!(word.footnotes().len(), 1);
+        let Block::Paragraph(note) = &word.footnotes()[0].blocks[0] else {
+            panic!("note has no paragraph")
+        };
+        assert_eq!(note.text(), "1 note body");
+        let reference = word.blocks().iter().find_map(|block| match block {
+            Block::Paragraph(p) => p.inlines.iter().find_map(|inline| match inline {
+                Inline::Atom(atom) if matches!(atom.kind, AtomKind::Footnote) => Some(atom),
+                _ => None,
+            }),
+            _ => None,
+        });
+        assert_eq!(reference.map(|atom| atom.id), Some(word.footnotes()[0].id));
     }
 }

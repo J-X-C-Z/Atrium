@@ -97,10 +97,51 @@ struct Shaped {
     missing: bool,
 }
 
+/// Places the tool can borrow fonts from that `fontdb`'s system scan misses.
+/// LibreOffice ships metric-compatible replacements (Carlito for Calibri,
+/// Liberation for Arial/Times) in its own bundle, and CI also installs them
+/// system-wide; loading both keeps Atrium and LibreOffice on the same
+/// metrics instead of letting a substitution change line breaks.
+fn extra_font_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(value) = std::env::var("ATRIUM_OFFICE_DIFF_FONTS") {
+        dirs.extend(value.split(':').filter(|p| !p.is_empty()).map(Into::into));
+    }
+    for candidate in [
+        "/Applications/LibreOffice.app/Contents/Resources/fonts/truetype",
+        "/usr/lib/libreoffice/share/fonts/truetype",
+        "/usr/share/fonts/truetype",
+        "/usr/share/fonts/opentype",
+    ] {
+        let path = std::path::Path::new(candidate);
+        if path.is_dir() {
+            dirs.push(path.to_path_buf());
+        }
+    }
+    dirs
+}
+
+/// The same metric-compatible substitutions LibreOffice's fontconfig makes.
+fn substitute(name: &str) -> Option<&'static str> {
+    match name {
+        "Calibri" | "Calibri Light" => Some("Carlito"),
+        "Cambria" => Some("Caladea"),
+        "Arial" => Some("Liberation Sans"),
+        "Times New Roman" => Some("Liberation Serif"),
+        "宋体" | "SimSun" | "等线" | "黑体" | "Microsoft YaHei" | "微软雅黑" => {
+            Some("Noto Sans CJK SC")
+        }
+        _ => None,
+    }
+}
+
 impl SystemShaper {
     pub fn new() -> Self {
         let mut db = fontdb::Database::new();
         db.load_system_fonts();
+        for dir in extra_font_dirs() {
+            db.load_fonts_dir(dir);
+        }
         Self {
             db,
             faces: Mutex::new(HashMap::new()),
@@ -169,6 +210,13 @@ impl SystemShaper {
     fn candidates(&self, key: &FaceKey) -> Vec<String> {
         let mut out = Vec::new();
         if !key.family.is_empty() {
+            if let Some(alias) = substitute(&key.family) {
+                // The alias goes first for fonts neither Office nor macOS
+                // ships (宋体, 黑体), so both renderers use Noto CJK.
+                if self.query(&key.family, key.bold, key.italic).is_none() {
+                    out.push(alias.to_string());
+                }
+            }
             out.push(key.family.clone());
         }
         let list = if key.cjk {
