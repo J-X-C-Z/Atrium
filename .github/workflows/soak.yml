@@ -1,0 +1,67 @@
+name: Soak
+
+"on":
+  workflow_dispatch:
+    inputs:
+      hours:
+        description: Hours to soak
+        required: false
+        default: "0.05"
+      target:
+        description: app under test
+        type: choice
+        options: [atrium, t3]
+        default: atrium
+  schedule:
+    # Weekly long run; the owner's 24-hour run stays a manual dispatch.
+    - cron: '17 3 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  soak:
+    name: ${{ inputs.target || 'atrium' }} headless soak
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_PROFILE_DEV_DEBUG: 0
+      RUST_BACKTRACE: '1'
+    steps:
+      - name: Checkout without persistent credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # official v4
+        with:
+          persist-credentials: false
+      - name: Official stable Rust toolchain
+        run: rustup toolchain install stable --profile minimal --component clippy
+      - name: Xvfb and the X11/Vulkan libraries GPUI loads
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb xauth libxkbcommon-x11-0 libx11-xcb1 libxcb1 libxcb-xkb1 \
+            libvulkan1 mesa-vulkan-drivers libgl1 libegl1 libfontconfig1 \
+            libfreetype6 libasound2t64
+      - name: Build the app, mocks and node
+        run: |
+          cargo +stable build --locked \
+            -p atrium-app -p codex-client -p acp-client -p agent-rpc -p atrium-node
+      - name: Soak
+        if: ${{ (inputs.target || 'atrium') == 'atrium' }}
+        run: |
+          python3 tools/soak/soak.py \
+            --hours "${{ inputs.hours || '0.05' }}" \
+            --evidence-dir docs/evidence
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-evidence
+          path: docs/evidence/soak-*
+          if-no-files-found: warn
+      - name: T3 needs a pinned binary
+        if: ${{ inputs.target == 't3' }}
+        run: |
+          echo "Download the T3 release pinned in docs/t3-spike.md, then run:"
+          echo "  python3 tools/soak/soak.py --target t3 --t3-bin <path> --hours <hours>"
+          exit 1

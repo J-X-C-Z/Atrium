@@ -21,6 +21,21 @@ struct PilotStream {
     retire_after_interrupt: Option<String>,
 }
 
+impl Pilot {
+    /// Forgets every stream entry of a project that is no longer open.
+    pub(super) fn forget_root(&mut self, root: &Path) {
+        self.streams.retain(|(project, _), _| project != root);
+    }
+
+    /// Drops entries of retired streams (pool workers replaced after their
+    /// session filled): they have no work and are never woken again, so their
+    /// clocks and queued text would otherwise stay for the life of the app.
+    pub(super) fn prune_retired(&mut self, root: &Path, live: &HashSet<String>) {
+        self.streams
+            .retain(|(project, stream), _| project != root || live.contains(stream));
+    }
+}
+
 impl Workspace {
     pub(super) fn init_autopilot(&mut self) {
         let mut at = Instant::now();

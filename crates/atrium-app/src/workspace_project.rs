@@ -361,6 +361,88 @@ impl Workspace {
         }));
     }
 
+    /// Drops what retired workstreams leave behind: their transcripts (their
+    /// chat reloads from the agent when opened again) and their scheduler
+    /// clocks and retry state, which no wake will ever use.
+    fn prune_retired_state(&mut self, root: &Path) {
+        let Some(project) = self.projects.iter().find(|project| project.root == root) else {
+            return;
+        };
+        let live: HashSet<String> = project
+            .file
+            .streams
+            .iter()
+            .filter(|stream| !stream.retired)
+            .map(|stream| stream.id.clone())
+            .collect();
+        let tasks: HashSet<String> = project.tasks.iter().map(Task::key).collect();
+        let active = self.active_thread_id().map(str::to_owned);
+        let stale: Vec<String> = project
+            .file
+            .streams
+            .iter()
+            .filter(|stream| stream.retired)
+            .filter_map(|stream| stream.thread_id.clone())
+            .filter(|thread| Some(thread) != active.as_ref())
+            .filter(|thread| !self.loading.contains(thread))
+            .filter(|thread| {
+                !self
+                    .transcripts
+                    .get(thread)
+                    .is_some_and(|chat| chat.is_running() || waiting_on_user(chat) > 0)
+            })
+            .collect();
+        for thread in stale {
+            self.forget_thread_state(&thread);
+        }
+        self.project_schedule.pilot.prune_retired(root, &live);
+        self.project_schedule.task_pool.prune_retired(root, &live);
+        self.project_schedule
+            .last_wake
+            .retain(|(project, stream), _| project != root || live.contains(stream));
+        self.project_schedule
+            .pending
+            .retain(|(project, stream)| project != root || live.contains(stream));
+        self.project_schedule
+            .cleaning
+            .retain(|(project, stream)| project != root || live.contains(stream));
+        self.project_schedule
+            .orphan_logged
+            .retain(|(project, task)| project != root || tasks.contains(task));
+    }
+
+    /// Forgets a project's workstream conversations and scheduler state.
+    /// Their metadata stays in `threads`, so the chats remain readable.
+    fn forget_project_state(&mut self, root: &Path) {
+        let threads: Vec<String> = self
+            .projects
+            .iter()
+            .filter(|project| project.root == root)
+            .flat_map(|project| project.file.streams.iter())
+            .filter_map(|stream| stream.thread_id.clone())
+            .collect();
+        for thread in threads {
+            self.forget_thread_state(&thread);
+        }
+        self.project_schedule.pilot.forget_root(root);
+        self.project_schedule.task_pool.forget_root(root);
+        self.project_schedule
+            .last_wake
+            .retain(|(project, _), _| project != root);
+        self.project_schedule
+            .pending
+            .retain(|(project, _)| project != root);
+        self.project_schedule
+            .cleaning
+            .retain(|(project, _)| project != root);
+        self.project_schedule
+            .orphan_logged
+            .retain(|(project, _)| project != root);
+        self.project_schedule.seen.remove(root);
+        self.project_schedule.tree_jobs.remove(root);
+        self.previews.remove(root);
+    }
+
     /// Every couple of seconds in a project: read the atrium again if it
     /// changed, and open workstream chats whose agent has come up.
     fn tick_project(&mut self, cx: &mut Context<Self>) {
@@ -381,6 +463,7 @@ impl Workspace {
                 });
             let scheduler_allowed = !wants_scheduler || self.sync_scheduler_allowed(&root);
             let changed = self.project_mut(&root).is_some_and(Project::reload);
+            self.prune_retired_state(&root);
             self.refresh_project_team(&root);
             self.tick_roster(&root);
             self.prune_team_marks(&root);
@@ -840,6 +923,7 @@ impl Workspace {
     /// Forgets a project here. Its folder and atrium stay as they are.
     pub fn remove_project(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         let root = canonical_path(&root);
+        self.forget_project_state(&root);
         self.previews.remove(&root);
         self.settings.preview_commands.remove(&root);
         self.clear_autopilot(&root);
@@ -909,6 +993,9 @@ impl Workspace {
             .file
             .streams
             .iter()
+            // Retired pool workers are not woken again; their chat loads when
+            // the user opens it, not on every tick.
+            .filter(|s| !s.retired)
             .filter(|s| {
                 !self
                     .project_schedule
@@ -2109,6 +2196,87 @@ mod tests {
         assert!(controller_notice(&notice, "boss"));
         notice.from = "boss".into();
         assert!(!controller_notice(&notice, "boss"));
+    }
+
+    fn leak_fixture(label: &str) -> (PathBuf, Project, Workspace) {
+        use crate::settings::Settings;
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("atrium-{label}-{unique}"));
+        let mut project = Project::open(&root).unwrap();
+        project.file.streams.push(Workstream {
+            id: "worker".into(),
+            name: "Worker".into(),
+            backend: "codex".into(),
+            thread_id: Some("retired-thread".into()),
+            role: Role::Worker,
+            retired: true,
+            ..Default::default()
+        });
+        project.save().unwrap();
+        let mut ws = Workspace::with_settings(Settings::default());
+        ws.projects.push(project.clone());
+        ws.transcripts
+            .insert("retired-thread".into(), Transcript::new());
+        ws.loaded_threads.insert("retired-thread".into());
+        ws.unread.insert("retired-thread".into(), 3);
+        ws.project_schedule
+            .task_pool
+            .starting
+            .insert((root.clone(), "worker".into()));
+        ws.project_schedule
+            .last_wake
+            .insert((root.clone(), "worker".into()), Instant::now());
+        ws.project_schedule
+            .pending
+            .insert((root.clone(), "worker".into()));
+        ws.project_schedule
+            .cleaning
+            .insert((root.clone(), "worker".into()));
+        ws.project_schedule
+            .orphan_logged
+            .insert((root.clone(), "gone/task".into()));
+        ws.project_schedule.seen.insert(root.clone(), 0);
+        (root, project, ws)
+    }
+
+    #[test]
+    fn a_retired_worker_drops_its_transcript_and_scheduler_state() {
+        let (root, _project, mut ws) = leak_fixture("retired");
+        ws.prune_retired_state(&root);
+        assert!(
+            ws.transcripts.is_empty(),
+            "retired chat transcript is freed"
+        );
+        assert!(ws.loaded_threads.is_empty());
+        assert!(ws.unread.is_empty());
+        assert!(ws.project_schedule.task_pool.starting.is_empty());
+        assert!(ws.project_schedule.last_wake.is_empty());
+        assert!(ws.project_schedule.pending.is_empty());
+        assert!(ws.project_schedule.cleaning.is_empty());
+        assert!(
+            ws.project_schedule.orphan_logged.is_empty(),
+            "an orphan record for a task that no longer exists is freed"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn removing_a_project_forgets_its_threads_and_scheduler_state() {
+        let (root, _project, mut ws) = leak_fixture("removed");
+        ws.forget_project_state(&root);
+        assert!(ws.transcripts.is_empty());
+        assert!(ws.loaded_threads.is_empty());
+        assert!(ws.unread.is_empty());
+        assert!(ws.project_schedule.task_pool.starting.is_empty());
+        assert!(ws.project_schedule.last_wake.is_empty());
+        assert!(ws.project_schedule.pending.is_empty());
+        assert!(ws.project_schedule.cleaning.is_empty());
+        assert!(ws.project_schedule.orphan_logged.is_empty());
+        assert!(!ws.project_schedule.seen.contains_key(&root));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
