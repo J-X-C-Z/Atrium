@@ -51,7 +51,7 @@ mod preview;
 #[path = "workspace_project.rs"]
 mod projects;
 #[path = "workspace_schedules.rs"]
-mod schedules;
+pub(crate) mod schedules;
 #[path = "workspace_sync.rs"]
 mod sync;
 #[path = "workspace_sync_view.rs"]

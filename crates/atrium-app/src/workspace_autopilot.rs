@@ -440,6 +440,27 @@ impl Workspace {
         }
     }
 
+    #[cfg(all(test, unix, feature = "workspace-ticker-test"))]
+    pub(super) fn test_requested(&self, root: &Path, id: &str) -> bool {
+        self.project_schedule
+            .pilot
+            .streams
+            .get(&(root.to_owned(), id.to_owned()))
+            .is_some_and(|state| state.requested.is_some())
+    }
+
+    #[cfg(all(test, unix, feature = "workspace-ticker-test"))]
+    pub(super) fn test_clear_requested(&mut self, root: &Path, id: &str) {
+        if let Some(state) = self
+            .project_schedule
+            .pilot
+            .streams
+            .get_mut(&(root.to_owned(), id.to_owned()))
+        {
+            state.requested = None;
+        }
+    }
+
     fn pilot_notice(&mut self, root: &Path, s: &Workstream, text: &str, parent: bool) {
         let mut to = vec![project::YOU.to_owned()];
         if parent && let Some(parent) = &s.parent {

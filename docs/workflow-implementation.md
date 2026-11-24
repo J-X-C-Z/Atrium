@@ -88,10 +88,22 @@ rule holds: take ideas, not text. What it added:
   prompt).
 - `check::local_results`: the checks that only read files (`exists`,
   `contains`, `absent`, plus every step's `outputs`). Private input values
-  (names that must not appear) are matched but never echoed.
+  (names that must not appear) are matched but never echoed. Every read
+  stays inside the run folder: a `..` path or a symlink out of it is left
+  out, and files are capped (`files`).
+- `files`: contained reads (ported from T3's workflow file reader). A path
+  must resolve inside the run folder, be a regular file, and fit a byte
+  cap; a cursor reads complete lines added since the last read and starts
+  over when the file is replaced or shrinks. Used for each-step lists,
+  decision options, verdict files and the template snapshot.
+- `answers`: a step's transcript reader (ported from T3). It skips harness
+  bookkeeping, folds the message id and effort/speed across a reply split
+  over several lines, tells when a turn ended, and keeps the last answer.
 - `render::prompt`: a step's full prompt. It includes the preamble, the
   step with inputs filled in (never private ones), the files to leave, the
-  checks in words, the reasons from the last try, and the skill hint.
+  checks in words, the reasons from the last try, the skill hint, and a
+  short form of what finished earlier steps reported (each try is a new
+  conversation, so the files alone do not always say it).
 - `builtin::all()`: the math modeling template (`builtin/mathmodel.toml`).
 - `author`: writing templates with an agent. `GUIDE` is the format guide
   the agent works from (a test keeps it naming every field); `brief` is the
@@ -131,7 +143,9 @@ rule holds: take ideas, not text. What it added:
    - ticks `Running` and `Waiting` runs, starts at most two ready steps
      per run, and creates a new conversation for every try;
    - uses the step's agent and effort, with access mode `auto` for Codex;
-   - detects turn completion, runs the checks and calls `Run::checked`;
+   - detects turn completion, keeps the agent's last report on the try (so
+     later steps' prompts carry it), runs the checks and calls
+     `Run::checked`;
    - follows retry, fixer and gate outcomes, and saves every change;
    - handles `pause`, `resume`, `stop` and restart recovery. A step cut
      off mid-turn is retried without using an allowance. If the saved
