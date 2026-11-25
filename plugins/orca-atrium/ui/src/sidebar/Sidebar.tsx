@@ -4,7 +4,7 @@ import type { LiveAgent, NeedItem, ProjectSummary, RunSummary, TemplateSummary }
 import { request } from '../orca'
 import { useResource, useTick } from '../data'
 import { ago, duration, lang, needKindLabel, t } from '../i18n'
-import { Button, Chip, EmptyState, ErrorState, Field, Menu, ProgressBar, SegmentedBar, Select, Skeleton, TextArea, TextInput, Toggle, act, agentTone, toast, type Tone } from '../design/components'
+import { Button, Chip, EmptyState, ErrorState, Field, FullscreenButton, Menu, ProgressBar, SegmentedBar, Select, Skeleton, TextArea, TextInput, Toggle, act, agentTone, toast, type Tone } from '../design/components'
 import { Icon, type IconName } from '../design/icons'
 import { basename, cx, roleTitle } from '../util'
 import './sidebar.css'
@@ -72,6 +72,7 @@ function Header({ needs, running, loading, refreshing }: { needs: number; runnin
         </div>
       )}
       <span class={cx('sb-pulse', refreshing && 'is-on')} aria-hidden="true" />
+      <FullscreenButton size="sm" />
     </header>
   )
 }

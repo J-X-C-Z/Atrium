@@ -4,7 +4,7 @@ import type { RunState, RunView as Run } from '../../../worker/src/protocol'
 import { request } from '../orca'
 import { useLink, useResource, useTick } from '../data'
 import { clock, duration, runStateLabel, stepStatusLabel, t } from '../i18n'
-import { Button, Chip, EmptyState, ErrorState, Popover, SegmentedBar, Skeleton, act, stepTone, type Tone } from '../design/components'
+import { Button, Chip, EmptyState, ErrorState, FullscreenButton, Popover, SegmentedBar, Skeleton, act, stepTone, type Tone } from '../design/components'
 import { Icon } from '../design/icons'
 import { Dag } from './Dag'
 import { StepPanel } from './StepPanel'
@@ -136,6 +136,7 @@ function Header({ run, refreshing }: { run: Run; refreshing: boolean }) {
               </Popover>
             </span>
           )}
+          <FullscreenButton size="md" />
         </div>
       </div>
       <div class="rn-strip">

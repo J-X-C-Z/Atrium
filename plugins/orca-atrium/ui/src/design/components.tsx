@@ -83,6 +83,25 @@ export function IconButton({ icon, label, size = 'md', class: cls, ...rest }: { 
   )
 }
 
+export function FullscreenButton({ size = 'sm' }: { size?: 'sm' | 'md' }) {
+  const [fs, setFs] = useState(() => typeof document !== 'undefined' && !!document.fullscreenElement)
+  useEffect(() => {
+    const onFs = () => setFs(!!document.fullscreenElement)
+    document.addEventListener('fullscreenchange', onFs)
+    return () => document.removeEventListener('fullscreenchange', onFs)
+  }, [])
+  const toggle = async () => {
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen()
+      else await document.documentElement.requestFullscreen()
+    } catch {
+      toast(t('fullscreenUnsupported'), 'bad')
+    }
+  }
+  const label = fs ? t('exitFullscreen') : t('fullscreen')
+  return <IconButton size={size} icon={fs ? 'minimize' : 'maximize'} label={label} aria-pressed={fs} onClick={toggle} />
+}
+
 export function Spinner({ size = 14 }: { size?: number }) {
   return (
     <svg class="spinner" width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">

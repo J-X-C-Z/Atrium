@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import type { StepView, ValidationError } from '../../../worker/src/protocol'
 import { request } from '../orca'
 import { t } from '../i18n'
-import { Button, Chip, EmptyState, IconButton, Skeleton, toast } from '../design/components'
+import { Button, Chip, EmptyState, FullscreenButton, IconButton, Skeleton, toast } from '../design/components'
 import { Icon } from '../design/icons'
 import { cx } from '../util'
 import { layoutSteps, type Box } from '../run/layout'
@@ -174,6 +174,7 @@ export function TemplateEditor() {
         <div class="tp-tools">
           <IconButton icon="undo" label={t('tplUndo')} disabled={!past.length || doc.readOnly} onClick={undo} />
           <IconButton icon="redo" label={t('tplRedo')} disabled={!future.length || doc.readOnly} onClick={redo} />
+          <FullscreenButton size="md" />
         </div>
         <Button variant="primary" icon="plus" disabled={doc.readOnly || !tpl} onClick={addStep}>
           {t('tplAddStep')}

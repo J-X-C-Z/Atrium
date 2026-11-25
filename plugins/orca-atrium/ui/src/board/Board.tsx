@@ -4,7 +4,7 @@ import type { ProjectView } from '../../../worker/src/protocol'
 import { request } from '../orca'
 import { useLink, useResource, useTick } from '../data'
 import { t } from '../i18n'
-import { Button, Chip, EmptyState, ErrorState, Skeleton, Tabs, Toggle, act } from '../design/components'
+import { Button, Chip, EmptyState, ErrorState, FullscreenButton, Skeleton, Tabs, Toggle, act } from '../design/components'
 import { Icon } from '../design/icons'
 import { Markdown } from '../design/markdown'
 import { basename } from '../util'
@@ -87,6 +87,7 @@ function ProjectBoard({ root }: { root: string }) {
               <span class="faint bd-auto-state">{p.autopilot ? t('autopilotOnShort') : t('autopilotOffShort')}</span>
             </span>
           </label>
+          <FullscreenButton size="md" />
         </div>
 
         <div class={briefOpen ? 'bd-brief is-open' : 'bd-brief'}>

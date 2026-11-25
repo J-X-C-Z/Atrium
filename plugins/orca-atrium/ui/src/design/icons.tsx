@@ -44,6 +44,8 @@ const P: Record<string, string> = {
   route: 'M4 13.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z M12 5.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z M4 10.5V8a2 2 0 0 1 2-2h4a2 2 0 0 0 2-2',
   tidy: 'M2.5 3h4v3h-4Z M9.5 3h4v3h-4Z M2.5 10h4v3h-4Z M9.5 10h4v3h-4Z',
   sparkle: 'M8 2.5v3 M8 10.5v3 M2.5 8h3 M10.5 8h3',
+  maximize: 'M2.5 6V2.5H6 M10 2.5h3.5V6 M13.5 10v3.5H10 M6 13.5H2.5V10',
+  minimize: 'M6 2.5V6H2.5 M13.5 6H10V2.5 M10 13.5V10h3.5 M2.5 10H6v3.5',
 }
 
 export type IconName = keyof typeof P
