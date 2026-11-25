@@ -95,11 +95,14 @@ impl TeamView {
                 return Err(format!("two members are called {name}"));
             }
         }
-        let watch = self.watch.as_ref().map_or_else(WatchRules::default, |w| WatchRules {
-            same_error: w.same_error,
-            same_step: w.same_step,
-            task_tokens: w.task_tokens,
-        });
+        let watch = self
+            .watch
+            .as_ref()
+            .map_or_else(WatchRules::default, |w| WatchRules {
+                same_error: w.same_error,
+                same_step: w.same_step,
+                task_tokens: w.task_tokens,
+            });
         let team = Team {
             on: self.on.unwrap_or(true),
             members,
@@ -175,7 +178,8 @@ pub fn write(args: WriteArgs) -> Result<Value, String> {
         Ok(team) => team,
         Err(message) => return Ok(json!({ "errors": [{ "message": message }] })),
     };
-    write_atomic(&team_file(&args.root), team.to_toml().as_bytes()).map_err(|e| format!("{e:#}"))?;
+    write_atomic(&team_file(&args.root), team.to_toml().as_bytes())
+        .map_err(|e| format!("{e:#}"))?;
     Ok(json!({ "errors": [] }))
 }
 
@@ -289,13 +293,30 @@ mod tests {
     fn a_team_is_written_read_and_checked() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
-        let fresh = read(ReadArgs { root: root.clone(), fallback: None }).unwrap();
+        let fresh = read(ReadArgs {
+            root: root.clone(),
+            fallback: None,
+        })
+        .unwrap();
         assert_eq!(fresh["exists"], false);
-        assert_eq!(fresh["members"].as_array().unwrap().len(), 4, "the default team");
+        assert_eq!(
+            fresh["members"].as_array().unwrap().len(),
+            4,
+            "the default team"
+        );
 
-        let out = write(WriteArgs { root: root.clone(), team: None, members: Some(members()) }).unwrap();
+        let out = write(WriteArgs {
+            root: root.clone(),
+            team: None,
+            members: Some(members()),
+        })
+        .unwrap();
         assert_eq!(out["errors"], json!([]));
-        let back = read(ReadArgs { root: root.clone(), fallback: None }).unwrap();
+        let back = read(ReadArgs {
+            root: root.clone(),
+            fallback: None,
+        })
+        .unwrap();
         assert_eq!(back["exists"], true);
         assert_eq!(back["members"][0]["standIns"], json!(["gpt"]));
         assert_eq!(back["members"][1]["model"], "gpt-5");
@@ -305,14 +326,32 @@ mod tests {
 
         let mut bad = members();
         bad[0].stand_ins = vec!["nobody".into()];
-        let out = write(WriteArgs { root: root.clone(), team: None, members: Some(bad) }).unwrap();
-        assert!(out["errors"][0]["message"].as_str().unwrap().contains("nobody"));
-        assert_eq!(Team::load(Some(&root), None).unwrap().members.len(), 2, "unchanged");
+        let out = write(WriteArgs {
+            root: root.clone(),
+            team: None,
+            members: Some(bad),
+        })
+        .unwrap();
+        assert!(
+            out["errors"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("nobody")
+        );
+        assert_eq!(
+            Team::load(Some(&root), None).unwrap().members.len(),
+            2,
+            "unchanged"
+        );
     }
 
     #[test]
     fn a_spent_member_is_covered_by_its_stand_in() {
-        let team = TeamView { on: Some(true), members: members(), watch: None };
+        let team = TeamView {
+            on: Some(true),
+            members: members(),
+            watch: None,
+        };
         let args = |quotas: BTreeMap<String, i64>| PickArgs {
             source: TeamSource {
                 team: Some(team.clone()),
@@ -329,7 +368,10 @@ mod tests {
         assert_eq!(covered["pick"]["member"], "gpt");
         assert_eq!(covered["pick"]["insteadOf"]["reason"], "spent");
         assert_eq!(covered["pick"]["insteadOf"]["until"], 500);
-        let both = pick(args([("claude".to_string(), 500), ("gpt".to_string(), 300)].into())).unwrap();
+        let both = pick(args(
+            [("claude".to_string(), 500), ("gpt".to_string(), 300)].into(),
+        ))
+        .unwrap();
         assert_eq!(both["wait"]["until"], 300);
 
         let text = roster(TeamSource {
@@ -340,6 +382,11 @@ mod tests {
             now: Some(100),
         })
         .unwrap();
-        assert!(text["text"].as_str().unwrap().contains("`gpt` (spent, back in about 5 min)"));
+        assert!(
+            text["text"]
+                .as_str()
+                .unwrap()
+                .contains("`gpt` (spent, back in about 5 min)")
+        );
     }
 }

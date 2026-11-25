@@ -689,10 +689,21 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     static SERIAL: AtomicU64 = AtomicU64::new(0);
     let tmp = path.with_extension(format!(
         "tmp-{}-{}",
-        std::process::id(),
+        process_tag(),
         SERIAL.fetch_add(1, Ordering::Relaxed)
     ));
     atomic_write_at(path, bytes, &tmp)
+}
+
+/// Names a temporary file's owner. WASI has no process id: the clock stands in.
+#[cfg(target_os = "wasi")]
+fn process_tag() -> u128 {
+    jiff::Timestamp::now().as_nanosecond() as u128
+}
+
+#[cfg(not(target_os = "wasi"))]
+fn process_tag() -> u32 {
+    std::process::id()
 }
 
 fn atomic_write_at(path: &Path, bytes: &[u8], tmp: &Path) -> Result<()> {
@@ -708,6 +719,8 @@ fn atomic_write_at(path: &Path, bytes: &[u8], tmp: &Path) -> Result<()> {
         .open(tmp)
         .with_context(|| format!("creating {}", tmp.display()))?;
     let result = (|| -> Result<()> {
+        // WASI cannot set permissions; the file keeps its default ones.
+        #[cfg(not(target_os = "wasi"))]
         if let Ok(metadata) = fs::metadata(path) {
             file.set_permissions(metadata.permissions())?;
         }

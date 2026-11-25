@@ -741,6 +741,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "atrium-orca-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "atrium-project",
+ "atrium-team",
+ "atrium-workflow",
+ "jiff 0.2.46",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "atrium-phone"
 version = "0.1.0"
 dependencies = [

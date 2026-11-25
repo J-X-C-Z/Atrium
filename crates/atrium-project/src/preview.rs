@@ -310,7 +310,8 @@ fn shell(line: &str) -> Command {
         let mut cmd = Command::new(std::env::var_os("ComSpec").unwrap_or_else(|| "cmd.exe".into()));
         cmd.args(["/d", "/s", "/c"]).raw_arg(format!("\"{line}\""));
         cmd
-    }    #[cfg(not(any(unix, windows)))]
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         // No shell here; spawning fails with "unsupported".
         let mut cmd = Command::new("sh");
