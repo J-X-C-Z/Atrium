@@ -45,6 +45,11 @@ export class Workspaces {
     return this.rows
   }
 
+  /** A workspace from the last listing, without asking Orca. */
+  cached(id: string): WorkspaceRow | undefined {
+    return this.rows.find((w) => w.id === id)
+  }
+
   invalidate(): void {
     this.fetchedAt = 0
   }

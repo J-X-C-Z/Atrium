@@ -1,0 +1,111 @@
+{
+  "$schema": "https://raw.githubusercontent.com/stablyai/orca/main/docs/schemas/plugins/orca-plugin.v2.schema.json",
+  "manifestVersion": 2,
+  "execution": "trusted-worker",
+  "id": "atrium",
+  "name": "Atrium for Orca",
+  "version": "0.1.0",
+  "description": "Atrium projects (controller, leads, workers, milestones, autopilot) and workflows (templates, runs, gates, send-back) inside Orca, with a visual command center.",
+  "license": "MIT",
+  "engines": { "orca": ">=1.4.259" },
+  "pluginApi": 1,
+  "main": "worker/dist/main.mjs",
+  "contributes": {
+    "panels": [
+      { "id": "atrium", "title": "Atrium", "icon": "layers", "entry": "ui/dist/sidebar.html", "ui": "html" }
+    ],
+    "customEditors": [
+      {
+        "id": "board",
+        "title": "Atrium board",
+        "filenames": ["atrium.board"],
+        "entry": "ui/dist/board.html",
+        "frame": "isolated"
+      },
+      {
+        "id": "run",
+        "title": "Atrium run",
+        "extensions": [".atrium-run"],
+        "entry": "ui/dist/run.html",
+        "frame": "isolated"
+      },
+      {
+        "id": "template",
+        "title": "Atrium template",
+        "extensions": [".workflow.toml"],
+        "priority": "option",
+        "entry": "ui/dist/template.html",
+        "frame": "isolated"
+      }
+    ],
+    "newFiles": [
+      { "id": "workflow-template", "title": "New Atrium workflow template", "extension": ".workflow.toml" }
+    ],
+    "events": [
+      { "on": "agent.status.changed" },
+      { "on": "workspace.changed" },
+      { "on": "workspace.created" },
+      { "on": "workspace.removed" }
+    ],
+    "hooks": [
+      { "event": "agent.launch.before", "onError": "pass" },
+      { "event": "workspace.create.after" }
+    ],
+    "statusBarItems": [
+      { "id": "needs", "text": "Atrium", "icon": "layers", "tooltip": "Atrium: items that need you", "command": "atrium.open" }
+    ],
+    "commands": [
+      { "id": "atrium.open", "title": "Atrium: Open" },
+      { "id": "atrium.newProject", "title": "Atrium: New project here", "when": "workspace" },
+      { "id": "atrium.startWorkflow", "title": "Atrium: Start workflow…", "when": "workspace" },
+      { "id": "atrium.openBoard", "title": "Atrium: Open board", "when": "workspace" }
+    ],
+    "settings": [
+      {
+        "key": "language",
+        "title": "Language",
+        "description": "Language of the prompts Atrium sends to agents and of its own messages.",
+        "type": "string",
+        "enum": ["auto", "zh", "en"],
+        "enumLabels": ["Follow the system", "中文", "English"],
+        "default": "auto"
+      },
+      {
+        "key": "defaultAgent",
+        "title": "Default agent",
+        "description": "Agent used when a step or role does not name one (claude, codex, gemini…).",
+        "type": "string",
+        "default": "claude"
+      },
+      {
+        "key": "maxParallel",
+        "title": "Max parallel agents",
+        "description": "How many agents Atrium keeps running at once.",
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 32,
+        "default": 4
+      },
+      {
+        "key": "autopilotDefault",
+        "title": "Autopilot on for new projects",
+        "type": "boolean",
+        "default": false
+      }
+    ]
+  },
+  "capabilities": [
+    { "kind": "storage:own" },
+    { "kind": "settings:own" },
+    { "kind": "workspace:read" },
+    { "kind": "workspace:write" },
+    { "kind": "workspace:create" },
+    { "kind": "agent:read" },
+    { "kind": "agent:launch" },
+    { "kind": "terminal:read" },
+    { "kind": "terminal:send" },
+    { "kind": "notifications:show" },
+    { "kind": "automation:read" },
+    { "kind": "history:read" }
+  ]
+}

@@ -100,7 +100,7 @@ export class Runs {
     if (!meta) return
     let effects: RunEffect[]
     try {
-      effects = normalizeEffects(this.ctx.core.call('workflow.run.next', { dir }))
+      effects = normalizeEffects(this.ctx.core.call('workflow.run.next', { dir, lang: this.ctx.lang(), maxParallel: this.ctx.settings().maxParallel }))
     } catch (error) {
       this.raiseError(dir, undefined, errorText(error))
       return
@@ -195,6 +195,7 @@ export class Runs {
         step: e.step,
         ...(e.item ? { item: e.item } : {}),
         ...(e.index !== undefined ? { index: e.index } : {}),
+        lang: this.ctx.lang(),
         result
       })
       return true
@@ -250,7 +251,7 @@ export class Runs {
 
   private templateName(meta: RunMeta): string {
     try {
-      const view = this.ctx.core.call<Partial<RunView>>('workflow.run.load', { dir: meta.dir })
+      const view = this.ctx.core.call<Partial<RunView>>('workflow.run.load', { dir: meta.dir, lang: this.ctx.lang() })
       return view?.templateName || meta.templateId
     } catch {
       return meta.templateId
@@ -380,7 +381,7 @@ export class Runs {
 
   view(dir: string): RunView {
     const meta = this.requireMeta(dir)
-    const raw = this.ctx.core.call<Partial<RunView>>('workflow.run.load', { dir })
+    const raw = this.ctx.core.call<Partial<RunView>>('workflow.run.load', { dir, lang: this.ctx.lang() })
     const steps: StepView[] = (raw.steps ?? []).map((s) => {
       const items = s.items
       const bound = this.ctx.store.forStep(dir, s.id) ?? this.ctx.store.live().find((b) => b.dir === dir && b.step === s.id)

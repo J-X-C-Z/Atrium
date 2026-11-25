@@ -30,7 +30,7 @@ export interface OrcaWorker {
   panels: { handle(name: string, handler: (input: any, ctx: unknown) => unknown): Disposable; post(name: string, payload?: unknown): void }
   commands: { register(id: string, handler: (args: unknown, ctx: unknown) => unknown): Disposable }
   storage: { get(key: string): Promise<unknown>; set(key: string, value: unknown): Promise<void> }
-  settings: { get(): Promise<Record<string, unknown>>; onDidChange(listener: (change: unknown) => void): Disposable }
+  settings?: { onDidChange?(listener: (change: unknown) => void): Disposable }
   log(message: string): void
 }
 
@@ -57,8 +57,8 @@ export function orcaHost(orca: OrcaWorker): Host {
     command: (id, handler) => orca.commands.register(id, (args) => handler(args)),
     storageGet: async <T>(key: string) => ((await orca.storage.get(key)) ?? null) as T | null,
     storageSet: (key, value) => orca.storage.set(key, value),
-    settings: () => orca.settings.get(),
-    onSettings: (listener) => orca.settings.onDidChange(() => listener()),
+    settings: async () => ((await orca.host.call('settings.get', {})) as { settings?: Record<string, unknown> } | null)?.settings ?? {},
+    onSettings: (listener) => orca.settings?.onDidChange?.(() => listener()) ?? { dispose() {} },
     log: (message) => orca.log(message)
   }
 }

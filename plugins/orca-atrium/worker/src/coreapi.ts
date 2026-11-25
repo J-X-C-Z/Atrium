@@ -111,10 +111,10 @@ export function normalizeEffects(raw: unknown): RunEffect[] {
 // ---------- project decisions (`project.next`) ----------
 
 export type ProjectAction =
-  | { kind: 'launch'; role: string; member?: string; agent?: string; model?: string; prompt?: string; task?: string; worktree?: boolean }
+  | { kind: 'launch'; role: string; member?: string; agent?: string; model?: string; prompt?: string; task?: string; worktree?: boolean; cwd?: string; standingInFor?: string }
   | { kind: 'send'; role: string; text: string }
   | { kind: 'stop'; role: string }
-  | { kind: 'need'; title: string; detail?: string; role?: string; needKind?: string }
+  | { kind: 'need'; title: string; detail?: string; role?: string; needKind?: string; task?: string }
 
 export function normalizeActions(raw: unknown): ProjectAction[] {
   const list = Array.isArray(raw)
@@ -139,7 +139,9 @@ export function normalizeActions(raw: unknown): ProjectAction[] {
           ...(str(e.model) ? { model: str(e.model)! } : {}),
           ...(str(e.prompt) ? { prompt: str(e.prompt)! } : {}),
           ...(str(e.task) ? { task: str(e.task)! } : {}),
-          ...(e.worktree === true ? { worktree: true } : {})
+          ...(e.worktree === true ? { worktree: true } : {}),
+          ...(str(e.cwd) ? { cwd: str(e.cwd)! } : {}),
+          ...(str(e.standingInFor) ? { standingInFor: str(e.standingInFor)! } : {})
         })
         break
       case 'send':
@@ -158,7 +160,8 @@ export function normalizeActions(raw: unknown): ProjectAction[] {
           title: String(e.title ?? e.text ?? ''),
           ...(str(e.detail) ? { detail: str(e.detail)! } : {}),
           ...(role ? { role } : {}),
-          ...(str(e.need) ? { needKind: str(e.need)! } : {})
+          ...(str(e.needKind ?? e.need) ? { needKind: str(e.needKind ?? e.need)! } : {}),
+          ...(str(e.task) ? { task: str(e.task)! } : {})
         })
         break
     }

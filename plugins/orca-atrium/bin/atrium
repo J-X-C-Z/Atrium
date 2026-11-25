@@ -1,0 +1,104 @@
+#!/usr/bin/env node
+// `atrium`: how an agent talks to Atrium inside Orca. Sends one request over ATRIUM_SOCKET.
+'use strict'
+const net = require('node:net')
+const fs = require('node:fs')
+
+const HELP = [
+  'atrium report <text> | -f <file>       report the result of your workflow step',
+  'atrium status                          what you are assigned',
+  'atrium task done|blocked <id> [note]   mark a project task',
+  'atrium notice <text>                   post a notice to the project',
+  'atrium ask <question>                  ask the person',
+  'atrium help'
+].join('\n')
+
+function readStdin() {
+  try {
+    return fs.readFileSync(0, 'utf8')
+  } catch {
+    return ''
+  }
+}
+
+function main() {
+  const argv = process.argv.slice(2)
+  const cmd = argv[0] || 'help'
+  let args = argv.slice(1)
+  if (cmd === 'help' || cmd === '--help' || cmd === '-h') {
+    console.log(HELP)
+    return
+  }
+  const known = ['report', 'status', 'task', 'notice', 'ask']
+  if (!known.includes(cmd)) {
+    console.error(`atrium: unknown command "${cmd}"\n${HELP}`)
+    process.exit(2)
+  }
+  const env = process.env
+  if (!env.ATRIUM_SOCKET) {
+    console.error('atrium: ATRIUM_SOCKET is not set; this terminal was not started by Atrium.')
+    process.exit(1)
+  }
+  // A long text comes from a file (-f) or stdin (-).
+  let text
+  if (args[0] === '-f' || args[0] === '--file') {
+    if (!args[1]) {
+      console.error('atrium: -f needs a file')
+      process.exit(2)
+    }
+    try {
+      text = fs.readFileSync(args[1], 'utf8')
+    } catch (e) {
+      console.error(`atrium: cannot read ${args[1]}: ${e.message}`)
+      process.exit(1)
+    }
+    args = []
+  } else if (args.length === 1 && args[0] === '-') {
+    text = readStdin()
+    args = []
+  }
+  const context = {}
+  for (const k of ['ATRIUM_RUN', 'ATRIUM_STEP', 'ATRIUM_ITEM', 'ATRIUM_PROJECT', 'ATRIUM_ROLE', 'ATRIUM_TASK']) {
+    if (env[k]) context[k] = env[k]
+  }
+  const request = {
+    token: env.ATRIUM_TOKEN,
+    cmd,
+    args,
+    ...(text !== undefined ? { text } : {}),
+    launch: env.ATRIUM_LAUNCH,
+    terminal: env.ORCA_TERMINAL_HANDLE,
+    context,
+    cwd: process.cwd()
+  }
+  const socket = net.connect(env.ATRIUM_SOCKET)
+  let buf = ''
+  let done = false
+  const finish = (code, out, err) => {
+    if (done) return
+    done = true
+    if (out) console.log(out)
+    if (err) console.error(err)
+    socket.destroy()
+    process.exitCode = code
+  }
+  socket.setEncoding('utf8')
+  socket.setTimeout(120000, () => finish(1, '', 'atrium: no answer from Atrium (timed out)'))
+  socket.on('connect', () => socket.write(`${JSON.stringify(request)}\n`))
+  socket.on('data', (chunk) => {
+    buf += chunk
+    const at = buf.indexOf('\n')
+    if (at < 0) return
+    try {
+      const reply = JSON.parse(buf.slice(0, at))
+      if (reply.ok) finish(0, reply.text || '', '')
+      else finish(1, '', `atrium: ${reply.error || 'failed'}`)
+    } catch {
+      finish(1, '', 'atrium: bad reply from Atrium')
+    }
+  })
+  socket.on('error', (e) => finish(1, '', `atrium: cannot reach Atrium (${e.code || e.message}). Is Orca running with the Atrium plugin?`))
+  socket.on('close', () => finish(1, '', 'atrium: connection closed without an answer'))
+}
+
+main()

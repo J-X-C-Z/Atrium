@@ -92,7 +92,7 @@ export class Needs {
     const running = this.running()
     try {
       await this.host.call('statusBar.update', {
-        id: 'atrium.needs',
+        id: 'needs',
         text: statusText(this.lang(), count, running),
         tone: count > 0 ? 'warning' : running > 0 ? 'accent' : 'neutral',
         visible: true
