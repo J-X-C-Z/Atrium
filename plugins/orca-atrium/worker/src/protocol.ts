@@ -235,6 +235,7 @@ export interface Requests {
   'need.resolve': { params: { id: string; answer?: string }; result: void }
   'board.open': { params: { root: string }; result: void }
   'run.open': { params: { dir: string }; result: void }
+  'view.expand': { params: { mode: 'sidebar' | 'editor' }; result: void }
   'link.read': { params: { text: string }; result: { kind: 'board'; root: string } | { kind: 'run'; dir: string } }
 }
 

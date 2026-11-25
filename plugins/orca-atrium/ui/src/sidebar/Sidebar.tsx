@@ -72,7 +72,7 @@ function Header({ needs, running, loading, refreshing }: { needs: number; runnin
         </div>
       )}
       <span class={cx('sb-pulse', refreshing && 'is-on')} aria-hidden="true" />
-      <FullscreenButton size="sm" />
+      <FullscreenButton size="sm" mode="sidebar" />
     </header>
   )
 }

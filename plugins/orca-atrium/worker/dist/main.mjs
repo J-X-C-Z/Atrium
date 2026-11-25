@@ -2630,6 +2630,32 @@ var Service = class _Service {
       "need.resolve": ({ id, answer }) => needs.resolve(id, answer),
       "board.open": ({ root }) => this.openBoard(root),
       "run.open": ({ dir }) => this.openRun(dir),
+      "view.expand": async ({ mode }) => {
+        if (mode === "sidebar") {
+          const p = ctx.store.data.projects[0];
+          if (p) {
+            try {
+              await this.openBoard(p.root);
+              return;
+            } catch {
+            }
+          }
+          const r = ctx.store.data.runs[0];
+          if (r) {
+            try {
+              await this.openRun(r.dir);
+              return;
+            } catch {
+            }
+          }
+        }
+        for (const action of ["sidebar.left.toggle", "sidebar.right.toggle"]) {
+          try {
+            await ctx.host.call("commands.run", { action });
+          } catch {
+          }
+        }
+      },
       "link.read": ({ text: text2 }) => readLink(text2)
     };
     for (const name of Object.keys(handlers)) {

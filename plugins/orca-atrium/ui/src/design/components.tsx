@@ -83,7 +83,7 @@ export function IconButton({ icon, label, size = 'md', class: cls, ...rest }: { 
   )
 }
 
-export function FullscreenButton({ size = 'sm' }: { size?: 'sm' | 'md' }) {
+export function FullscreenButton({ size = 'sm', mode = 'editor' }: { size?: 'sm' | 'md'; mode?: 'sidebar' | 'editor' }) {
   const [fs, setFs] = useState(() => typeof document !== 'undefined' && !!document.fullscreenElement)
   useEffect(() => {
     const onFs = () => setFs(!!document.fullscreenElement)
@@ -91,9 +91,19 @@ export function FullscreenButton({ size = 'sm' }: { size?: 'sm' | 'md' }) {
     return () => document.removeEventListener('fullscreenchange', onFs)
   }, [])
   const toggle = async () => {
+    if (document.fullscreenEnabled) {
+      try {
+        if (document.fullscreenElement) await document.exitFullscreen()
+        else await document.documentElement.requestFullscreen()
+        return
+      } catch {
+        // Fall through to Orca host layout toggle when iframe fullscreen is blocked.
+      }
+    }
     try {
-      if (document.fullscreenElement) await document.exitFullscreen()
-      else await document.documentElement.requestFullscreen()
+      const { request } = await import('../orca')
+      await request('view.expand', { mode })
+      if (mode === 'editor') setFs((v) => !v)
     } catch {
       toast(t('fullscreenUnsupported'), 'bad')
     }
