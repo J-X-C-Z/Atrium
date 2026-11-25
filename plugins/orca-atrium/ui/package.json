@@ -1,0 +1,17 @@
+{
+  "name": "orca-atrium-ui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "node build.mjs --dev",
+    "typecheck": "tsc --noEmit -p .",
+    "shots": "node scripts/screenshots.mjs"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "esbuild": "0.24.2",
+    "preact": "10.25.4",
+    "typescript": "5.7.3"
+  }
+}

@@ -321,6 +321,11 @@ fn shared_link(tree: &Path, shared: &Path, create: bool) -> Result<()> {
                 ))
             }
         });
+        #[cfg(not(any(unix, windows)))]
+        let result: io::Result<()> = Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "symlinks are unsupported on this platform",
+        ));
         result.with_context(|| {
             format!(
                 "linking {} to {}{}",

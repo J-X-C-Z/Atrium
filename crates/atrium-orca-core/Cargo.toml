@@ -1,0 +1,23 @@
+[package]
+name = "atrium-orca-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Atrium's projects, teams and workflows as JSON ops, built for wasm32-wasip1 and loaded by the Orca plugin."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+atrium-project.workspace = true
+atrium-team.workspace = true
+atrium-workflow.workspace = true
+anyhow.workspace = true
+jiff.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"

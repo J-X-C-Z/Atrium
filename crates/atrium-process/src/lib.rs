@@ -27,6 +27,14 @@ pub fn probe_owned_exit(pid: u32) -> std::io::Result<bool> {
     }
 }
 
+#[cfg(not(any(unix, windows)))]
+fn unsupported() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "process trees are unsupported on this platform",
+    )
+}
+
 pub struct ProcessTree {
     child: Child,
     stopped: bool,
@@ -60,6 +68,11 @@ impl ProcessTree {
                 job: Some(job),
             })
         }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = command;
+            Err(unsupported().into())
+        }
     }
 
     /// Keep the Unix leader's PID reserved until its process group is stopped.
@@ -71,6 +84,10 @@ impl ProcessTree {
         #[cfg(windows)]
         {
             self.child.try_wait().map(|status| status.is_some())
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            Err(unsupported())
         }
     }
 
