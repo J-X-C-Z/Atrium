@@ -91,11 +91,16 @@ export function FullscreenButton({ size = 'sm', mode = 'editor' }: { size?: 'sm'
     return () => document.removeEventListener('fullscreenchange', onFs)
   }, [])
   const toggle = async () => {
+    const wasFs = !!document.fullscreenElement
     if (document.fullscreenEnabled) {
       try {
-        if (document.fullscreenElement) await document.exitFullscreen()
-        else await document.documentElement.requestFullscreen()
-        return
+        if (wasFs) {
+          await document.exitFullscreen()
+          if (!document.fullscreenElement) return
+        } else {
+          await document.documentElement.requestFullscreen()
+          if (document.fullscreenElement) return
+        }
       } catch {
         // Fall through to Orca host layout toggle when iframe fullscreen is blocked.
       }
