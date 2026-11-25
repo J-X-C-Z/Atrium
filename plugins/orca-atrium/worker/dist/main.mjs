@@ -1,10 +1,11 @@
 // worker/src/main.ts
 import { existsSync as existsSync6 } from "node:fs";
-import { dirname, join as join6 } from "node:path";
+import { dirname, join as join7 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // worker/src/core.ts
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { WASI } from "node:wasi";
 var CoreError = class extends Error {
   op;
@@ -17,13 +18,132 @@ var CoreError = class extends Error {
 var WA = globalThis.WebAssembly;
 var encoder = new TextEncoder();
 var decoder = new TextDecoder();
-var ROOT = { "/": "/" };
+var ROOT = process.platform === "win32" ? winDrives() : { "/": "/" };
+function winDrives() {
+  const out = {};
+  for (let c = 65; c <= 90; c++) {
+    const root = `${String.fromCharCode(c)}:\\`;
+    if (existsSync(root)) out[`/${String.fromCharCode(c).toLowerCase()}`] = root;
+  }
+  return out;
+}
+function toGuestPath(s) {
+  const m = /^([A-Za-z]):(?:[\\/](.*))?$/.exec(s);
+  if (!m) return s;
+  const rest = (m[2] ?? "").replace(/\\/g, "/");
+  return rest ? `/${m[1].toLowerCase()}/${rest}` : `/${m[1].toLowerCase()}`;
+}
+function toHostPath(s) {
+  const m = /^\/([a-z])(?:\/(.*))?$/.exec(s);
+  if (!m) return s;
+  const rest = (m[2] ?? "").replace(/\//g, "\\");
+  return `${m[1].toUpperCase()}:\\${rest}`;
+}
+function mapPaths(v, fn) {
+  if (typeof v === "string") return fn(v);
+  if (Array.isArray(v)) return v.map((x) => mapPaths(x, fn));
+  if (v && typeof v === "object") {
+    const out = {};
+    for (const [k, val] of Object.entries(v)) out[k] = mapPaths(val, fn);
+    return out;
+  }
+  return v;
+}
 function mapping(preopens) {
   const out = {};
-  if (Array.isArray(preopens)) for (const p of preopens) out[p] = p;
-  else Object.assign(out, preopens);
+  if (Array.isArray(preopens)) {
+    for (const p of preopens) out[process.platform === "win32" ? toGuestPath(p) : p] = p;
+  } else Object.assign(out, preopens);
   for (const guest of Object.keys(out)) if (!existsSync(out[guest])) delete out[guest];
   return out;
+}
+function patchWinReaddir(preview1, preopens, getBuf) {
+  const fdPaths = /* @__PURE__ */ new Map();
+  const origPrestat = preview1.fd_prestat_dir_name;
+  const origOpen = preview1.path_open;
+  const origClose = preview1.fd_close;
+  const origReaddir = preview1.fd_readdir;
+  preview1.fd_prestat_dir_name = (fd, pathPtr, pathLen) => {
+    const r = origPrestat(fd, pathPtr, pathLen);
+    const mem = getBuf();
+    if (r === 0 && mem) {
+      const guest = decoder.decode(new Uint8Array(mem, Number(pathPtr), Number(pathLen)).slice()).replace(/\0+$/, "");
+      const host = preopens[guest] ?? preopens[`/${guest}`];
+      if (host) fdPaths.set(Number(fd), host);
+    }
+    return r;
+  };
+  preview1.path_open = (...args) => {
+    const r = origOpen(...args);
+    const mem = getBuf();
+    if (r === 0 && mem) {
+      const dirfd = Number(args[0]);
+      const pathPtr = Number(args[2]);
+      const pathLen = Number(args[3]);
+      const outFdPtr = Number(args[8]);
+      const base = fdPaths.get(dirfd);
+      if (base) {
+        const rel = decoder.decode(new Uint8Array(mem, pathPtr, pathLen).slice());
+        const openedFd = new DataView(mem).getUint32(outFdPtr, true);
+        fdPaths.set(openedFd, join(base, rel));
+      }
+    }
+    return r;
+  };
+  preview1.fd_close = (fd) => {
+    fdPaths.delete(Number(fd));
+    return origClose(fd);
+  };
+  preview1.fd_readdir = (fd, bufPtr, bufLen, cookie, bufusedPtr) => {
+    const r = origReaddir(fd, bufPtr, bufLen, cookie, bufusedPtr);
+    if (r !== 52) return r;
+    const hostDir = fdPaths.get(Number(fd));
+    const mem = getBuf();
+    if (!hostDir || !mem) return r;
+    let entries;
+    try {
+      entries = readdirSync(hostDir, { withFileTypes: true });
+    } catch {
+      return 8;
+    }
+    const view = new DataView(mem);
+    const bytes = new Uint8Array(mem);
+    const start = Number(cookie);
+    const cap = Number(bufLen);
+    const base = Number(bufPtr);
+    let off = 0;
+    for (let i = start; i < entries.length; i++) {
+      const e = entries[i];
+      const nameBytes = encoder.encode(e.name);
+      const recLen = 24 + nameBytes.length;
+      if (off + recLen > cap) {
+        if (off === 0) {
+          const take = Math.min(cap, recLen);
+          const tmp = new Uint8Array(recLen);
+          const tv = new DataView(tmp.buffer);
+          tv.setBigUint64(0, BigInt(i + 1), true);
+          tv.setBigUint64(8, BigInt(i + 1), true);
+          tv.setUint32(16, nameBytes.length, true);
+          tmp[20] = e.isDirectory() ? 3 : e.isFile() ? 4 : 0;
+          tmp.set(nameBytes, 24);
+          bytes.set(tmp.subarray(0, take), base);
+          off = take;
+        }
+        break;
+      }
+      view.setBigUint64(base + off, BigInt(i + 1), true);
+      view.setBigUint64(base + off + 8, BigInt(i + 1), true);
+      view.setUint32(base + off + 16, nameBytes.length, true);
+      bytes[base + off + 20] = e.isDirectory() ? 3 : e.isFile() ? 4 : 0;
+      bytes[base + off + 21] = 0;
+      bytes[base + off + 22] = 0;
+      bytes[base + off + 23] = 0;
+      bytes.set(nameBytes, base + off + 24);
+      off += recLen;
+    }
+    view.setUint32(Number(bufusedPtr), off, true);
+    return 0;
+  };
 }
 var Core = class _Core {
   module;
@@ -48,9 +168,13 @@ var Core = class _Core {
   instance() {
     if (this.exports) return this.exports;
     const wasi = new WASI({ version: "preview1", args: ["atrium-core"], env: {}, preopens: this.preopens, returnOnExit: true });
-    const instance = new WA.Instance(this.module, wasi.getImportObject());
+    const imports = wasi.getImportObject();
+    let exportsRef = null;
+    if (process.platform === "win32") patchWinReaddir(imports.wasi_snapshot_preview1, this.preopens, () => exportsRef?.memory.buffer ?? null);
+    const instance = new WA.Instance(this.module, imports);
+    exportsRef = instance.exports;
     wasi.initialize(instance);
-    this.exports = instance.exports;
+    this.exports = exportsRef;
     return this.exports;
   }
   /**
@@ -69,7 +193,8 @@ var Core = class _Core {
   }
   run(op, args) {
     const wasm = this.instance();
-    const request = encoder.encode(JSON.stringify({ op, args: args ?? {} }));
+    const payload = process.platform === "win32" ? mapPaths(args ?? {}, toGuestPath) : args ?? {};
+    const request = encoder.encode(JSON.stringify({ op, args: payload }));
     let reply;
     try {
       const ptr = wasm.alloc(request.length);
@@ -86,7 +211,7 @@ var Core = class _Core {
     }
     const parsed = JSON.parse(reply);
     if (typeof parsed.err === "string") throw new CoreError(op, parsed.err);
-    return parsed.ok;
+    return process.platform === "win32" ? mapPaths(parsed.ok, toHostPath) : parsed.ok;
   }
 };
 
@@ -132,13 +257,13 @@ import { createHash } from "node:crypto";
 import { chmodSync, existsSync as existsSync2, mkdirSync, unlinkSync } from "node:fs";
 import net from "node:net";
 import { tmpdir, userInfo } from "node:os";
-import { join } from "node:path";
+import { join as join2 } from "node:path";
 function socketPath(seed, platform = process.platform) {
   const user = safeUser();
   const tag = createHash("sha256").update(`${user}:${seed}`).digest("hex").slice(0, 12);
   if (platform === "win32") return `\\\\.\\pipe\\atrium-orca-${tag}`;
   const base = process.env.XDG_RUNTIME_DIR && existsSync2(process.env.XDG_RUNTIME_DIR) ? process.env.XDG_RUNTIME_DIR : tmpdir();
-  return join(base, `atrium-orca-${tag}.sock`);
+  return join2(base, `atrium-orca-${tag}.sock`);
 }
 function safeUser() {
   try {
@@ -160,7 +285,7 @@ var BridgeServer = class {
   async start() {
     if (process.platform !== "win32") {
       try {
-        mkdirSync(join(this.path, ".."), { recursive: true });
+        mkdirSync(join2(this.path, ".."), { recursive: true });
       } catch {
       }
       if (existsSync2(this.path)) {
@@ -249,7 +374,7 @@ var BridgeServer = class {
 
 // worker/src/service.ts
 import { homedir } from "node:os";
-import { join as join5 } from "node:path";
+import { join as join6 } from "node:path";
 
 // worker/src/bridge/hook.ts
 import { delimiter } from "node:path";
@@ -287,6 +412,7 @@ var LaunchHook = class {
     const env = {
       ...event.env ?? {},
       ...ours.env,
+      ATRIUM_NODE: process.execPath,
       PATH: path ? `${this.binDir}${delimiter}${path}` : this.binDir
     };
     return next({ ...event, env });
@@ -814,7 +940,7 @@ var Needs = class {
 
 // worker/src/engine/projects.ts
 import { existsSync as existsSync3 } from "node:fs";
-import { basename, join as join2 } from "node:path";
+import { basename, join as join3 } from "node:path";
 
 // worker/src/coreapi.ts
 var str = (value) => typeof value === "string" && value ? value : void 0;
@@ -1100,7 +1226,7 @@ var Projects = class {
   async discover() {
     for (const ws of await this.ctx.workspaces.list()) {
       if ((ws.hostId ?? "local") !== "local") continue;
-      if (existsSync3(join2(ws.path, ".atrium", "project.json"))) {
+      if (existsSync3(join3(ws.path, ".atrium", "project.json"))) {
         const meta = this.meta(ws.path);
         if (!meta) this.register(ws.path, ws.id);
         else if (!meta.workspaceId) {
@@ -1110,13 +1236,13 @@ var Projects = class {
       }
     }
     const before = this.metas().length;
-    this.ctx.store.data.projects = this.metas().filter((p) => existsSync3(join2(p.root, ".atrium", "project.json")));
+    this.ctx.store.data.projects = this.metas().filter((p) => existsSync3(join3(p.root, ".atrium", "project.json")));
     if (this.metas().length !== before) this.ctx.store.save();
   }
   requireProject(root) {
     const meta = this.meta(root);
     if (!meta) {
-      if (existsSync3(join2(root, ".atrium", "project.json"))) return this.register(root);
+      if (existsSync3(join3(root, ".atrium", "project.json"))) return this.register(root);
       throw new HostError("invalid_params", `${root} is not an Atrium project`);
     }
     return meta;
@@ -1573,7 +1699,7 @@ function limitedNow(q, now) {
 
 // worker/src/engine/runs.ts
 import { existsSync as existsSync4 } from "node:fs";
-import { basename as basename2, join as join3 } from "node:path";
+import { basename as basename2, join as join4 } from "node:path";
 
 // worker/src/engine/checks.ts
 import { spawn } from "node:child_process";
@@ -1770,7 +1896,7 @@ var Runs = class {
     if (!ws) throw new HostError("invalid_params", T.noWorkspace(this.ctx.lang()));
     const templates = this.ctx.core.call("workflow.templates", { dirs: this.ctx.templateDirs() });
     const template = (Array.isArray(templates) ? templates : []).find((t) => t.id === params.templateId);
-    const dir = freeDir(join3(ws.path, "atrium-runs"), `${safeName(params.templateId)}-${stamp(new Date(this.ctx.now()))}`);
+    const dir = freeDir(join4(ws.path, "atrium-runs"), `${safeName(params.templateId)}-${stamp(new Date(this.ctx.now()))}`);
     this.ctx.core.call("workflow.run.start", {
       template: params.templateId,
       ...template?.path ? { path: template.path } : {},
@@ -2116,18 +2242,18 @@ function stamp(d) {
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
 }
 function freeDir(parent, name) {
-  let dir = join3(parent, name);
-  for (let n = 2; existsSync4(dir); n++) dir = join3(parent, `${name}-${n}`);
+  let dir = join4(parent, name);
+  for (let n = 2; existsSync4(dir); n++) dir = join4(parent, `${name}-${n}`);
   return dir;
 }
 
 // worker/src/links.ts
 import { existsSync as existsSync5, mkdirSync as mkdirSync2, readFileSync as readFileSync3, writeFileSync } from "node:fs";
-import { join as join4 } from "node:path";
+import { join as join5 } from "node:path";
 var BOARD_FILE = "atrium.board";
 var RUN_FILE = "view.atrium-run";
 function ignore(atriumDir, name) {
-  const path = join4(atriumDir, ".gitignore");
+  const path = join5(atriumDir, ".gitignore");
   const text2 = existsSync5(path) ? readFileSync3(path, "utf8") : "";
   const lines = text2.split(/\r?\n/);
   if (lines.includes(name)) return;
@@ -2135,9 +2261,9 @@ function ignore(atriumDir, name) {
 `);
 }
 function writeLink(base, file, body) {
-  const dir = join4(base, ".atrium");
+  const dir = join5(base, ".atrium");
   mkdirSync2(dir, { recursive: true });
-  const path = join4(dir, file);
+  const path = join5(dir, file);
   const text2 = `${JSON.stringify(body, null, 2)}
 `;
   if (!existsSync5(path) || readFileSync3(path, "utf8") !== text2) writeFileSync(path, text2);
@@ -2358,11 +2484,11 @@ var Service = class _Service {
     await this.store.flush();
   }
   templateDirs() {
-    const dirs = [this.opts.userTemplates ?? join5(homedir(), ".config", "Atrium", "workflows")];
-    for (const p of this.store.data.projects) dirs.push(join5(p.root, ".atrium", "workflows"));
+    const dirs = [this.opts.userTemplates ?? join6(homedir(), ".config", "Atrium", "workflows")];
+    for (const p of this.store.data.projects) dirs.push(join6(p.root, ".atrium", "workflows"));
     const focused = this.workspaces.focused?.workspaceId;
     const ws = focused ? this.workspaces.cached(focused) : void 0;
-    if (ws) dirs.push(join5(ws.path, ".atrium", "workflows"));
+    if (ws) dirs.push(join6(ws.path, ".atrium", "workflows"));
     return [...new Set(dirs)];
   }
   // ---------- wiring ----------
@@ -2453,7 +2579,8 @@ var Service = class _Service {
         label: String(i.label ?? i.id ?? i.name ?? ""),
         kind: String(i.kind ?? i.type ?? "text"),
         required: i.required === true,
-        ...i.default !== void 0 && i.default !== null ? { default: String(i.default) } : {}
+        ...i.default !== void 0 && i.default !== null ? { default: String(i.default) } : {},
+        ...Array.isArray(i.options) && i.options.length ? { options: i.options.map(String) } : {}
       })),
       ...t.error ? { error: String(t.error) } : {}
     }));
@@ -2535,14 +2662,14 @@ function fsRoots() {
 async function activate(orca) {
   const root = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
   const host = orcaHost(orca);
-  const core = await Core.load(join6(root, "core", "atrium_core.wasm"), fsRoots());
+  const core = await Core.load(join7(root, "core", "atrium_core.wasm"), fsRoots());
   const win = process.platform === "win32";
-  const bin = join6(root, "bin");
+  const bin = join7(root, "bin");
   service = await Service.create(host, {
     core,
     binDir: bin,
     socket: socketPath(root),
-    cli: win ? `"${join6(bin, "atrium.cmd")}"` : `node "${join6(bin, "atrium")}"`
+    cli: win ? `"${join7(bin, "atrium.cmd")}"` : `node "${join7(bin, "atrium")}"`
   });
   host.log("atrium: ready");
 }

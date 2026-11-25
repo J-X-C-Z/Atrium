@@ -271,9 +271,11 @@ function Decision({ run, step }: { run: RunView; step: StepView }) {
       <TextArea value={note} onInput={setNote} rows={2} placeholder={back ? t('sendBackNote') : t('decisionNote')} aria-label={t('decisionNote')} />
       {!back ? (
         <div class="row wrap">
-          <Button variant="primary" icon="check" loading={busy === 'approve'} disabled={!!busy} onClick={() => go('approve', 'approve', undefined, t('approved'))}>
-            {t('approve')}
-          </Button>
+          {(step.choices?.length ? step.choices : [{ id: 'approve', label: t('approve') }]).map((c, i) => (
+            <Button key={c.id} variant={i === 0 ? 'primary' : 'secondary'} icon={i === 0 ? 'check' : undefined} loading={busy === c.id} disabled={!!busy} onClick={() => go(c.id, c.id, undefined, c.id === 'approve' ? t('approved') : t('chosen', { choice: c.label }))}>
+              {c.label}
+            </Button>
+          ))}
           {targets.length > 0 && (
             <Button icon="sendBack" disabled={!!busy} onClick={() => setBack(true)}>
               {t('sendBack')}…

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { mkdtempSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -10,8 +11,13 @@ export function workspace() {
   return dir
 }
 
+export function testSocket(dir) {
+  const tag = createHash('sha256').update(dir).digest('hex').slice(0, 12)
+  return process.platform === 'win32' ? `\\\\.\\pipe\\atrium-test-${tag}` : join(dir, 'a.sock')
+}
+
 export function serviceOptions(dir, core, extra = {}) {
-  return { core, binDir: join(import.meta.dirname, '..', '..', 'bin'), socket: join(dir, 'a.sock'), cli: 'atrium', userTemplates: join(dir, 'user-templates'), graceMs: 60_000, tickMs: 3_600_000, ...extra }
+  return { core, binDir: join(import.meta.dirname, '..', '..', 'bin'), socket: testSocket(dir), cli: 'atrium', userTemplates: join(dir, 'user-templates'), graceMs: 60_000, tickMs: 3_600_000, ...extra }
 }
 
 export async function setup({ settings, graceMs } = {}) {

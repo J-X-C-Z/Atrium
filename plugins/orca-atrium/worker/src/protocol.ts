@@ -138,7 +138,7 @@ export interface TemplateSummary {
   source: 'builtin' | 'user' | 'project'
   path?: string
   steps: number
-  inputs: { id: string; label: string; kind: string; required: boolean; default?: string }[]
+  inputs: { id: string; label: string; kind: string; required: boolean; default?: string; options?: string[] }[]
   error?: string
 }
 
@@ -171,6 +171,8 @@ export interface StepView {
   prompt?: string
   /** Steps this one may send work back to (gates / reviews). */
   sendBack?: string[]
+  /** Gate choices when waiting for a decision. */
+  choices?: { id: string; label: string }[]
   terminalId?: string
 }
 

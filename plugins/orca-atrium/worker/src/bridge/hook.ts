@@ -67,6 +67,7 @@ export class LaunchHook {
     const env: Record<string, string> = {
       ...(event.env ?? {}),
       ...ours.env,
+      ATRIUM_NODE: process.execPath,
       PATH: path ? `${this.binDir}${delimiter}${path}` : this.binDir
     }
     return next({ ...event, env })

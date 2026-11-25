@@ -72,7 +72,7 @@ Folder limit: 2,000 files, 50 MiB — do not commit `node_modules`.
 - `contributes.events`: `agent.status.changed`, `workspace.changed`.
 - `contributes.hooks`: `agent.launch.before` (put `atrium` on PATH, tag env),
   `workspace.create.after`.
-- `contributes.statusBarItems`: `atrium.needs` — "n need you · m running".
+- `contributes.statusBarItems`: `needs` — "n need you · m running".
 - `contributes.commands`: Open Atrium, New project here, Start workflow…, Open board.
 - `contributes.settings`: language (`auto|zh|en`), default agent, max parallel agents,
   autopilot default.
@@ -80,7 +80,10 @@ Folder limit: 2,000 files, 50 MiB — do not commit `node_modules`.
 ## Core (wasm) — `crates/atrium-orca-core`
 
 Target `wasm32-wasip1`, `crate-type = ["cdylib"]`. Loaded in the worker with
-`node:wasi` (preopen the project roots and the Atrium config dir). ABI:
+`node:wasi` (preopens the root directory `/` via `{ '/': '/' }`, because
+`wasi-libc` resolves absolute paths from the root folder and the core's file
+checks and run folders rely on ordinary absolute paths; the core only touches
+paths the worker passes to it). ABI:
 
 ```
 alloc(len) -> ptr ; dealloc(ptr,len)

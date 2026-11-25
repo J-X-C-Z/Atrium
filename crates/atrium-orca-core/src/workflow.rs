@@ -407,7 +407,7 @@ pub fn template_validate(args: ValidateArgs) -> Result<Value, String> {
     Ok(json!({
         "errors": [],
         "warnings": warnings.iter().map(|w| json!({"message": w})).collect::<Vec<_>>(),
-        "steps": step_views(&run, lang),
+        "steps": step_views(None, &run, lang),
     }))
 }
 
@@ -715,7 +715,7 @@ fn attempt_view(n: usize, a: &Attempt, last: bool, sent_back: bool) -> Value {
 
 /// `StepView`s of the run's template steps (items nested in their step).
 /// `lang` renders the prompts.
-fn step_views(run: &Run, lang: Lang) -> Vec<Value> {
+fn step_views(dir: Option<&Path>, run: &Run, lang: Lang) -> Vec<Value> {
     let mut out = Vec::new();
     for (ix, spec) in run.template.steps.iter().enumerate() {
         let Some(step) = run.step(&spec.id) else {
@@ -759,6 +759,12 @@ fn step_views(run: &Run, lang: Lang) -> Vec<Value> {
         }
         if !spec.fixes.is_empty() {
             v["sendBack"] = json!(spec.fixes);
+        }
+        if step.status == StepStatus::Review
+            && let Some(dir) = dir
+        {
+            let (choices, _) = review_choices(dir, run, &spec.id, lang);
+            v["choices"] = json!(choices);
         }
         if !spec.summary.is_empty() {
             v["summary"] = json!(spec.summary);
@@ -841,7 +847,7 @@ pub fn run_load(args: DirArgs) -> Result<Value, String> {
         "updatedAt": run.updated_ms,
         "progress": { "done": done, "total": total },
         "inputs": run.inputs,
-        "steps": step_views(&run, lang),
+        "steps": step_views(Some(&args.dir), &run, lang),
         "decisions": decisions_view(&args.dir, &run),
         "experience": notes_of(run.experience.as_deref().unwrap_or("")),
     });
@@ -918,6 +924,35 @@ fn short(text: &str, max: usize) -> String {
     cut
 }
 
+fn review_choices(dir: &Path, run: &Run, id: &str, lang: Lang) -> (Vec<Value>, Vec<Choice>) {
+    let zh = lang == Lang::Zh;
+    let spec = run.spec(id).expect("a spec of the step");
+    if spec.decide.is_some() {
+        let options = run
+            .options_file(id)
+            .and_then(|file| {
+                atrium_workflow::files::read_text(
+                    dir,
+                    file,
+                    atrium_workflow::files::DEFAULT_BYTE_CAP,
+                )
+                .ok()
+            })
+            .map(|text| read_choices(&text))
+            .unwrap_or_default();
+        let choices = options
+            .iter()
+            .map(|o| json!({"id": o.id, "label": o.title}))
+            .collect();
+        (choices, options)
+    } else {
+        (
+            vec![json!({"id": "approve", "label": if zh {"通过"} else {"Approve"}})],
+            Vec::new(),
+        )
+    }
+}
+
 fn gate_for(run: &Run, id: &str, dir: &Path, lang: Lang) -> Value {
     let zh = lang == Lang::Zh;
     let step = run.step(id).expect("a step of the run");
@@ -926,7 +961,6 @@ fn gate_for(run: &Run, id: &str, dir: &Path, lang: Lang) -> Value {
     let failed = step.status == StepStatus::Failed;
     let mut detail = String::new();
     let mut choices: Vec<Value> = Vec::new();
-    let mut options: Vec<Choice> = Vec::new();
     if failed {
         if let Some(last) = step.last() {
             let faults: Vec<String> = last
@@ -951,19 +985,9 @@ fn gate_for(run: &Run, id: &str, dir: &Path, lang: Lang) -> Value {
         if let Some(answer) = run.answer_of(id) {
             detail = short(answer, 1200);
         }
-        if let Some(file) = run.options_file(id) {
-            let text = atrium_workflow::files::read_text(
-                dir,
-                file,
-                atrium_workflow::files::DEFAULT_BYTE_CAP,
-            )
-            .unwrap_or_default();
-            options = read_choices(&text);
-        }
+        let (c, options) = review_choices(dir, run, id, lang);
+        choices = c;
         if spec.decide.is_some() {
-            for o in &options {
-                choices.push(json!({"id": o.id, "label": o.title}));
-            }
             let list: Vec<String> = options
                 .iter()
                 .map(|o| {
@@ -978,8 +1002,6 @@ fn gate_for(run: &Run, id: &str, dir: &Path, lang: Lang) -> Value {
             detail = format!("{question}\n{}\n\n{detail}", list.join("\n"))
                 .trim()
                 .to_string();
-        } else {
-            choices.push(json!({"id": "approve", "label": if zh {"通过"} else {"Approve"}}));
         }
     }
     // Where it may send work back to: its own fixes, then what is done before it.
@@ -1699,5 +1721,65 @@ fixes = "outline"
             "the problem-picking step is skipped"
         );
         assert!(launch["prompt"].as_str().unwrap().contains("inputs/A.pdf"));
+    }
+
+    #[test]
+    fn gate_step_load_returns_custom_choices() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("run");
+        let tpl = r#"
+id = "route"
+name = "Route"
+
+[[steps]]
+id = "pick"
+title = "Pick"
+prompt = "Propose routes."
+
+[steps.decide]
+options = "routes.json"
+question = "Which route?"
+
+[[steps]]
+id = "build"
+title = "Build"
+needs = ["pick"]
+prompt = "Build {{step.pick.choice}}."
+"#;
+        call(
+            "workflow.run.start",
+            json!({ "template": "route", "text": tpl, "inputs": {}, "dir": dir }),
+        );
+        let _ = one(&dir, "launch");
+        fs::write(
+            dir.join("routes.json"),
+            r#"[{"id":"fast","title":"Fast route","summary":"Quick"},{"id":"safe","title":"Safe route"}]"#,
+        )
+        .unwrap();
+        call(
+            "workflow.run.report",
+            json!({ "dir": dir, "step": "pick", "answer": "Two routes." }),
+        );
+        let gate = one(&dir, "gate");
+        assert_eq!(gate["step"], "pick");
+        let view = call("workflow.run.load", json!({ "dir": dir }));
+        assert_eq!(view["steps"][0]["status"], "waiting");
+        assert_eq!(
+            view["steps"][0]["choices"],
+            json!([
+                {"id": "fast", "label": "Fast route"},
+                {"id": "safe", "label": "Safe route"}
+            ])
+        );
+        let err = dispatch(
+            "workflow.run.decide",
+            json!({ "dir": dir, "step": "pick", "choice": "approve" }),
+        );
+        assert!(err.is_err(), "expected approve to be rejected: {err:?}");
+        call(
+            "workflow.run.decide",
+            json!({ "dir": dir, "step": "pick", "choice": "safe" }),
+        );
+        assert_eq!(one(&dir, "launch")["step"], "build");
     }
 }

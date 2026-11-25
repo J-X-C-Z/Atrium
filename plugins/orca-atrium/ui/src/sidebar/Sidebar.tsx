@@ -469,7 +469,13 @@ function StartRun({ onClose }: { onClose: () => void }) {
             {cur.description && <p class="muted" style={{ fontSize: 'var(--fs-sm)' }}>{cur.description}</p>}
             {cur.inputs.map((i) => (
               <Field key={i.id} label={i.label + (i.required ? ' *' : '')}>
-                {i.kind === 'long' ? <TextArea value={vals[i.id] ?? i.default ?? ''} onInput={(v) => setVals({ ...vals, [i.id]: v })} rows={3} /> : <TextInput value={vals[i.id] ?? i.default ?? ''} onInput={(v) => setVals({ ...vals, [i.id]: v })} />}
+                {i.options?.length ? (
+                  <Select value={vals[i.id] ?? i.default ?? i.options[0]} onChange={(v) => setVals({ ...vals, [i.id]: v })} options={i.options.map((o) => ({ value: o, label: o }))} label={i.label} />
+                ) : i.kind === 'long' ? (
+                  <TextArea value={vals[i.id] ?? i.default ?? ''} onInput={(v) => setVals({ ...vals, [i.id]: v })} rows={3} />
+                ) : (
+                  <TextInput value={vals[i.id] ?? i.default ?? ''} onInput={(v) => setVals({ ...vals, [i.id]: v })} />
+                )}
               </Field>
             ))}
             <div class="row" style={{ justifyContent: 'flex-end' }}>

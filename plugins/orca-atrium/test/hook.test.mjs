@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { delimiter, join } from 'node:path'
 import { until } from './helpers/fake-host.mjs'
-import { setup } from './helpers/setup.mjs'
+import { setup, testSocket } from './helpers/setup.mjs'
 
 test('only launches the worker started get the CLI on PATH and the ATRIUM env', async () => {
   const { host, dir, service } = await setup()
@@ -21,7 +21,7 @@ test('only launches the worker started get the CLI on PATH and the ATRIUM env', 
     assert.equal(launch.hooked, true)
     assert.equal(launch.env.PATH.split(delimiter)[0], join(import.meta.dirname, '..', 'bin'))
     assert.ok(launch.env.PATH.endsWith('/usr/bin:/bin'))
-    assert.equal(launch.env.ATRIUM_SOCKET, join(dir, 'a.sock'))
+    assert.equal(launch.env.ATRIUM_SOCKET, testSocket(dir))
     assert.equal(launch.env.ATRIUM_RUN, runDir)
     assert.ok(launch.env.ATRIUM_TOKEN.length > 10)
     assert.ok(launch.env.ATRIUM_LAUNCH)
@@ -38,7 +38,7 @@ test('only launches the worker started get the CLI on PATH and the ATRIUM env', 
     assert.equal(bad.code, 0)
     const noToken = await new Promise((resolve) => {
       import('node:child_process').then(({ execFile }) =>
-        execFile(process.execPath, [join(import.meta.dirname, '..', 'bin', 'atrium'), 'status'], { env: { ...process.env, ATRIUM_SOCKET: join(dir, 'a.sock'), ATRIUM_TOKEN: 'nope' } }, (e, out, err) => resolve({ code: e?.code ?? 0, err }))
+        execFile(process.execPath, [join(import.meta.dirname, '..', 'bin', 'atrium'), 'status'], { env: { ...process.env, ATRIUM_SOCKET: testSocket(dir), ATRIUM_TOKEN: 'nope' } }, (e, out, err) => resolve({ code: e?.code ?? 0, err }))
       )
     })
     assert.equal(noToken.code, 1)

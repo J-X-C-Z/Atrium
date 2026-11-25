@@ -123,3 +123,65 @@ test('autopilot on the real core starts a lead for the controller\'s task and ma
     await service.dispose()
   }
 })
+
+test('run.get returns custom gate choices and templates.list includes input options', { skip: !existsSync(wasm) && 'core not built' }, async () => {
+  const dir = workspace()
+  const host = new FakeHost({ workspacePath: dir })
+  const core = await Core.load(wasm, ROOT)
+  const templates = join(dir, 'user-templates')
+  mkdirSync(templates, { recursive: true })
+  writeFileSync(
+    join(templates, 'choice.toml'),
+    `
+id = "choice"
+name = "Choice"
+
+[[inputs]]
+key = "mode"
+label = "Mode"
+kind = "choice"
+required = true
+options = ["fast", "thorough"]
+
+[[steps]]
+id = "pick"
+title = "Pick"
+prompt = "Propose modes for {{input.mode}}."
+
+[steps.decide]
+options = "modes.json"
+question = "Which mode?"
+
+[[steps]]
+id = "finish"
+title = "Finish"
+needs = ["pick"]
+prompt = "Finish."
+`,
+  )
+  const service = await Service.create(host, serviceOptions(dir, core))
+  try {
+    const list = await host.request('templates.list')
+    const tpl = list.find((t) => t.id === 'choice')
+    assert.ok(tpl)
+    assert.deepEqual(tpl.inputs[0].options, ['fast', 'thorough'])
+
+    const { dir: runDir } = await host.request('run.start', { templateId: 'choice', inputs: { mode: 'fast' } })
+    await until(() => host.launches.length === 1, 5000, 'launch')
+    writeFileSync(join(runDir, 'modes.json'), JSON.stringify([{ id: 'alpha', title: 'Alpha' }, { id: 'beta', title: 'Beta' }]))
+    await host.status_('t1', 'working')
+    await host.atrium('t1', ['report', 'Ready to pick.'])
+    await until(async () => (await host.request('overview.get')).needs.find((n) => n.kind === 'gate'), 5000, 'gate')
+
+    const view = await host.request('run.get', { dir: runDir })
+    assert.deepEqual(view.steps[0].choices, [
+      { id: 'alpha', label: 'Alpha' },
+      { id: 'beta', label: 'Beta' },
+    ])
+    await host.request('run.decide', { dir: runDir, step: 'pick', choice: 'beta' })
+    await until(() => host.launches.length === 2, 5000, 'second launch')
+    assert.equal(host.launches[1].env.ATRIUM_STEP, 'finish')
+  } finally {
+    await service.dispose()
+  }
+})

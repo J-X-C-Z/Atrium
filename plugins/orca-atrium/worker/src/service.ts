@@ -238,7 +238,8 @@ export class Service {
         label: String(i.label ?? i.id ?? i.name ?? ''),
         kind: String(i.kind ?? i.type ?? 'text'),
         required: i.required === true,
-        ...(i.default !== undefined && i.default !== null ? { default: String(i.default) } : {})
+        ...(i.default !== undefined && i.default !== null ? { default: String(i.default) } : {}),
+        ...(Array.isArray(i.options) && i.options.length ? { options: i.options.map(String) } : {})
       })),
       ...(t.error ? { error: String(t.error) } : {})
     }))
