@@ -17,7 +17,8 @@ const P: Record<string, string> = {
   minus: 'M3 8h10',
   terminal: 'M2.5 3.5h11v9h-11Z M5 6.5l2 1.6-2 1.6 M8.5 10h2.5',
   message: 'M2.5 3.5h11v7.5H7l-3 2.5V11H2.5Z',
-  nudge: 'M8 2.5v5.5 M5.5 5.5 8 8l2.5-2.5 M3 10.5c0 2 2.2 3 5 3s5-1 5-3',
+  // bell
+  nudge: 'M4 11.5V7.2a4 4 0 0 1 8 0v4.3l1 1H3Z M6.6 14a1.5 1.5 0 0 0 2.8 0',
   diamond: 'M8 1.8 14.2 8 8 14.2 1.8 8Z',
   grid: 'M2.5 2.5h4.5v4.5H2.5Z M9 2.5h4.5v4.5H9Z M2.5 9h4.5v4.5H2.5Z M9 9h4.5v4.5H9Z',
   clock: 'M8 2a6 6 0 1 0 0 12A6 6 0 0 0 8 2Z M8 4.8V8l2.2 1.6',

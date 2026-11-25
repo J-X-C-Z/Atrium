@@ -366,7 +366,7 @@ function nudgeText(lang, kind) {
   return kind === "step" ? 'Reminder: you have not reported yet. If this step is done, run atrium report "<summary>"; if not, please carry on.' : 'Reminder: if your current task is done, run atrium task done <id> "<result>"; if it is blocked, atrium task blocked <id> "<why>"; otherwise please carry on.';
 }
 function standInNote(lang, member, original) {
-  return lang === "zh" ? `\u3010Atrium\u3011${original} \u7684\u7528\u91CF\u5DF2\u5230\u4E0A\u9650\uFF0C\u7531\u4F60\uFF08${member}\uFF09\u6682\u65F6\u9876\u66FF\u3002\u8BF7\u63A5\u7740\u5B83\u7684\u5DE5\u4F5C\u7EE7\u7EED\uFF0C\u5148\u770B\u770B\u6587\u4EF6\u91CC\u5DF2\u6709\u7684\u8FDB\u5C55\u3002
+  return lang === "zh" ? `\u3010Atrium\u3011${original} \u7684\u7528\u91CF\u5DF2\u5230\u4E0A\u9650\uFF0C\u7531\u4F60\uFF08${member}\uFF09\u4F5C\u4E3A\u66FF\u8865\u6682\u65F6\u63A5\u624B\u3002\u8BF7\u63A5\u7740\u5B83\u7684\u5DE5\u4F5C\u7EE7\u7EED\uFF0C\u5148\u770B\u770B\u6587\u4EF6\u91CC\u5DF2\u6709\u7684\u8FDB\u5C55\u3002
 
 ` : `[Atrium] ${original} hit a usage limit; you (${member}) are standing in. Continue its work; first look at the progress already in the files.
 
@@ -395,10 +395,10 @@ function statusText(lang, n, m) {
 }
 var T = {
   stalled: (lang, what) => lang === "zh" ? `${what} \u505C\u4E0B\u4E86\uFF0C\u6CA1\u6709\u62A5\u544A` : `${what} stopped without reporting`,
-  blocked: (lang, what) => lang === "zh" ? `${what} \u5728\u7B49\u5F85\u6279\u51C6` : `${what} is waiting for approval`,
+  blocked: (lang, what) => lang === "zh" ? `${what} \u9700\u8981\u4F60\u6279\u51C6` : `${what} is waiting for approval`,
   question: (lang, what) => lang === "zh" ? `${what} \u6709\u95EE\u9898\u8981\u95EE\u4F60` : `${what} has a question`,
   gate: (lang, what) => lang === "zh" ? `${what} \u7B49\u4F60\u51B3\u5B9A` : `${what} needs your decision`,
-  quota: (lang, member, standIn) => lang === "zh" ? standIn ? `${member} \u7528\u91CF\u5230\u4E0A\u9650\uFF0C${standIn} \u9876\u66FF` : `${member} \u7528\u91CF\u5230\u4E0A\u9650\uFF0C\u6CA1\u6709\u53EF\u9876\u66FF\u7684\u6210\u5458` : standIn ? `${member} hit its limit; ${standIn} stands in` : `${member} hit its limit; no stand-in is free`,
+  quota: (lang, member, standIn) => lang === "zh" ? standIn ? `${member} \u5DF2\u8FBE\u7528\u91CF\u4E0A\u9650\uFF0C\u66FF\u8865 ${standIn} \u63A5\u624B` : `${member} \u5DF2\u8FBE\u7528\u91CF\u4E0A\u9650\uFF0C\u6CA1\u6709\u53EF\u7528\u7684\u66FF\u8865` : standIn ? `${member} hit its limit; ${standIn} stands in` : `${member} hit its limit; no stand-in is free`,
   error: (lang, what) => lang === "zh" ? `${what} \u51FA\u9519\u4E86` : `${what} failed`,
   noWorkspace: (lang) => lang === "zh" ? "\u8BF7\u5148\u5728 Orca \u4E2D\u6253\u5F00\u4E00\u4E2A\u5DE5\u4F5C\u533A\u3002" : "Open a workspace in Orca first.",
   openHint: (lang) => lang === "zh" ? "Atrium \u5728\u53F3\u4FA7\u8FB9\u680F\uFF08\u56FE\u5C42\u56FE\u6807\uFF09\u3002" : "Atrium is in the right sidebar (the layers icon).",

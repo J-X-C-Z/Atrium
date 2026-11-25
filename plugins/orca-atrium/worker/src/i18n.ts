@@ -89,7 +89,7 @@ export function nudgeText(lang: Lang, kind: 'step' | 'role'): string {
 
 export function standInNote(lang: Lang, member: string, original: string): string {
   return lang === 'zh'
-    ? `【Atrium】${original} 的用量已到上限，由你（${member}）暂时顶替。请接着它的工作继续，先看看文件里已有的进展。\n\n`
+    ? `【Atrium】${original} 的用量已到上限，由你（${member}）作为替补暂时接手。请接着它的工作继续，先看看文件里已有的进展。\n\n`
     : `[Atrium] ${original} hit a usage limit; you (${member}) are standing in. Continue its work; first look at the progress already in the files.\n\n`
 }
 
@@ -119,14 +119,14 @@ export function statusText(lang: Lang, n: number, m: number): string {
 
 export const T = {
   stalled: (lang: Lang, what: string) => (lang === 'zh' ? `${what} 停下了，没有报告` : `${what} stopped without reporting`),
-  blocked: (lang: Lang, what: string) => (lang === 'zh' ? `${what} 在等待批准` : `${what} is waiting for approval`),
+  blocked: (lang: Lang, what: string) => (lang === 'zh' ? `${what} 需要你批准` : `${what} is waiting for approval`),
   question: (lang: Lang, what: string) => (lang === 'zh' ? `${what} 有问题要问你` : `${what} has a question`),
   gate: (lang: Lang, what: string) => (lang === 'zh' ? `${what} 等你决定` : `${what} needs your decision`),
   quota: (lang: Lang, member: string, standIn?: string) =>
     lang === 'zh'
       ? standIn
-        ? `${member} 用量到上限，${standIn} 顶替`
-        : `${member} 用量到上限，没有可顶替的成员`
+        ? `${member} 已达用量上限，替补 ${standIn} 接手`
+        : `${member} 已达用量上限，没有可用的替补`
       : standIn
         ? `${member} hit its limit; ${standIn} stands in`
         : `${member} hit its limit; no stand-in is free`,
