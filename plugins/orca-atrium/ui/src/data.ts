@@ -1,7 +1,7 @@
 // Fetch-and-follow: load a resource, refetch when the worker posts a matching change.
 import { useCallback, useEffect, useRef, useState } from 'preact/hooks'
 import type { PostName, Posts } from '../../worker/src/protocol'
-import { onPost } from './orca'
+import { onPost, orcaDocument, request } from './orca'
 
 export type Resource<T> = { status: 'loading' } | { status: 'error'; error: string } | { status: 'ready'; data: T; refreshing: boolean }
 
@@ -57,4 +57,43 @@ export function useTick(ms = 30000) {
     const id = window.setInterval(() => set((n) => n + 1), ms)
     return () => window.clearInterval(id)
   }, [ms])
+}
+
+/** The link file an editor was opened on (`{ "project": … }` or `{ "run": … }`), parsed by the worker. */
+export type Link = { kind: 'board'; root: string } | { kind: 'run'; dir: string }
+
+export function useLink(): { status: 'loading' } | { status: 'error'; error: string } | { status: 'ready'; link: Link } {
+  const [state, setState] = useState<ReturnType<typeof useLink>>({ status: 'loading' })
+  useEffect(() => {
+    const doc = orcaDocument()
+    if (!doc) {
+      setState({ status: 'error', error: 'document API missing' })
+      return
+    }
+    let dead = false
+    const read = async (text: string) => {
+      try {
+        const link = (await request('link.read', { text })) as Link
+        if (!dead) setState({ status: 'ready', link })
+      } catch (err) {
+        if (!dead) setState({ status: 'error', error: (err as Error).message })
+      }
+    }
+    doc.get().then(
+      (d) => {
+        if (d.content.kind === 'text') read(d.content.text)
+      },
+      (e) => {
+        if (!dead) setState({ status: 'error', error: String(e?.message ?? e) })
+      },
+    )
+    const sub = doc.onDidChange((d) => {
+      if (d.content.kind === 'text') read(d.content.text)
+    })
+    return () => {
+      dead = true
+      sub?.dispose()
+    }
+  }, [])
+  return state
 }

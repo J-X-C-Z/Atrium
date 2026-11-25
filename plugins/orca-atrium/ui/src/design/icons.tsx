@@ -14,6 +14,7 @@ const P: Record<string, string> = {
   pause: 'M5.5 3.5v9 M10.5 3.5v9',
   stop: 'M4 4h8v8H4Z',
   plus: 'M8 3v10 M3 8h10',
+  minus: 'M3 8h10',
   terminal: 'M2.5 3.5h11v9h-11Z M5 6.5l2 1.6-2 1.6 M8.5 10h2.5',
   message: 'M2.5 3.5h11v7.5H7l-3 2.5V11H2.5Z',
   nudge: 'M8 2.5v5.5 M5.5 5.5 8 8l2.5-2.5 M3 10.5c0 2 2.2 3 5 3s5-1 5-3',

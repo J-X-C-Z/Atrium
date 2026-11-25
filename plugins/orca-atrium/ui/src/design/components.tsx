@@ -59,7 +59,7 @@ type ButtonProps = {
   children?: ComponentChildren
 } & Omit<JSX.HTMLAttributes<HTMLButtonElement>, 'size' | 'icon'>
 
-export function Button({ variant = 'secondary', size = 'md', icon, iconRight, loading, children, class: cls, disabled, ...rest }: ButtonProps & { disabled?: boolean; type?: string }) {
+export function Button({ variant = 'secondary', size = 'md', icon, iconRight, loading, children, class: cls, disabled, ...rest }: ButtonProps & { disabled?: boolean }) {
   return (
     <button
       type="button"
@@ -465,12 +465,12 @@ export function Field({ label, hint, error, children, inline }: { label: string;
   )
 }
 
-export function TextInput({ value, onInput, placeholder, mono, invalid, ...rest }: { value: string; onInput: (v: string) => void; placeholder?: string; mono?: boolean; invalid?: boolean } & Omit<JSX.HTMLAttributes<HTMLInputElement>, 'onInput' | 'value'>) {
-  return <input class={cx('input', mono && 'mono', invalid && 'is-invalid')} value={value} placeholder={placeholder} onInput={(e) => onInput((e.target as HTMLInputElement).value)} aria-invalid={invalid || undefined} {...rest} />
+export function TextInput({ value, onInput, placeholder, mono, invalid, class: cls, ...rest }: { value: string; onInput: (v: string) => void; placeholder?: string; mono?: boolean; invalid?: boolean; disabled?: boolean } & Omit<JSX.HTMLAttributes<HTMLInputElement>, 'onInput' | 'value'>) {
+  return <input class={cx('input', mono && 'mono', invalid && 'is-invalid', cls as string)} value={value} placeholder={placeholder} onInput={(e) => onInput((e.target as HTMLInputElement).value)} aria-invalid={invalid || undefined} {...rest} />
 }
 
-export function TextArea({ value, onInput, placeholder, rows = 3, mono, ...rest }: { value: string; onInput: (v: string) => void; placeholder?: string; rows?: number; mono?: boolean } & Omit<JSX.HTMLAttributes<HTMLTextAreaElement>, 'onInput' | 'value' | 'rows'>) {
-  return <textarea class={cx('input', 'textarea', mono && 'mono')} rows={rows} value={value} placeholder={placeholder} onInput={(e) => onInput((e.target as HTMLTextAreaElement).value)} {...rest} />
+export function TextArea({ value, onInput, placeholder, rows = 3, mono, class: cls, ...rest }: { value: string; onInput: (v: string) => void; placeholder?: string; rows?: number; mono?: boolean; disabled?: boolean } & Omit<JSX.HTMLAttributes<HTMLTextAreaElement>, 'onInput' | 'value' | 'rows'>) {
+  return <textarea class={cx('input', 'textarea', mono && 'mono', cls as string)} rows={rows} value={value} placeholder={placeholder} onInput={(e) => onInput((e.target as HTMLTextAreaElement).value)} {...rest} />
 }
 
 export function Select({ value, onChange, options, label }: { value: string; onChange: (v: string) => void; options: { value: string; label: string }[]; label?: string }) {

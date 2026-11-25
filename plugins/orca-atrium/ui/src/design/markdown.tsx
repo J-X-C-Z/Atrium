@@ -86,7 +86,7 @@ export function Markdown({ text, class: cls }: { text: string; class?: string })
       i++
       continue
     }
-    if (/^\s*([-*_])\s*\1\s*\1[\s\1]*$/.test(line)) {
+    if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) {
       blocks.push(<hr key={key++} />)
       i++
       continue

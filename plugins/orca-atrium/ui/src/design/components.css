@@ -51,6 +51,7 @@
 }
 .chip.tone-neutral, .chip.tone-idle { color: var(--a-muted-fg); }
 .chip-solid { background: var(--tone); color: var(--a-bg); }
+.chip-solid .chip-dot { background: currentColor; }
 .chip-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--tone, currentColor); flex: none; }
 .chip-label { line-height: 1; }
 .tag {
